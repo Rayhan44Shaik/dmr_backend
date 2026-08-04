@@ -3,13 +3,20 @@ import { AppError } from "../middleware/errorHandler.js";
 import type { ShopRate } from "../types/operations.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
 import {
-  approvalFields,
   assertOpsStatus,
   parseBody,
   shopRateBodySchema,
 } from "../validation/operations.js";
 
-function mapShopRate(row: Record<string, unknown>): ShopRate {
+function mapRate(row: Record<string, unknown>): ShopRate {
+  const tripStatus = str(row.trip_status || "Completed");
+  const deleted = Boolean(row.trip_deleted);
+  let status: ShopRate["status"] = "Approved";
+  if (deleted || tripStatus === "Deleted") status = "Deleted";
+  else if (tripStatus === "Pending") status = "Pending Approval";
+  else if (tripStatus === "Draft") status = "Draft";
+  else if (tripStatus === "Completed") status = "Approved";
+
   return {
     id: num(row.id),
     shopId: row.shop_id == null ? null : num(row.shop_id),
@@ -17,93 +24,119 @@ function mapShopRate(row: Record<string, unknown>): ShopRate {
     birdTypeId: row.bird_type_id == null ? null : num(row.bird_type_id),
     birdType: str(row.bird_type),
     rate: num(row.rate),
-    effectiveFrom: dateOnly(row.effective_from) ?? "",
-    effectiveTo: dateOnly(row.effective_to),
+    effectiveFrom: dateOnly(row.effective_from) ?? dateOnly(row.trip_date) ?? "",
+    effectiveTo: null,
     remarks: str(row.remarks),
-    status: str(row.status) as ShopRate["status"],
-    deleted: Boolean(row.deleted),
-    deletedReason: row.deleted_reason == null ? null : str(row.deleted_reason),
-    approvedBy: row.approved_by == null ? null : str(row.approved_by),
-    approvedAt: row.approved_at == null ? null : str(row.approved_at),
-    rejectedBy: row.rejected_by == null ? null : str(row.rejected_by),
-    rejectedAt: row.rejected_at == null ? null : str(row.rejected_at),
-    rejectedReason: row.rejected_reason == null ? null : str(row.rejected_reason),
-    createdBy: str(row.created_by),
+    status,
+    deleted,
     createdAt: row.created_at == null ? null : str(row.created_at),
     updatedAt: row.updated_at == null ? null : str(row.updated_at),
   };
 }
 
+/**
+ * Shop rates derived from trip_deliveries historical rates.
+ * No shop_rates table.
+ */
 export const shopRatesService = {
   async list(filters: {
     shopId?: number;
     status?: string;
     includeDeleted?: boolean;
   } = {}) {
-    const clauses: string[] = [];
+    const clauses: string[] = [`d.rate IS NOT NULL`];
     const params: unknown[] = [];
-    if (!filters.includeDeleted) clauses.push(`deleted = FALSE`);
+
+    if (!filters.includeDeleted) {
+      clauses.push(`COALESCE(t.deleted, FALSE) = FALSE`);
+      clauses.push(`t.status <> 'Deleted'`);
+    }
     if (filters.shopId) {
       params.push(filters.shopId);
-      clauses.push(`shop_id = $${params.length}`);
+      clauses.push(`d.shop_id = $${params.length}`);
     }
-    if (filters.status) {
-      params.push(filters.status);
-      clauses.push(`status = $${params.length}`);
+    if (filters.status === "Approved") clauses.push(`t.status = 'Completed'`);
+    else if (filters.status === "Pending Approval") clauses.push(`t.status = 'Pending'`);
+    else if (filters.status === "Draft") clauses.push(`t.status = 'Draft'`);
+    else if (filters.status === "Deleted") {
+      clauses.push(`(t.status = 'Deleted' OR t.deleted = TRUE)`);
     }
-    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+    const where = `WHERE ${clauses.join(" AND ")}`;
     const result = await query(
-      `SELECT * FROM shop_rates ${where} ORDER BY effective_from DESC, id DESC`,
+      `SELECT DISTINCT ON (d.shop_id, d.bird_type_id, d.rate)
+         d.id, d.shop_id, d.shop_name, d.bird_type_id, d.bird_type, d.rate,
+         d.remarks, d.created_at, d.updated_at,
+         t.trip_date AS effective_from, t.trip_date, t.status AS trip_status,
+         t.deleted AS trip_deleted
+       FROM trip_deliveries d
+       INNER JOIN trips t ON t.id = d.trip_id
+       ${where}
+       ORDER BY d.shop_id, d.bird_type_id, d.rate, t.trip_date DESC, d.id DESC`,
       params
     );
-    return result.rows.map(mapShopRate);
+    return result.rows.map(mapRate);
   },
 
   async getById(id: number) {
-    const result = await query(`SELECT * FROM shop_rates WHERE id = $1`, [id]);
+    const result = await query(
+      `SELECT d.id, d.shop_id, d.shop_name, d.bird_type_id, d.bird_type, d.rate,
+              d.remarks, d.created_at, d.updated_at,
+              t.trip_date AS effective_from, t.trip_date, t.status AS trip_status,
+              t.deleted AS trip_deleted
+       FROM trip_deliveries d
+       INNER JOIN trips t ON t.id = d.trip_id
+       WHERE d.id = $1`,
+      [id]
+    );
     if (!result.rowCount) throw new AppError(404, "Shop rate not found");
-    return mapShopRate(result.rows[0]);
+    return mapRate(result.rows[0]);
   },
 
   async create(body: unknown) {
     const data = parseBody(shopRateBodySchema, body);
-    const result = await query(
-      `INSERT INTO shop_rates (
-         shop_id, shop_name, bird_type_id, bird_type, rate,
-         effective_from, effective_to, remarks, status, created_by
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    // Apply rate onto latest matching completed/pending delivery for the shop, or require an open trip
+    const trip = await query(
+      `SELECT id FROM trips
+       WHERE COALESCE(deleted, FALSE) = FALSE
+         AND status IN ('Draft', 'Pending', 'Completed')
+       ORDER BY trip_date DESC, id DESC
+       LIMIT 1`
+    );
+    if (!trip.rowCount) {
+      throw new AppError(400, "No active trip available to attach shop rate (uses trip_deliveries)");
+    }
+    const tripId = num(trip.rows[0].id);
+    const inserted = await query(
+      `INSERT INTO trip_deliveries (
+         trip_id, shop_id, shop_name, bird_type_id, bird_type, rate, amount, remarks, birds, weight
+       ) VALUES ($1,$2,$3,$4,$5,$6,0,$7,0,0)
+       RETURNING id`,
       [
+        tripId,
         data.shopId ?? null,
         data.shopName ?? "",
         data.birdTypeId ?? null,
         data.birdType ?? "",
         data.rate,
-        data.effectiveFrom,
-        data.effectiveTo ?? null,
-        data.remarks ?? "",
-        data.status ?? "Draft",
-        data.createdBy ?? "",
+        data.remarks ?? `Rate effective ${data.effectiveFrom}`,
       ]
     );
-    return mapShopRate(result.rows[0]);
+    return this.getById(num(inserted.rows[0].id));
   },
 
   async update(id: number, body: unknown) {
     const data = parseBody(shopRateBodySchema.partial(), body);
     const result = await query(
-      `UPDATE shop_rates SET
+      `UPDATE trip_deliveries SET
          shop_id = COALESCE($2, shop_id),
          shop_name = COALESCE($3, shop_name),
          bird_type_id = COALESCE($4, bird_type_id),
          bird_type = COALESCE($5, bird_type),
          rate = COALESCE($6, rate),
-         effective_from = COALESCE($7, effective_from),
-         effective_to = COALESCE($8, effective_to),
-         remarks = COALESCE($9, remarks),
-         status = COALESCE($10, status),
-         created_by = COALESCE($11, created_by)
-       WHERE id = $1 AND deleted = FALSE
-       RETURNING *`,
+         remarks = COALESCE($7, remarks)
+       WHERE id = $1
+       RETURNING id`,
       [
         id,
         data.shopId ?? null,
@@ -111,54 +144,42 @@ export const shopRatesService = {
         data.birdTypeId ?? null,
         data.birdType ?? null,
         data.rate ?? null,
-        data.effectiveFrom ?? null,
-        data.effectiveTo ?? null,
         data.remarks ?? null,
-        data.status ?? null,
-        data.createdBy ?? null,
       ]
     );
     if (!result.rowCount) throw new AppError(404, "Shop rate not found");
-    return mapShopRate(result.rows[0]);
+    return this.getById(id);
   },
 
   async updateStatus(id: number, body: unknown) {
     const status = String((body as { status?: string })?.status ?? "");
     assertOpsStatus(status);
-    const patch = body as {
-      approvedBy?: string;
-      rejectedBy?: string;
-      rejectedReason?: string;
-      reason?: string;
-    };
-    const fields = approvalFields(status, patch);
-
-    const result = await query(
-      `UPDATE shop_rates SET
-         status = $2,
-         approved_by = COALESCE($3, approved_by),
-         approved_at = COALESCE($4, approved_at),
-         rejected_by = COALESCE($5, rejected_by),
-         rejected_at = COALESCE($6, rejected_at),
-         rejected_reason = COALESCE($7, rejected_reason),
-         deleted = COALESCE($8, deleted),
-         deleted_reason = COALESCE($9, deleted_reason)
-       WHERE id = $1
-       RETURNING *`,
-      [
-        id,
-        status,
-        "approved_by" in fields ? fields.approved_by : null,
-        "approved_at" in fields ? fields.approved_at : null,
-        "rejected_by" in fields ? fields.rejected_by : null,
-        "rejected_at" in fields ? fields.rejected_at : null,
-        "rejected_reason" in fields ? fields.rejected_reason : null,
-        "deleted" in fields ? fields.deleted : null,
-        "deleted_reason" in fields ? fields.deleted_reason : null,
-      ]
+    const delivery = await query<{ trip_id: number }>(
+      `SELECT trip_id FROM trip_deliveries WHERE id = $1`,
+      [id]
     );
-    if (!result.rowCount) throw new AppError(404, "Shop rate not found");
-    return mapShopRate(result.rows[0]);
+    if (!delivery.rowCount) throw new AppError(404, "Shop rate not found");
+    const tripId = num(delivery.rows[0].trip_id);
+    const patch = body as { approvedBy?: string; reason?: string };
+
+    if (status === "Approved") {
+      await query(
+        `UPDATE trips SET status = 'Completed', deleted = FALSE,
+           approved_by = COALESCE($2, approved_by), approved_at = NOW()
+         WHERE id = $1`,
+        [tripId, patch.approvedBy ?? "system"]
+      );
+    } else if (status === "Pending Approval") {
+      await query(`UPDATE trips SET status = 'Pending', deleted = FALSE WHERE id = $1`, [tripId]);
+    } else if (status === "Deleted") {
+      await query(
+        `UPDATE trip_deliveries SET rate = NULL WHERE id = $1`,
+        [id]
+      );
+    } else if (status === "Draft" || status === "Rejected") {
+      await query(`UPDATE trips SET status = 'Draft', deleted = FALSE WHERE id = $1`, [tripId]);
+    }
+    return this.getById(id);
   },
 
   async softDelete(id: number, reason?: string) {

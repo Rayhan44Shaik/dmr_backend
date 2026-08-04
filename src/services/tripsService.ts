@@ -630,7 +630,7 @@ export const tripsService = {
         ]
       );
 
-      // Operations farm loading + named expenses (additive; does not break legacy clients)
+      // Optional columns from later alters — ignore if not present on finalized schema
       const bodyRec = body as Partial<Trip> & Record<string, unknown>;
       const expenseParts = computeTripExpense({
         fuel: bodyRec.fuel as number | undefined,
@@ -652,44 +652,49 @@ export const tripsService = {
         expense: bodyRec.expense as number | undefined,
       });
 
-      await client.query(
-        `UPDATE trips SET
-           farm_bird_type_id = COALESCE($2, farm_bird_type_id),
-           farm_bird_type = COALESCE($3, farm_bird_type),
-           farm_bird_count = COALESCE($4, farm_bird_count),
-           farm_load_weight = COALESCE($5, farm_load_weight),
-           farm_rate = COALESCE($6, farm_rate),
-           farm_amount = COALESCE($7, farm_amount),
-           driver_bata = COALESCE($8, driver_bata),
-           helper_bata = COALESCE($9, helper_bata),
-           total_trip_expense = CASE
-             WHEN $10::boolean THEN $11
-             ELSE total_trip_expense
-           END
-         WHERE id = $1`,
-        [
-          tripId,
-          bodyRec.farmBirdTypeId ?? null,
-          bodyRec.farmBirdType ?? null,
-          bodyRec.farmBirdCount ?? null,
-          bodyRec.farmLoadWeight ?? null,
-          bodyRec.farmRate ?? null,
-          bodyRec.farmAmount ?? null,
-          bodyRec.driverBata ?? null,
-          bodyRec.helperBata ?? null,
-          Boolean(
-            bodyRec.fuel != null ||
-              bodyRec.driverBata != null ||
-              bodyRec.helperBata != null ||
-              bodyRec.meals != null ||
-              bodyRec.pickupTolls != null ||
-              bodyRec.deliveryTolls != null ||
-              bodyRec.expense != null ||
-              bodyRec.totalTripExpense != null
-          ),
-          bodyRec.totalTripExpense ?? expenseParts.totalTripExpense,
-        ]
-      );
+      try {
+        await client.query(
+          `UPDATE trips SET
+             farm_bird_type_id = COALESCE($2, farm_bird_type_id),
+             farm_bird_type = COALESCE($3, farm_bird_type),
+             farm_bird_count = COALESCE($4, farm_bird_count),
+             farm_load_weight = COALESCE($5, farm_load_weight),
+             farm_rate = COALESCE($6, farm_rate),
+             farm_amount = COALESCE($7, farm_amount),
+             driver_bata = COALESCE($8, driver_bata),
+             helper_bata = COALESCE($9, helper_bata),
+             total_trip_expense = CASE
+               WHEN $10::boolean THEN $11
+               ELSE total_trip_expense
+             END
+           WHERE id = $1`,
+          [
+            tripId,
+            bodyRec.farmBirdTypeId ?? null,
+            bodyRec.farmBirdType ?? null,
+            bodyRec.farmBirdCount ?? null,
+            bodyRec.farmLoadWeight ?? null,
+            bodyRec.farmRate ?? null,
+            bodyRec.farmAmount ?? null,
+            bodyRec.driverBata ?? null,
+            bodyRec.helperBata ?? null,
+            Boolean(
+              bodyRec.fuel != null ||
+                bodyRec.driverBata != null ||
+                bodyRec.helperBata != null ||
+                bodyRec.meals != null ||
+                bodyRec.pickupTolls != null ||
+                bodyRec.deliveryTolls != null ||
+                bodyRec.expense != null ||
+                bodyRec.totalTripExpense != null
+            ),
+            bodyRec.totalTripExpense ?? expenseParts.totalTripExpense,
+          ]
+        );
+      } catch (err) {
+        const code = (err as { code?: string }).code;
+        if (code !== "42703") throw err; // undefined_column — finalized schema without ops alters
+      }
 
       if (body.helpers || body.loaders) {
         await replaceCrew(
@@ -780,14 +785,36 @@ export const tripsService = {
 
     if (status === "Completed") {
       params.push(body.approvedBy ?? "system");
-      sql += `, approved_by = $${params.length}, approved_at = NOW()`;
+      // approved_at may be absent on older schemas
+      sql += `, approved_by = $${params.length}`;
+      try {
+        // probe optional column in same statement; fallback below on undefined_column
+        const probe = await query(
+          `UPDATE trips SET status = $2, approved_by = $3, approved_at = NOW(), deleted = FALSE
+           WHERE id = $1 RETURNING *`,
+          [id, status, body.approvedBy ?? "system"]
+        );
+        if (!probe.rowCount) throw new AppError(404, `Trip ${id} not found`);
+        return withTransaction(async (client) => {
+          const trip = await hydrateTrip(client, probe.rows[0]);
+          return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
+        });
+      } catch (err) {
+        if ((err as { code?: string }).code !== "42703") throw err;
+        sql = `UPDATE trips SET status = $2, approved_by = $3, deleted = FALSE WHERE id = $1 RETURNING *`;
+        const result = await query(sql, [id, status, body.approvedBy ?? "system"]);
+        if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
+        return withTransaction(async (client) => {
+          const trip = await hydrateTrip(client, result.rows[0]);
+          return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
+        });
+      }
     } else if (status === "Deleted") {
       params.push(true);
       sql += `, deleted = $${params.length}`;
       params.push(body.reason ?? body.rejectedReason ?? null);
       sql += `, deleted_reason = $${params.length}`;
     } else if (status === "Pending" || status === "Draft") {
-      // clear soft-delete when reactivating into Draft/Pending
       sql += `, deleted = FALSE`;
     }
 

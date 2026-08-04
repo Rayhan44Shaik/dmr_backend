@@ -1,16 +1,25 @@
 import { query } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
-import type { FuelExpense } from "../types/operations.js";
+import type { FuelExpense, OpsRecordStatus } from "../types/operations.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
 import { nextDocNo } from "../utils/operationsHelpers.js";
 import {
-  approvalFields,
   assertOpsStatus,
   fuelExpenseBodySchema,
   parseBody,
 } from "../validation/operations.js";
 
+/** Map approval_status ↔ ops API status (fuel_expenses.status enum: Pending|Approved) */
+function toOpsStatus(approvalStatus: string): OpsRecordStatus {
+  return approvalStatus === "Approved" ? "Approved" : "Pending Approval";
+}
+
+function toApprovalStatus(opsStatus: string): "Pending" | "Approved" {
+  return opsStatus === "Approved" ? "Approved" : "Pending";
+}
+
 function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
+  const approval = str(row.status);
   return {
     id: str(row.id),
     billNo: str(row.bill_no),
@@ -26,23 +35,23 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
     fuelRate: num(row.rate),
     liters: num(row.litres),
     amount: num(row.amount),
-    pumpName: str(row.pump_name || row.petrol_bunk),
+    pumpName: str(row.petrol_bunk),
     remarks: row.remarks == null ? null : str(row.remarks),
-    status: str(row.ops_status || row.status) as FuelExpense["status"],
+    status: toOpsStatus(approval),
     imageData: row.image_data == null ? null : str(row.image_data),
-    deleted: Boolean(row.deleted),
-    deletedReason: row.deleted_reason == null ? null : str(row.deleted_reason),
+    deleted: false,
     approvedBy: row.approved_by == null ? null : str(row.approved_by),
     approvedAt: row.approved_date == null ? null : str(row.approved_date),
-    rejectedBy: row.rejected_by == null ? null : str(row.rejected_by),
-    rejectedAt: row.rejected_at == null ? null : str(row.rejected_at),
-    rejectedReason: row.rejected_reason == null ? null : str(row.rejected_reason),
     createdBy: str(row.created_by),
     createdAt: row.created_at == null ? null : str(row.created_at),
     updatedAt: row.updated_at == null ? null : str(row.updated_at),
   };
 }
 
+/**
+ * Fuel expenses use existing fuel_expenses table (+ trip_diesel_entries for dashboard).
+ * Uses approval_status only (Pending|Approved) from the finalized schema.
+ */
 export const fuelExpensesService = {
   async list(filters: {
     vehicleId?: number;
@@ -53,7 +62,7 @@ export const fuelExpensesService = {
   } = {}) {
     const clauses: string[] = [];
     const params: unknown[] = [];
-    if (!filters.includeDeleted) clauses.push(`deleted = FALSE`);
+
     if (filters.vehicleId) {
       params.push(filters.vehicleId);
       clauses.push(`vehicle_id = $${params.length}`);
@@ -66,10 +75,20 @@ export const fuelExpensesService = {
       params.push(filters.toDate);
       clauses.push(`expense_date <= $${params.length}`);
     }
-    if (filters.status) {
-      params.push(filters.status);
-      clauses.push(`ops_status = $${params.length}`);
+    if (filters.status === "Approved") {
+      clauses.push(`status = 'Approved'`);
+    } else if (
+      filters.status === "Pending Approval" ||
+      filters.status === "Draft" ||
+      filters.status === "Rejected"
+    ) {
+      clauses.push(`status = 'Pending'`);
+    } else if (filters.status === "Deleted") {
+      // Finalized schema has no soft-delete flag — return empty for Deleted filter
+      clauses.push(`FALSE`);
     }
+
+    // Also surface diesel entries from completed trips as synthetic fuel rows when listing
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const result = await query(
       `SELECT * FROM fuel_expenses ${where} ORDER BY expense_date DESC, created_at DESC`,
@@ -92,17 +111,15 @@ export const fuelExpensesService = {
     const billNo =
       data.billNo || (await nextDocNo(null, "FUEL", "fuel_expenses", "bill_no"));
     const pumpName = data.pumpName ?? "";
+    const approval = toApprovalStatus(data.status ?? "Draft");
 
     const result = await query(
       `INSERT INTO fuel_expenses (
          bill_no, expense_date, vehicle_id, vehicle_no, driver_id, driver_name,
          supervisor_id, supervisor_name, trip_id, meter_reading, amount, rate,
-         litres, petrol_bunk, pump_name, remarks, status, ops_status, image_data, created_by
-       ) VALUES (
-         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-         CASE WHEN $17 = 'Approved' THEN 'Approved'::approval_status ELSE 'Pending'::approval_status END,
-         $17::ops_record_status, $18, $19
-       ) RETURNING *`,
+         litres, petrol_bunk, remarks, status, image_data, created_by
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::approval_status,$17,$18)
+       RETURNING *`,
       [
         billNo,
         data.billDate,
@@ -118,9 +135,8 @@ export const fuelExpensesService = {
         fuelRate,
         liters,
         pumpName,
-        pumpName,
         data.remarks ?? null,
-        data.status ?? "Draft",
+        approval,
         data.imageData ?? null,
         data.createdBy ?? "",
       ]
@@ -130,7 +146,9 @@ export const fuelExpensesService = {
 
   async update(id: string, body: unknown) {
     const data = parseBody(fuelExpenseBodySchema.partial(), body);
-    const pumpName = data.pumpName;
+    const approval =
+      data.status != null ? toApprovalStatus(data.status) : null;
+
     const result = await query(
       `UPDATE fuel_expenses SET
          expense_date = COALESCE($2, expense_date),
@@ -146,12 +164,11 @@ export const fuelExpensesService = {
          rate = COALESCE($12, rate),
          litres = COALESCE($13, litres),
          petrol_bunk = COALESCE($14, petrol_bunk),
-         pump_name = COALESCE($14, pump_name),
          remarks = COALESCE($15, remarks),
-         ops_status = COALESCE($16::ops_record_status, ops_status),
+         status = COALESCE($16::approval_status, status),
          image_data = COALESCE($17, image_data),
          created_by = COALESCE($18, created_by)
-       WHERE id = $1 AND deleted = FALSE
+       WHERE id = $1
        RETURNING *`,
       [
         id,
@@ -167,9 +184,9 @@ export const fuelExpensesService = {
         data.amount ?? null,
         data.fuelRate ?? null,
         data.liters ?? null,
-        pumpName ?? null,
+        data.pumpName ?? null,
         data.remarks ?? null,
-        data.status ?? null,
+        approval,
         data.imageData ?? null,
         data.createdBy ?? null,
       ]
@@ -181,47 +198,31 @@ export const fuelExpensesService = {
   async updateStatus(id: string, body: unknown) {
     const status = String((body as { status?: string })?.status ?? "");
     assertOpsStatus(status);
-    const patch = body as {
-      approvedBy?: string;
-      rejectedBy?: string;
-      rejectedReason?: string;
-      reason?: string;
-    };
-    const fields = approvalFields(status, patch);
-    const legacyStatus =
-      status === "Approved" ? "Approved" : status === "Deleted" ? "Pending" : "Pending";
+    const patch = body as { approvedBy?: string; reason?: string };
 
+    if (status === "Deleted") {
+      // No soft-delete column in finalized schema — reject rather than hard-delete
+      throw new AppError(
+        400,
+        "Fuel expense soft-delete is not supported on finalized schema; set status to Pending instead"
+      );
+    }
+
+    const approval = toApprovalStatus(status);
     const result = await query(
       `UPDATE fuel_expenses SET
-         ops_status = $2::ops_record_status,
-         status = $3::approval_status,
-         approved_by = COALESCE($4, approved_by),
-         approved_date = COALESCE($5::timestamptz, approved_date),
-         rejected_by = COALESCE($6, rejected_by),
-         rejected_at = COALESCE($7::timestamptz, rejected_at),
-         rejected_reason = COALESCE($8, rejected_reason),
-         deleted = COALESCE($9, deleted),
-         deleted_reason = COALESCE($10, deleted_reason)
+         status = $2::approval_status,
+         approved_by = CASE WHEN $2 = 'Approved' THEN COALESCE($3, approved_by) ELSE approved_by END,
+         approved_date = CASE WHEN $2 = 'Approved' THEN NOW() ELSE approved_date END
        WHERE id = $1
        RETURNING *`,
-      [
-        id,
-        status,
-        legacyStatus,
-        "approved_by" in fields ? fields.approved_by : null,
-        "approved_at" in fields ? fields.approved_at : null,
-        "rejected_by" in fields ? fields.rejected_by : null,
-        "rejected_at" in fields ? fields.rejected_at : null,
-        "rejected_reason" in fields ? fields.rejected_reason : null,
-        "deleted" in fields ? fields.deleted : null,
-        "deleted_reason" in fields ? fields.deleted_reason : null,
-      ]
+      [id, approval, patch.approvedBy ?? "system"]
     );
     if (!result.rowCount) throw new AppError(404, "Fuel expense not found");
     return mapFuelExpense(result.rows[0]);
   },
 
-  async softDelete(id: string, reason?: string) {
-    return this.updateStatus(id, { status: "Deleted", reason });
+  async softDelete(id: string, _reason?: string) {
+    return this.updateStatus(id, { status: "Deleted", reason: _reason });
   },
 };

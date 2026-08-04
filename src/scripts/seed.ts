@@ -243,22 +243,7 @@ async function seed() {
     approvedBy: "Seed Admin",
   });
 
-  const rate = await shopRatesService.create({
-    shopId: shop.id,
-    shopName: shop.shopName,
-    birdTypeId: birdType.id,
-    birdType: birdType.birdType,
-    rate: 145,
-    effectiveFrom: tripDate,
-    remarks: "Seed rate",
-    status: "Approved",
-    createdBy: "seed",
-  });
-  await shopRatesService.updateStatus(rate.id, {
-    status: "Approved",
-    approvedBy: "Seed Admin",
-  });
-
+  // Ensure delivery amounts/rates exist on trip_deliveries (shop sales/rates/collections source)
   const sale = await shopSalesService.create({
     saleDate: tripDate,
     shopId: shop.id,
@@ -270,44 +255,22 @@ async function seed() {
     weight: 1050,
     rate: 145,
     amount: 152250,
-    status: "Approved",
-    createdBy: "seed",
-  });
-  await shopSalesService.updateStatus(sale.id, {
-    status: "Approved",
-    approvedBy: "Seed Admin",
-  });
-
-  const pendingSale = await shopSalesService.create({
-    saleDate: tripDate,
-    shopId: shop.id,
-    shopName: shop.shopName,
-    birdTypeId: birdType.id,
-    birdType: birdType.birdType,
-    birds: 100,
-    weight: 210,
-    rate: 145,
-    amount: 30450,
-    status: "Draft",
     createdBy: "seed",
   });
 
-  const collection = await collectionsService.create({
+  const rates = await shopRatesService.list({ shopId: shop.id });
+  const rate = rates[0] ?? (await shopRatesService.getById(sale.id));
+
+  // Partial pending: rate_completed false → pending collections
+  await collectionsService.create({
     collectionDate: tripDate,
     shopId: shop.id,
     shopName: shop.shopName,
     saleId: sale.id,
     tripId: trip.id,
     amountDue: 152250,
-    amountCollected: 100000,
-    paymentMode: "Cash",
-    remarks: "Partial collection",
-    status: "Approved",
+    amountCollected: 0,
     createdBy: "seed",
-  });
-  await collectionsService.updateStatus(collection.id, {
-    status: "Approved",
-    approvedBy: "Seed Admin",
   });
 
   const fuel = await fuelExpensesService.create({
@@ -340,8 +303,6 @@ async function seed() {
     driver: driver.employeeName,
     shopRateId: rate.id,
     saleId: sale.id,
-    pendingSaleId: pendingSale.id,
-    collectionId: collection.id,
     fuelExpenseId: fuel.id,
   });
 }
