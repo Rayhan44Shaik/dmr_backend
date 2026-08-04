@@ -87,7 +87,7 @@ Base path: `/api/operations`
 
 | Area | Endpoints |
 |------|-----------|
-| Dashboard | `GET /dashboard` (Approved totals only) |
+| Dashboard | `GET /dashboard` (Completed trips; Approved sales/collections/fuel) |
 | Trips | `GET/POST /trips`, `PUT /trips/:id`, `POST /trips/:id/steps/:step`, `PATCH /trips/:id/status`, `DELETE /trips/:id` |
 | Shop Rates | `GET/POST /shop-rates`, `PUT/PATCH/DELETE /shop-rates/:id` |
 | Shop Sales | `GET/POST /shop-sales`, `PUT/PATCH/DELETE /shop-sales/:id` |
@@ -96,5 +96,7 @@ Base path: `/api/operations`
 
 Swagger UI: `GET /api/docs` · OpenAPI JSON: `GET /api/docs/openapi.json`
 
-Trip / ops statuses: Draft → Pending Approval → Approved | Rejected | Cancelled | Deleted (soft delete only).
+Trip statuses (`trip_status`): Draft → Pending → Completed | Deleted (soft delete only).
+
+Other ops modules (rates/sales/collections/fuel) use `ops_record_status`: Draft → Pending Approval → Approved | Rejected | Deleted.
 

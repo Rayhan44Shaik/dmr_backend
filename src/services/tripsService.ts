@@ -774,25 +774,21 @@ export const tripsService = {
     assertTripStatus(body.status);
     const status = body.status;
 
+    // Workflow: Draft -> Pending -> Completed; Deleted remains Deleted
     let sql = `UPDATE trips SET status = $2`;
     const params: unknown[] = [id, status];
 
-    if (status === "Approved") {
+    if (status === "Completed") {
       params.push(body.approvedBy ?? "system");
       sql += `, approved_by = $${params.length}, approved_at = NOW()`;
-    } else if (status === "Rejected") {
-      params.push(body.rejectedBy ?? body.approvedBy ?? "system");
-      sql += `, rejected_by = $${params.length}`;
-      params.push(body.rejectedReason ?? body.reason ?? null);
-      sql += `, rejected_reason = $${params.length}, rejected_at = NOW()`;
     } else if (status === "Deleted") {
       params.push(true);
       sql += `, deleted = $${params.length}`;
       params.push(body.reason ?? body.rejectedReason ?? null);
       sql += `, deleted_reason = $${params.length}`;
-    } else if (status === "Cancelled") {
-      params.push(body.reason ?? body.rejectedReason ?? null);
-      sql += `, deleted_reason = $${params.length}`;
+    } else if (status === "Pending" || status === "Draft") {
+      // clear soft-delete when reactivating into Draft/Pending
+      sql += `, deleted = FALSE`;
     }
 
     sql += ` WHERE id = $1 RETURNING *`;

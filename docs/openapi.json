@@ -46,7 +46,7 @@
     "/api/operations/dashboard": {
       "get": {
         "tags": ["Operations Dashboard"],
-        "summary": "Operations dashboard KPIs (Approved records only)",
+        "summary": "Operations dashboard KPIs (Completed trips + Approved ops records)",
         "parameters": [
           {
             "name": "asOf",
@@ -82,7 +82,7 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "enum": ["Draft", "Pending", "Pending Approval", "Approved", "Completed", "Cancelled", "Rejected", "Deleted"]
+              "enum": ["Draft", "Pending", "Completed", "Deleted"]
             }
           },
           { "name": "includeDeleted", "in": "query", "schema": { "type": "boolean" } }
@@ -134,13 +134,24 @@
     "/api/operations/trips/{id}/status": {
       "patch": {
         "tags": ["Operations Trips"],
-        "summary": "Approval workflow status change",
+        "summary": "Trip status workflow: Draft → Pending → Completed | Deleted",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/StatusPatch" }
+              "schema": {
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": ["Draft", "Pending", "Completed", "Deleted"]
+                  },
+                  "approvedBy": { "type": "string" },
+                  "reason": { "type": "string" }
+                }
+              }
             }
           }
         },

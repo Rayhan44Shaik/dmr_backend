@@ -9,16 +9,8 @@ export const OPS_STATUSES = [
   "Deleted",
 ] as const;
 
-export const TRIP_STATUSES = [
-  "Draft",
-  "Pending",
-  "Pending Approval",
-  "Approved",
-  "Completed",
-  "Cancelled",
-  "Rejected",
-  "Deleted",
-] as const;
+/** PostgreSQL trip_status enum — source of truth */
+export const TRIP_STATUSES = ["Draft", "Pending", "Completed", "Deleted"] as const;
 
 export const opsStatusSchema = z.enum(OPS_STATUSES);
 export const tripStatusSchema = z.enum(TRIP_STATUSES);

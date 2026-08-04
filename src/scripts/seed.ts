@@ -237,9 +237,9 @@ async function seed() {
 
   console.log("Seeding operations samples...");
 
-  // Mark sample trip as Approved so it contributes to dashboard totals
+  // Mark sample trip Completed so it contributes to dashboard totals
   await tripsService.updateStatus(trip.id, {
-    status: "Approved",
+    status: "Completed",
     approvedBy: "Seed Admin",
   });
 
