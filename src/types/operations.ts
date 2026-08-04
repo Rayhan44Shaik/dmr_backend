@@ -7,15 +7,7 @@ export type OpsRecordStatus =
   | "Rejected"
   | "Deleted";
 
-export type TripStatus =
-  | "Draft"
-  | "Pending"
-  | "Pending Approval"
-  | "Approved"
-  | "Completed"
-  | "Cancelled"
-  | "Rejected"
-  | "Deleted";
+export type TripStatus = "Draft" | "Pending" | "Completed" | "Deleted";
 
 export interface OpsStatusPatch {
   status: OpsRecordStatus | TripStatus;

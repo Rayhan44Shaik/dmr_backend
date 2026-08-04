@@ -2,15 +2,7 @@
 
 export type ActiveStatus = "Active" | "Inactive";
 export type EmployeeStatus = "Active" | "Inactive" | "Suspended";
-export type TripStatus =
-  | "Draft"
-  | "Pending"
-  | "Pending Approval"
-  | "Approved"
-  | "Completed"
-  | "Cancelled"
-  | "Rejected"
-  | "Deleted";
+export type TripStatus = "Draft" | "Pending" | "Completed" | "Deleted";
 
 export interface Employee {
   id: number;

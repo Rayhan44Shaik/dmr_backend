@@ -13,18 +13,18 @@ export const dashboardService = {
       monthly_trips: string;
     }>(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'Approved' AND deleted = FALSE)::text AS total_trips,
-         COALESCE(SUM(total_weight) FILTER (WHERE status = 'Approved' AND deleted = FALSE), 0)::text AS total_weight,
+         COUNT(*) FILTER (WHERE status = 'Completed' AND deleted = FALSE)::text AS total_trips,
+         COALESCE(SUM(total_weight) FILTER (WHERE status = 'Completed' AND deleted = FALSE), 0)::text AS total_weight,
          COUNT(*) FILTER (
-           WHERE status = 'Approved' AND deleted = FALSE AND trip_date = $1::date
+           WHERE status = 'Completed' AND deleted = FALSE AND trip_date = $1::date
          )::text AS todays_trips,
          COUNT(*) FILTER (
-           WHERE status = 'Approved' AND deleted = FALSE
+           WHERE status = 'Completed' AND deleted = FALSE
              AND trip_date >= ($1::date - INTERVAL '6 days')
              AND trip_date <= $1::date
          )::text AS weekly_trips,
          COUNT(*) FILTER (
-           WHERE status = 'Approved' AND deleted = FALSE
+           WHERE status = 'Completed' AND deleted = FALSE
              AND date_trunc('month', trip_date) = date_trunc('month', $1::date)
          )::text AS monthly_trips
        FROM trips`,
