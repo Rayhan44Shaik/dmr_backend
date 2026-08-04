@@ -3,6 +3,8 @@ import { tripsService } from "../services/tripsService.js";
 import { staffService } from "../services/staffService.js";
 import { pool } from "../config/db.js";
 
+// Uses shared pool → DATABASE_URL (dmr_poultries @ localhost:5432 / user dmr)
+
 async function seed() {
   console.log("Seeding sample masters...");
 

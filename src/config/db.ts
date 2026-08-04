@@ -3,6 +3,8 @@ import { env } from "./env.js";
 
 const { Pool } = pg;
 
+// Shared pool for runtime, migrations, and seed scripts.
+// Connection target comes from DATABASE_URL (default: dmr_poultries @ localhost:5432 / user dmr).
 export const pool = new Pool({
   connectionString: env.databaseUrl,
   max: 20,

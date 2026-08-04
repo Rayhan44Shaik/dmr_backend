@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pool } from "../config/db.js";
 
+// Uses shared pool → DATABASE_URL (dmr_poultries @ localhost:5432 / user dmr)
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sqlDir = path.resolve(__dirname, "../../sql");
 
