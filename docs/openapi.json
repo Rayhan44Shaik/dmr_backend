@@ -1,0 +1,284 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "DMR Poultries API",
+    "description": "Backend API for Masters, Trips, Staff, and Operations modules.",
+    "version": "2.0.0"
+  },
+  "servers": [
+    { "url": "http://localhost:4000", "description": "Local development" }
+  ],
+  "tags": [
+    { "name": "Health" },
+    { "name": "Masters" },
+    { "name": "Trips" },
+    { "name": "Staff" },
+    { "name": "Operations Dashboard" },
+    { "name": "Operations Trips" },
+    { "name": "Shop Rates" },
+    { "name": "Shop Sales" },
+    { "name": "Collections" },
+    { "name": "Fuel Expenses" }
+  ],
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Service healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "database": { "type": "string", "example": "dmr_poultries" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/dashboard": {
+      "get": {
+        "tags": ["Operations Dashboard"],
+        "summary": "Operations dashboard KPIs (Approved records only)",
+        "parameters": [
+          {
+            "name": "asOf",
+            "in": "query",
+            "schema": { "type": "string", "format": "date" },
+            "description": "Reference date for today/week/month trip counts"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dashboard totals",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OperationsDashboard" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/trips": {
+      "get": {
+        "tags": ["Operations Trips"],
+        "summary": "List trips with search and filters",
+        "parameters": [
+          { "name": "search", "in": "query", "schema": { "type": "string" } },
+          { "name": "fromDate", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "toDate", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "vehicleId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "supervisorId", "in": "query", "schema": { "type": "integer" } },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["Draft", "Pending", "Pending Approval", "Approved", "Completed", "Cancelled", "Rejected", "Deleted"]
+            }
+          },
+          { "name": "includeDeleted", "in": "query", "schema": { "type": "boolean" } }
+        ],
+        "responses": { "200": { "description": "Trip list" } }
+      },
+      "post": {
+        "tags": ["Operations Trips"],
+        "summary": "Create trip (draft or with start data)",
+        "responses": { "201": { "description": "Created" } }
+      }
+    },
+    "/api/operations/trips/{id}": {
+      "get": {
+        "tags": ["Operations Trips"],
+        "summary": "Get trip by id",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Trip" }, "404": { "description": "Not found" } }
+      },
+      "put": {
+        "tags": ["Operations Trips"],
+        "summary": "Update / autosave trip (steps 1–5 payload)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Updated trip" } }
+      },
+      "delete": {
+        "tags": ["Operations Trips"],
+        "summary": "Soft-delete trip (status=Deleted)",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": { "200": { "description": "Soft deleted" } }
+      }
+    },
+    "/api/operations/trips/{id}/steps/{step}": {
+      "post": {
+        "tags": ["Operations Trips"],
+        "summary": "Submit a trip workflow step",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } },
+          {
+            "name": "step",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "enum": ["start", "farm", "pickup", "deliveries", "expenses"] }
+          }
+        ],
+        "responses": { "200": { "description": "Step saved" } }
+      }
+    },
+    "/api/operations/trips/{id}/status": {
+      "patch": {
+        "tags": ["Operations Trips"],
+        "summary": "Approval workflow status change",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/StatusPatch" }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Updated" }, "400": { "description": "Invalid status" } }
+      }
+    },
+    "/api/operations/shop-rates": {
+      "get": {
+        "tags": ["Shop Rates"],
+        "summary": "List historical shop rates",
+        "responses": { "200": { "description": "Rates" } }
+      },
+      "post": {
+        "tags": ["Shop Rates"],
+        "summary": "Create shop rate (effectiveFrom required)",
+        "responses": { "201": { "description": "Created" } }
+      }
+    },
+    "/api/operations/shop-rates/{id}": {
+      "get": { "tags": ["Shop Rates"], "summary": "Get shop rate", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } },
+      "put": { "tags": ["Shop Rates"], "summary": "Update shop rate", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } },
+      "delete": { "tags": ["Shop Rates"], "summary": "Soft-delete shop rate", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/operations/shop-rates/{id}/status": {
+      "patch": {
+        "tags": ["Shop Rates"],
+        "summary": "Approve / reject / delete shop rate",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatusPatch" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/operations/shop-sales": {
+      "get": { "tags": ["Shop Sales"], "summary": "List shop sales", "responses": { "200": { "description": "Sales" } } },
+      "post": { "tags": ["Shop Sales"], "summary": "Create shop sale entry", "responses": { "201": { "description": "Created" } } }
+    },
+    "/api/operations/shop-sales/{id}": {
+      "get": { "tags": ["Shop Sales"], "summary": "Get shop sale", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } },
+      "put": { "tags": ["Shop Sales"], "summary": "Update shop sale", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } },
+      "delete": { "tags": ["Shop Sales"], "summary": "Soft-delete shop sale", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/operations/shop-sales/{id}/status": {
+      "patch": {
+        "tags": ["Shop Sales"],
+        "summary": "Approval workflow for shop sale",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatusPatch" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/operations/collections": {
+      "get": { "tags": ["Collections"], "summary": "List collection entries", "responses": { "200": { "description": "Collections" } } },
+      "post": { "tags": ["Collections"], "summary": "Create collection entry", "responses": { "201": { "description": "Created" } } }
+    },
+    "/api/operations/collections/pending": {
+      "get": { "tags": ["Collections"], "summary": "Pending collections (approved with balance due)", "responses": { "200": { "description": "Pending list" } } }
+    },
+    "/api/operations/collections/register": {
+      "get": { "tags": ["Collections"], "summary": "Collection register (approved only)", "responses": { "200": { "description": "Register" } } }
+    },
+    "/api/operations/collections/running-balance": {
+      "get": { "tags": ["Collections"], "summary": "Running balance by shop (Approved sales − collections)", "responses": { "200": { "description": "Balances" } } }
+    },
+    "/api/operations/collections/{id}": {
+      "get": { "tags": ["Collections"], "summary": "Get collection", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } },
+      "put": { "tags": ["Collections"], "summary": "Update collection", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } },
+      "delete": { "tags": ["Collections"], "summary": "Soft-delete collection", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/operations/collections/{id}/status": {
+      "patch": {
+        "tags": ["Collections"],
+        "summary": "Approval workflow for collection",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatusPatch" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/operations/fuel-expenses": {
+      "get": { "tags": ["Fuel Expenses"], "summary": "List fuel expenses", "responses": { "200": { "description": "Fuel bills" } } },
+      "post": {
+        "tags": ["Fuel Expenses"],
+        "summary": "Create fuel expense (bill number, vehicle, driver, meter, rate, liters, pump, date)",
+        "responses": { "201": { "description": "Created" } }
+      }
+    },
+    "/api/operations/fuel-expenses/{id}": {
+      "get": { "tags": ["Fuel Expenses"], "summary": "Get fuel expense", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }], "responses": { "200": { "description": "OK" } } },
+      "put": { "tags": ["Fuel Expenses"], "summary": "Update fuel expense", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }], "responses": { "200": { "description": "OK" } } },
+      "delete": { "tags": ["Fuel Expenses"], "summary": "Soft-delete fuel expense", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }], "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/operations/fuel-expenses/{id}/status": {
+      "patch": {
+        "tags": ["Fuel Expenses"],
+        "summary": "Approval workflow for fuel expense",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StatusPatch" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/trips": {
+      "get": {
+        "tags": ["Trips"],
+        "summary": "Legacy trips list (also supports search/supervisor/status filters)",
+        "responses": { "200": { "description": "Trips" } }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "OpsRecordStatus": {
+        "type": "string",
+        "enum": ["Draft", "Pending Approval", "Approved", "Rejected", "Deleted"]
+      },
+      "StatusPatch": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "$ref": "#/components/schemas/OpsRecordStatus" },
+          "approvedBy": { "type": "string" },
+          "rejectedBy": { "type": "string" },
+          "rejectedReason": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      },
+      "OperationsDashboard": {
+        "type": "object",
+        "properties": {
+          "totalTrips": { "type": "number" },
+          "totalWeight": { "type": "number" },
+          "totalSales": { "type": "number" },
+          "totalCollections": { "type": "number" },
+          "pendingCollections": { "type": "number" },
+          "fuelExpenses": { "type": "number" },
+          "todaysTrips": { "type": "number" },
+          "weeklyTrips": { "type": "number" },
+          "monthlyTrips": { "type": "number" }
+        }
+      }
+    }
+  }
+}

@@ -80,3 +80,21 @@ Autosave / partial update: `PUT /api/trips/:id`
 ## Cloud later
 
 When moving to cloud, only change `DATABASE_URL` in `.env` (e.g. RDS / Neon / Supabase). No schema redesign required.
+
+## Operations APIs
+
+Base path: `/api/operations`
+
+| Area | Endpoints |
+|------|-----------|
+| Dashboard | `GET /dashboard` (Approved totals only) |
+| Trips | `GET/POST /trips`, `PUT /trips/:id`, `POST /trips/:id/steps/:step`, `PATCH /trips/:id/status`, `DELETE /trips/:id` |
+| Shop Rates | `GET/POST /shop-rates`, `PUT/PATCH/DELETE /shop-rates/:id` |
+| Shop Sales | `GET/POST /shop-sales`, `PUT/PATCH/DELETE /shop-sales/:id` |
+| Collections | `GET/POST /collections`, `GET /collections/pending|register|running-balance` |
+| Fuel Expenses | `GET/POST /fuel-expenses`, `PUT/PATCH/DELETE /fuel-expenses/:id` |
+
+Swagger UI: `GET /api/docs` · OpenAPI JSON: `GET /api/docs/openapi.json`
+
+Trip / ops statuses: Draft → Pending Approval → Approved | Rejected | Cancelled | Deleted (soft delete only).
+

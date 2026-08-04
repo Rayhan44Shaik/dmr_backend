@@ -2,7 +2,15 @@
 
 export type ActiveStatus = "Active" | "Inactive";
 export type EmployeeStatus = "Active" | "Inactive" | "Suspended";
-export type TripStatus = "Draft" | "Pending" | "Completed" | "Deleted";
+export type TripStatus =
+  | "Draft"
+  | "Pending"
+  | "Pending Approval"
+  | "Approved"
+  | "Completed"
+  | "Cancelled"
+  | "Rejected"
+  | "Deleted";
 
 export interface Employee {
   id: number;
@@ -154,6 +162,12 @@ export interface Trip {
   farmAddress?: string | null;
   avgBirdWeight?: number | null;
   farmRemarks?: string | null;
+  farmBirdTypeId?: number | null;
+  farmBirdType?: string | null;
+  farmBirdCount?: number | null;
+  farmLoadWeight?: number | null;
+  farmRate?: number | null;
+  farmAmount?: number | null;
   farmStepSubmitted: boolean;
 
   dcWeight: number;
@@ -186,6 +200,9 @@ export interface Trip {
   dieselEntries?: DieselEntry[];
   fuel: number;
   expense: number;
+  driverBata?: number;
+  helperBata?: number;
+  totalTripExpense?: number;
   remarks: string;
   submittedAt?: string | null;
   endStepSubmitted: boolean;
@@ -207,6 +224,10 @@ export interface Trip {
   deleted: boolean;
   deletedReason?: string | null;
   approvedBy?: string | null;
+  approvedAt?: string | null;
+  rejectedBy?: string | null;
+  rejectedAt?: string | null;
+  rejectedReason?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
 }
