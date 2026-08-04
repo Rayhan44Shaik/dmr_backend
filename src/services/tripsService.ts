@@ -9,6 +9,8 @@ import type {
   TripStatus,
 } from "../types/models.js";
 import { dateOnly, isoOrNull, num, numOrNull, str } from "../utils/coerce.js";
+import { computeTripExpense } from "../utils/operationsHelpers.js";
+import { assertTripStatus } from "../validation/operations.js";
 
 type Client = pg.PoolClient;
 
@@ -41,6 +43,12 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     farmAddress: row.farm_address == null ? null : str(row.farm_address),
     avgBirdWeight: numOrNull(row.avg_bird_weight),
     farmRemarks: row.farm_remarks == null ? null : str(row.farm_remarks),
+    farmBirdTypeId: numOrNull(row.farm_bird_type_id),
+    farmBirdType: row.farm_bird_type == null ? null : str(row.farm_bird_type),
+    farmBirdCount: numOrNull(row.farm_bird_count),
+    farmLoadWeight: numOrNull(row.farm_load_weight),
+    farmRate: numOrNull(row.farm_rate),
+    farmAmount: numOrNull(row.farm_amount),
     farmStepSubmitted: Boolean(row.farm_step_submitted),
 
     dcWeight: num(row.dc_weight),
@@ -70,6 +78,9 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     others5Amt: num(row.others5_amt),
     fuel: num(row.fuel),
     expense: num(row.expense),
+    driverBata: num(row.driver_bata),
+    helperBata: num(row.helper_bata),
+    totalTripExpense: num(row.total_trip_expense),
     remarks: str(row.remarks),
     submittedAt: isoOrNull(row.submitted_at),
     endStepSubmitted: Boolean(row.end_step_submitted),
@@ -91,6 +102,10 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     deleted: Boolean(row.deleted),
     deletedReason: row.deleted_reason == null ? null : str(row.deleted_reason),
     approvedBy: row.approved_by == null ? null : str(row.approved_by),
+    approvedAt: isoOrNull(row.approved_at),
+    rejectedBy: row.rejected_by == null ? null : str(row.rejected_by),
+    rejectedAt: isoOrNull(row.rejected_at),
+    rejectedReason: row.rejected_reason == null ? null : str(row.rejected_reason),
     createdAt: isoOrNull(row.created_at),
     updatedAt: isoOrNull(row.updated_at),
   };
@@ -382,6 +397,8 @@ export const tripsService = {
     toDate?: string;
     status?: string;
     vehicleId?: number;
+    supervisorId?: number;
+    search?: string;
     includeDeleted?: boolean;
   } = {}) {
     const clauses: string[] = [];
@@ -405,6 +422,16 @@ export const tripsService = {
     if (filters.vehicleId) {
       params.push(filters.vehicleId);
       clauses.push(`vehicle_id = $${params.length}`);
+    }
+    if (filters.supervisorId) {
+      params.push(filters.supervisorId);
+      clauses.push(`supervisor_id = $${params.length}`);
+    }
+    if (filters.search) {
+      params.push(`%${filters.search}%`);
+      clauses.push(
+        `(trip_no ILIKE $${params.length} OR vehicle_no ILIKE $${params.length} OR driver_name ILIKE $${params.length} OR supervisor_name ILIKE $${params.length} OR source_farm ILIKE $${params.length})`
+      );
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -603,6 +630,67 @@ export const tripsService = {
         ]
       );
 
+      // Operations farm loading + named expenses (additive; does not break legacy clients)
+      const bodyRec = body as Partial<Trip> & Record<string, unknown>;
+      const expenseParts = computeTripExpense({
+        fuel: bodyRec.fuel as number | undefined,
+        pickupTolls: bodyRec.pickupTolls as number | undefined,
+        deliveryTolls: bodyRec.deliveryTolls as number | undefined,
+        destinationTolls: bodyRec.destinationTolls as number | undefined,
+        meals: bodyRec.meals as number | undefined,
+        mealsTiffin: bodyRec.mealsTiffin as number | undefined,
+        driverBata: bodyRec.driverBata as number | undefined,
+        helperBata: bodyRec.helperBata as number | undefined,
+        loading: bodyRec.loading as number | undefined,
+        vehicleMaintenance: bodyRec.vehicleMaintenance as number | undefined,
+        othersRC: bodyRec.othersRC as number | undefined,
+        others1Amt: bodyRec.others1Amt as number | undefined,
+        others2Amt: bodyRec.others2Amt as number | undefined,
+        others3Amt: bodyRec.others3Amt as number | undefined,
+        others4Amt: bodyRec.others4Amt as number | undefined,
+        others5Amt: bodyRec.others5Amt as number | undefined,
+        expense: bodyRec.expense as number | undefined,
+      });
+
+      await client.query(
+        `UPDATE trips SET
+           farm_bird_type_id = COALESCE($2, farm_bird_type_id),
+           farm_bird_type = COALESCE($3, farm_bird_type),
+           farm_bird_count = COALESCE($4, farm_bird_count),
+           farm_load_weight = COALESCE($5, farm_load_weight),
+           farm_rate = COALESCE($6, farm_rate),
+           farm_amount = COALESCE($7, farm_amount),
+           driver_bata = COALESCE($8, driver_bata),
+           helper_bata = COALESCE($9, helper_bata),
+           total_trip_expense = CASE
+             WHEN $10::boolean THEN $11
+             ELSE total_trip_expense
+           END
+         WHERE id = $1`,
+        [
+          tripId,
+          bodyRec.farmBirdTypeId ?? null,
+          bodyRec.farmBirdType ?? null,
+          bodyRec.farmBirdCount ?? null,
+          bodyRec.farmLoadWeight ?? null,
+          bodyRec.farmRate ?? null,
+          bodyRec.farmAmount ?? null,
+          bodyRec.driverBata ?? null,
+          bodyRec.helperBata ?? null,
+          Boolean(
+            bodyRec.fuel != null ||
+              bodyRec.driverBata != null ||
+              bodyRec.helperBata != null ||
+              bodyRec.meals != null ||
+              bodyRec.pickupTolls != null ||
+              bodyRec.deliveryTolls != null ||
+              bodyRec.expense != null ||
+              bodyRec.totalTripExpense != null
+          ),
+          bodyRec.totalTripExpense ?? expenseParts.totalTripExpense,
+        ]
+      );
+
       if (body.helpers || body.loaders) {
         await replaceCrew(
           client,
@@ -671,6 +759,49 @@ export const tripsService = {
     );
     if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
     return { id, deleted: true };
+  },
+
+  async updateStatus(
+    id: number,
+    body: {
+      status: string;
+      approvedBy?: string;
+      rejectedBy?: string;
+      rejectedReason?: string;
+      reason?: string;
+    }
+  ) {
+    assertTripStatus(body.status);
+    const status = body.status;
+
+    let sql = `UPDATE trips SET status = $2`;
+    const params: unknown[] = [id, status];
+
+    if (status === "Approved") {
+      params.push(body.approvedBy ?? "system");
+      sql += `, approved_by = $${params.length}, approved_at = NOW()`;
+    } else if (status === "Rejected") {
+      params.push(body.rejectedBy ?? body.approvedBy ?? "system");
+      sql += `, rejected_by = $${params.length}`;
+      params.push(body.rejectedReason ?? body.reason ?? null);
+      sql += `, rejected_reason = $${params.length}, rejected_at = NOW()`;
+    } else if (status === "Deleted") {
+      params.push(true);
+      sql += `, deleted = $${params.length}`;
+      params.push(body.reason ?? body.rejectedReason ?? null);
+      sql += `, deleted_reason = $${params.length}`;
+    } else if (status === "Cancelled") {
+      params.push(body.reason ?? body.rejectedReason ?? null);
+      sql += `, deleted_reason = $${params.length}`;
+    }
+
+    sql += ` WHERE id = $1 RETURNING *`;
+    const result = await query(sql, params);
+    if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
+    return withTransaction(async (client) => {
+      const trip = await hydrateTrip(client, result.rows[0]);
+      return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
+    });
   },
 
   async lastClosingMeter(vehicleId: number) {

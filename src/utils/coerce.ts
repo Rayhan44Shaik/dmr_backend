@@ -17,7 +17,13 @@ export function str(value: unknown, fallback = ""): string {
 
 export function dateOnly(value: unknown): string | null {
   if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
   const s = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const parsed = new Date(s);
+  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
   return s.slice(0, 10);
 }
 

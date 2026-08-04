@@ -13,6 +13,8 @@ tripsRouter.get(
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
         includeDeleted: req.query.includeDeleted === "true",
       })
     );
@@ -78,5 +80,12 @@ tripsRouter.delete(
         typeof req.body?.reason === "string" ? req.body.reason : undefined
       )
     );
+  })
+);
+
+tripsRouter.patch(
+  "/:id/status",
+  asyncHandler(async (req, res) => {
+    res.json(await tripsService.updateStatus(Number(req.params.id), req.body));
   })
 );

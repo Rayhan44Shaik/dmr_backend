@@ -1,6 +1,10 @@
 import { mastersService } from "../services/mastersService.js";
 import { tripsService } from "../services/tripsService.js";
 import { staffService } from "../services/staffService.js";
+import { shopRatesService } from "../services/shopRatesService.js";
+import { shopSalesService } from "../services/shopSalesService.js";
+import { collectionsService } from "../services/collectionsService.js";
+import { fuelExpensesService } from "../services/fuelExpensesService.js";
 import { pool } from "../config/db.js";
 
 // Uses shared pool → DATABASE_URL (dmr_poultries @ localhost:5432 / user dmr)
@@ -175,6 +179,15 @@ async function seed() {
     ],
     fuel: 4000,
     expense: 1250,
+    driverBata: 500,
+    helperBata: 300,
+    farmBirdTypeId: birdType.id,
+    farmBirdType: birdType.birdType,
+    farmBirdCount: 78,
+    farmLoadWeight: 161,
+    farmRate: 120,
+    farmAmount: 19320,
+    totalWeight: 161,
     remarks: "Seed trip",
     expensesStepSubmitted: true,
     endStepSubmitted: true,
@@ -222,12 +235,114 @@ async function seed() {
     status: "Pending",
   });
 
+  console.log("Seeding operations samples...");
+
+  // Mark sample trip as Approved so it contributes to dashboard totals
+  await tripsService.updateStatus(trip.id, {
+    status: "Approved",
+    approvedBy: "Seed Admin",
+  });
+
+  const rate = await shopRatesService.create({
+    shopId: shop.id,
+    shopName: shop.shopName,
+    birdTypeId: birdType.id,
+    birdType: birdType.birdType,
+    rate: 145,
+    effectiveFrom: tripDate,
+    remarks: "Seed rate",
+    status: "Approved",
+    createdBy: "seed",
+  });
+  await shopRatesService.updateStatus(rate.id, {
+    status: "Approved",
+    approvedBy: "Seed Admin",
+  });
+
+  const sale = await shopSalesService.create({
+    saleDate: tripDate,
+    shopId: shop.id,
+    shopName: shop.shopName,
+    birdTypeId: birdType.id,
+    birdType: birdType.birdType,
+    tripId: trip.id,
+    birds: 500,
+    weight: 1050,
+    rate: 145,
+    amount: 152250,
+    status: "Approved",
+    createdBy: "seed",
+  });
+  await shopSalesService.updateStatus(sale.id, {
+    status: "Approved",
+    approvedBy: "Seed Admin",
+  });
+
+  const pendingSale = await shopSalesService.create({
+    saleDate: tripDate,
+    shopId: shop.id,
+    shopName: shop.shopName,
+    birdTypeId: birdType.id,
+    birdType: birdType.birdType,
+    birds: 100,
+    weight: 210,
+    rate: 145,
+    amount: 30450,
+    status: "Draft",
+    createdBy: "seed",
+  });
+
+  const collection = await collectionsService.create({
+    collectionDate: tripDate,
+    shopId: shop.id,
+    shopName: shop.shopName,
+    saleId: sale.id,
+    tripId: trip.id,
+    amountDue: 152250,
+    amountCollected: 100000,
+    paymentMode: "Cash",
+    remarks: "Partial collection",
+    status: "Approved",
+    createdBy: "seed",
+  });
+  await collectionsService.updateStatus(collection.id, {
+    status: "Approved",
+    approvedBy: "Seed Admin",
+  });
+
+  const fuel = await fuelExpensesService.create({
+    billDate: tripDate,
+    vehicleId: vehicle.id,
+    vehicleNo: vehicle.vehicleNumber,
+    driverId: driver.id,
+    driverName: driver.employeeName,
+    supervisorId: supervisor.id,
+    supervisorName: supervisor.employeeName,
+    tripId: trip.id,
+    currentMeter: 12540,
+    fuelRate: 102.5,
+    liters: 80,
+    amount: 8200,
+    pumpName: "HP Guntur",
+    status: "Approved",
+    createdBy: "seed",
+  });
+  await fuelExpensesService.updateStatus(fuel.id, {
+    status: "Approved",
+    approvedBy: "Seed Admin",
+  });
+
   console.log("Seed complete.");
   console.log({
     tripId: trip.id,
     tripNo: trip.tripNo,
     vehicle: vehicle.vehicleNumber,
     driver: driver.employeeName,
+    shopRateId: rate.id,
+    saleId: sale.id,
+    pendingSaleId: pendingSale.id,
+    collectionId: collection.id,
+    fuelExpenseId: fuel.id,
   });
 }
 
