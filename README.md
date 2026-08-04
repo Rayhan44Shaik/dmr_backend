@@ -50,6 +50,46 @@ npm run db:seed        # optional sample data
 npm run dev            # http://localhost:4000
 ```
 
+## Demo / test data (development only)
+
+`npm run seed:demo` generates a realistic, production-quality Trip Entry test
+dataset so every step of the Trip workflow can be exercised end-to-end.
+
+> **⚠️ Development-only.** This script is manual and idempotent. It must never
+> run automatically and must never run against a production database.
+
+```bash
+npm run seed:demo
+```
+
+What it creates (reusing any existing Master data — it never duplicates):
+
+| Trip | Date | Status | Resumes at |
+|------|------|--------|------------|
+| TRIP-20260731-001 | 31-Jul-2026 | Draft | Step 4 — Diesel & Expenses |
+| TRIP-20260801-001 | 01-Aug-2026 | Draft | Step 3 — Shop Delivery |
+| TRIP-20260802-001 | 02-Aug-2026 | Draft | Step 2 — Farm Loading |
+| TRIP-20260803-001 | 03-Aug-2026 | Draft | Step 1 — Trip Header |
+| TRIP-20260804-001 | 04-Aug-2026 | Pending | wizard complete |
+| TRIP-20260805-001 | 05-Aug-2026 | Completed | approved |
+| TRIP-20260806-001 | 06-Aug-2026 | Deleted | soft deleted |
+
+Masters verified/created: Employees (Rahim, Ruhulla, Kareem, Saleem),
+Vehicles (AP16AB1234, Tata 407), Farm (Sri Lakshmi Poultry Farm), Shops
+(New Hyderabad Chicken Center, Bismillah Chicken Shop, Royal Chicken Center),
+Bank (SBI Current Account), Bird Type (Broiler).
+
+Every child record (`trip_crew`, `trip_boxes`, `trip_deliveries`,
+`trip_delivery_boxes`, `trip_delivery_per_box`, `trip_diesel_entries`,
+`trip_media`, `fuel_expenses`) references the same Trip ID — never orphans.
+
+Idempotent: re-running `npm run seed:demo` reuses existing trips and masters and
+never overwrites user-entered data.
+
+Realistic values: 4200 birds, avg weight 2.35 kg, total weight 9870 kg, farm
+rate ₹118, 42 L diesel @ ₹97, driver bata ₹500, helper bata ₹400, meals ₹450,
+loading charges ₹850, misc ₹250.
+
 Health check: `GET http://localhost:4000/api/health` (response includes `database: "dmr_poultries"`)
 
 ## Trip step API map
