@@ -1,4 +1,5 @@
 import { query } from "../config/db.js";
+import { AppError } from "../middleware/errorHandler.js";
 import type {
   Bank,
   BirdType,
@@ -245,6 +246,12 @@ export const mastersService = {
     return mapVehicle(result.rows[0]);
   },
 
+  async deleteVehicle(id: number) {
+    const result = await query(`DELETE FROM vehicles WHERE id = $1 RETURNING id`, [id]);
+    if (!result.rowCount) throw new AppError(404, "Vehicle not found");
+    return { id, deleted: true };
+  },
+
   async listFarms() {
     const result = await query(`SELECT * FROM farms ORDER BY farm_name`);
     return result.rows.map(mapFarm);
@@ -296,6 +303,12 @@ export const mastersService = {
     return mapFarm(result.rows[0]);
   },
 
+  async deleteFarm(id: number) {
+    const result = await query(`DELETE FROM farms WHERE id = $1 RETURNING id`, [id]);
+    if (!result.rowCount) throw new AppError(404, "Farm not found");
+    return { id, deleted: true };
+  },
+
   async listShops() {
     const result = await query(`SELECT * FROM shops ORDER BY shop_name`);
     return result.rows.map(mapShop);
@@ -340,6 +353,12 @@ export const mastersService = {
       ]
     );
     return mapShop(result.rows[0]);
+  },
+
+  async deleteShop(id: number) {
+    const result = await query(`DELETE FROM shops WHERE id = $1 RETURNING id`, [id]);
+    if (!result.rowCount) throw new AppError(404, "Shop not found");
+    return { id, deleted: true };
   },
 
   async listBanks() {
@@ -388,6 +407,12 @@ export const mastersService = {
     return mapBank(result.rows[0]);
   },
 
+  async deleteBank(id: number) {
+    const result = await query(`DELETE FROM banks WHERE id = $1 RETURNING id`, [id]);
+    if (!result.rowCount) throw new AppError(404, "Bank not found");
+    return { id, deleted: true };
+  },
+
   async listBirdTypes() {
     const result = await query(`SELECT * FROM bird_types ORDER BY bird_type`);
     return result.rows.map(mapBirdType);
@@ -427,5 +452,11 @@ export const mastersService = {
       ]
     );
     return mapBirdType(result.rows[0]);
+  },
+
+  async deleteBirdType(id: number) {
+    const result = await query(`DELETE FROM bird_types WHERE id = $1 RETURNING id`, [id]);
+    if (!result.rowCount) throw new AppError(404, "Bird type not found");
+    return { id, deleted: true };
   },
 };
