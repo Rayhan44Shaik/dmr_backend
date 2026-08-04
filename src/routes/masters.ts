@@ -57,6 +57,13 @@ mastersRouter.put(
   })
 );
 
+mastersRouter.delete(
+  "/vehicles/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await mastersService.deleteVehicle(Number(req.params.id)));
+  })
+);
+
 mastersRouter.get(
   "/farms",
   asyncHandler(async (_req, res) => {
@@ -80,6 +87,13 @@ mastersRouter.put(
         id: Number(req.params.id),
       })
     );
+  })
+);
+
+mastersRouter.delete(
+  "/farms/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await mastersService.deleteFarm(Number(req.params.id)));
   })
 );
 
@@ -109,6 +123,13 @@ mastersRouter.put(
   })
 );
 
+mastersRouter.delete(
+  "/shops/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await mastersService.deleteShop(Number(req.params.id)));
+  })
+);
+
 mastersRouter.get(
   "/banks",
   asyncHandler(async (_req, res) => {
@@ -135,6 +156,13 @@ mastersRouter.put(
   })
 );
 
+mastersRouter.delete(
+  "/banks/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await mastersService.deleteBank(Number(req.params.id)));
+  })
+);
+
 mastersRouter.get(
   "/bird-types",
   asyncHandler(async (_req, res) => {
@@ -158,5 +186,12 @@ mastersRouter.put(
         id: Number(req.params.id),
       })
     );
+  })
+);
+
+mastersRouter.delete(
+  "/bird-types/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await mastersService.deleteBirdType(Number(req.params.id)));
   })
 );
