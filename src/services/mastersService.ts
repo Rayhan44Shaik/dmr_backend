@@ -171,6 +171,12 @@ export const mastersService = {
     return mapEmployee(result.rows[0]);
   },
 
+  async deleteEmployee(id: number) {
+    const result = await query(`DELETE FROM employees WHERE id = $1 RETURNING id`, [id]);
+    if (!result.rowCount) throw new AppError(404, "Employee not found");
+    return { id, deleted: true };
+  },
+
   async listVehicles() {
     const result = await query(`SELECT * FROM vehicles ORDER BY vehicle_number`);
     return result.rows.map(mapVehicle);

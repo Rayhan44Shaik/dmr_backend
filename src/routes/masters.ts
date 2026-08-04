@@ -31,6 +31,13 @@ mastersRouter.put(
   })
 );
 
+mastersRouter.delete(
+  "/employees/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await mastersService.deleteEmployee(Number(req.params.id)));
+  })
+);
+
 mastersRouter.get(
   "/vehicles",
   asyncHandler(async (_req, res) => {
