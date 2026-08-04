@@ -98,5 +98,5 @@ Swagger UI: `GET /api/docs` · OpenAPI JSON: `GET /api/docs/openapi.json`
 
 Trip statuses (`trip_status`): Draft → Pending → Completed | Deleted (soft delete only).
 
-Other ops modules (rates/sales/collections/fuel) use `ops_record_status`: Draft → Pending Approval → Approved | Rejected | Deleted.
+Shop sales/rates/collections are derived from `trip_deliveries` + `trips` (no separate tables). Fuel uses `fuel_expenses` (`Pending`/`Approved`).
 
