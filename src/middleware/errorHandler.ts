@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { mapPgError } from "../utils/pgErrors.js";
 
 export class AppError extends Error {
   status: number;
@@ -25,6 +26,14 @@ export function errorHandler(
     return res.status(err.status).json({
       error: err.message,
       details: err.details,
+    });
+  }
+
+  const pgErr = mapPgError(err);
+  if (pgErr) {
+    return res.status(pgErr.status).json({
+      error: pgErr.message,
+      details: pgErr.details,
     });
   }
 
