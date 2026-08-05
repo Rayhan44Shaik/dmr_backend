@@ -7,10 +7,41 @@ import type {
   ShopDelivery,
   Trip,
   TripStatus,
+  TripSummary,
 } from "../types/models.js";
 import { dateOnly, isoOrNull, num, numOrNull, str } from "../utils/coerce.js";
+import {
+  resolveEmployeeNames,
+  validateTripForeignKeys,
+} from "../utils/fkValidation.js";
 import { computeTripExpense } from "../utils/operationsHelpers.js";
+import {
+  paginatedResult,
+  type PaginationParams,
+  type PaginatedResult,
+} from "../utils/pagination.js";
+import { rethrowIfAppError } from "../utils/pgErrors.js";
+import {
+  computeFarmAmount,
+  computeTotalKm,
+  computeTripKpis,
+  sumDieselFuel,
+} from "../utils/tripCalculations.js";
+import { loadDcPhoto, syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
+import {
+  assertStepOrder,
+  getResumeLabel,
+  getResumeStep,
+  getWizardProgress,
+  type TripWizardStep,
+} from "../utils/tripResume.js";
 import { assertTripStatus } from "../validation/operations.js";
+import {
+  assertTripReadyForCompletion,
+  assertTripStatusTransition,
+  parseTripAutosave,
+  validateStepSubmit,
+} from "../validation/trips.js";
 
 type Client = pg.PoolClient;
 
@@ -108,6 +139,32 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     rejectedReason: row.rejected_reason == null ? null : str(row.rejected_reason),
     createdAt: isoOrNull(row.created_at),
     updatedAt: isoOrNull(row.updated_at),
+  };
+}
+
+function toTripSummary(row: Record<string, unknown>): TripSummary {
+  const base = mapTripBase(row);
+  const flags = {
+    startStepSubmitted: base.startStepSubmitted,
+    farmStepSubmitted: base.farmStepSubmitted,
+    pickupStepSubmitted: base.pickupStepSubmitted,
+    deliveryStepSubmitted: base.deliveryStepSubmitted,
+    expensesStepSubmitted: base.expensesStepSubmitted,
+    endStepSubmitted: base.endStepSubmitted,
+    status: base.status,
+    deleted: base.deleted,
+  };
+
+  return {
+    ...base,
+    helpers: [],
+    loaders: [],
+    boxDetails: [],
+    deliveries: [],
+    dieselEntries: [],
+    resumeStep: getResumeStep(flags),
+    resumeStepLabel: getResumeLabel(flags),
+    wizardProgress: getWizardProgress(flags),
   };
 }
 
@@ -211,20 +268,89 @@ async function loadTripExtras(client: Client, tripId: number) {
   return { helpers, loaders, boxDetails, deliveries: mappedDeliveries, dieselEntries };
 }
 
-async function hydrateTrip(client: Client, row: Record<string, unknown>): Promise<Trip> {
+async function hydrateTrip(
+  client: Client,
+  row: Record<string, unknown>,
+  options: { includeDcPhoto?: boolean } = {}
+): Promise<Trip & { dcPhotoData?: string | null; dcPhotoMime?: string | null }> {
   const base = mapTripBase(row);
   const extras = await loadTripExtras(client, base.id);
-  return { ...base, ...extras };
+  let dcPhoto: { dcPhotoData: string | null; dcPhotoMime: string | null } = {
+    dcPhotoData: null,
+    dcPhotoMime: null,
+  };
+  if (options.includeDcPhoto && base.dcPhotoKey) {
+    dcPhoto = await loadDcPhoto(client, base.id, base.dcPhotoKey);
+  }
+  return { ...base, ...extras, ...dcPhoto };
 }
 
 async function generateTripNo(client: Client, tripDate: string): Promise<string> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`trip_no_${tripDate}`]);
   const ymd = tripDate.replace(/-/g, "");
   const result = await client.query<{ c: string }>(
-    `SELECT COUNT(*)::text AS c FROM trips WHERE trip_date = $1`,
+    `SELECT COUNT(*)::text AS c FROM trips WHERE trip_date = $1::date`,
     [tripDate]
   );
   const seq = String(Number(result.rows[0].c) + 1).padStart(3, "0");
   return `TRP-${ymd}-${seq}`;
+}
+
+async function assertOptimisticLock(
+  client: Client,
+  tripId: number,
+  expectedUpdatedAt?: string | null
+) {
+  if (!expectedUpdatedAt) return;
+
+  const current = await client.query(`SELECT updated_at FROM trips WHERE id = $1`, [tripId]);
+  if (!current.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
+
+  const dbUpdated = isoOrNull(current.rows[0].updated_at);
+  const expected = isoOrNull(expectedUpdatedAt);
+  if (dbUpdated && expected && dbUpdated !== expected) {
+    throw new AppError(409, "Trip was modified by another session", {
+      tripId,
+      expectedUpdatedAt: expected,
+      currentUpdatedAt: dbUpdated,
+    });
+  }
+}
+
+async function enrichMasterDenorm(
+  client: Client,
+  body: Partial<Trip> & Record<string, unknown>
+) {
+  if (body.vehicleId && !body.vehicleNo) {
+    const v = await client.query(`SELECT vehicle_number FROM vehicles WHERE id = $1`, [
+      body.vehicleId,
+    ]);
+    if (v.rowCount) body.vehicleNo = str(v.rows[0].vehicle_number);
+  }
+  if (body.driverId && !body.driverName) {
+    const e = await client.query(`SELECT employee_name FROM employees WHERE id = $1`, [
+      body.driverId,
+    ]);
+    if (e.rowCount) body.driverName = str(e.rows[0].employee_name);
+  }
+  if (body.supervisorId && !body.supervisorName) {
+    const e = await client.query(`SELECT employee_name FROM employees WHERE id = $1`, [
+      body.supervisorId,
+    ]);
+    if (e.rowCount) body.supervisorName = str(e.rows[0].employee_name);
+  }
+  if (body.sourceFarmId && !body.sourceFarm) {
+    const f = await client.query(`SELECT farm_name FROM farms WHERE id = $1`, [
+      body.sourceFarmId,
+    ]);
+    if (f.rowCount) body.sourceFarm = str(f.rows[0].farm_name);
+  }
+  if (body.farmBirdTypeId && !body.farmBirdType) {
+    const b = await client.query(`SELECT bird_type FROM bird_types WHERE id = $1`, [
+      body.farmBirdTypeId,
+    ]);
+    if (b.rowCount) body.farmBirdType = str(b.rows[0].bird_type);
+  }
 }
 
 async function replaceCrew(
@@ -234,18 +360,22 @@ async function replaceCrew(
   loaders: string[] = []
 ) {
   await client.query(`DELETE FROM trip_crew WHERE trip_id = $1`, [tripId]);
-  for (const name of helpers) {
-    if (!name) continue;
+
+  const resolvedHelpers = await resolveEmployeeNames(client, helpers, "helper");
+  for (const member of resolvedHelpers) {
     await client.query(
-      `INSERT INTO trip_crew (trip_id, employee_name, role) VALUES ($1,$2,'helper')`,
-      [tripId, name]
+      `INSERT INTO trip_crew (trip_id, employee_id, employee_name, role)
+       VALUES ($1,$2,$3,'helper')`,
+      [tripId, member.employeeId, member.employeeName]
     );
   }
-  for (const name of loaders) {
-    if (!name) continue;
+
+  const resolvedLoaders = await resolveEmployeeNames(client, loaders, "loader");
+  for (const member of resolvedLoaders) {
     await client.query(
-      `INSERT INTO trip_crew (trip_id, employee_name, role) VALUES ($1,$2,'loader')`,
-      [tripId, name]
+      `INSERT INTO trip_crew (trip_id, employee_id, employee_name, role)
+       VALUES ($1,$2,$3,'loader')`,
+      [tripId, member.employeeId, member.employeeName]
     );
   }
 }
@@ -265,12 +395,14 @@ async function replaceDeliveries(
   tripId: number,
   deliveries: ShopDelivery[] = []
 ) {
-  await client.query(
-    `DELETE FROM trip_deliveries WHERE trip_id = $1`,
-    [tripId]
-  );
+  await client.query(`DELETE FROM trip_deliveries WHERE trip_id = $1`, [tripId]);
 
   for (const [index, d] of deliveries.entries()) {
+    const amount =
+      d.amount != null && d.amount > 0
+        ? d.amount
+        : Number((Number(d.weight ?? 0) * Number(d.rate ?? 0)).toFixed(2));
+
     const inserted = await client.query(
       `INSERT INTO trip_deliveries (
          trip_id, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
@@ -291,7 +423,7 @@ async function replaceDeliveries(
         d.mortality ?? 0,
         d.mortKg ?? 0,
         d.rate ?? null,
-        d.amount ?? 0,
+        amount,
         d.remarks ?? "",
         d.deliveryMode ?? "box",
         d.farmBirds ?? null,
@@ -391,356 +523,564 @@ function flattenDiesel(entries: DieselEntry[]): Record<string, unknown> {
   return out;
 }
 
+function buildListWhere(filters: {
+  fromDate?: string;
+  toDate?: string;
+  status?: string;
+  vehicleId?: number;
+  supervisorId?: number;
+  search?: string;
+  includeDeleted?: boolean;
+}) {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (!filters.includeDeleted) {
+    clauses.push(`deleted = FALSE`);
+  }
+  if (filters.fromDate) {
+    params.push(filters.fromDate);
+    clauses.push(`trip_date >= $${params.length}`);
+  }
+  if (filters.toDate) {
+    params.push(filters.toDate);
+    clauses.push(`trip_date <= $${params.length}`);
+  }
+  if (filters.status) {
+    params.push(filters.status);
+    clauses.push(`status = $${params.length}`);
+  }
+  if (filters.vehicleId) {
+    params.push(filters.vehicleId);
+    clauses.push(`vehicle_id = $${params.length}`);
+  }
+  if (filters.supervisorId) {
+    params.push(filters.supervisorId);
+    clauses.push(`supervisor_id = $${params.length}`);
+  }
+  if (filters.search) {
+    params.push(`%${filters.search}%`);
+    clauses.push(
+      `(trip_no ILIKE $${params.length} OR vehicle_no ILIKE $${params.length} OR driver_name ILIKE $${params.length} OR supervisor_name ILIKE $${params.length} OR source_farm ILIKE $${params.length})`
+    );
+  }
+
+  return {
+    where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "",
+    params,
+  };
+}
+
+function applyComputedFields(
+  body: Partial<Trip> & Record<string, unknown>,
+  boxDetails: BoxDetail[],
+  deliveries: ShopDelivery[]
+) {
+  const kpis = computeTripKpis({
+    boxes: boxDetails,
+    deliveries,
+    farmBirdCount: body.farmBirdCount as number | null,
+    farmLoadWeight: body.farmLoadWeight as number | null,
+    dcWeight: body.dcWeight as number | null,
+    totalBirds: body.totalBirds as number | null,
+  });
+
+  body.totalWeight = kpis.totalWeight;
+  body.totalDeliveredWeight = kpis.totalDeliveredWeight;
+  body.totalBirdsDelivered = kpis.totalBirdsDelivered;
+  body.totalMortality = kpis.totalMortality;
+  body.totalMortalityCount = kpis.totalMortalityCount;
+  body.totalMortalityWeight = kpis.totalMortalityWeight;
+  body.weightLoss = kpis.weightLoss;
+  body.survivalRate = kpis.survivalRate;
+  body.totalShops = kpis.totalShops;
+  body.lastShop = kpis.lastShop;
+  if (boxDetails.length) {
+    body.boxes = kpis.boxes;
+    body.totalBirds = kpis.totalBirds;
+    body.avgWeight = kpis.avgWeight;
+  }
+  if (deliveries.length) {
+    body.deliveries = kpis.deliveries;
+  }
+
+  body.totalKm = computeTotalKm(
+    body.openingMeter as number | null,
+    body.closingMeter as number | null,
+    body.endMeter as number | null
+  );
+
+  if (body.farmLoadWeight != null || body.farmRate != null) {
+    body.farmAmount = computeFarmAmount(
+      body.farmLoadWeight as number | null,
+      body.farmRate as number | null
+    );
+  }
+}
+
 export const tripsService = {
-  async list(filters: {
-    fromDate?: string;
-    toDate?: string;
-    status?: string;
-    vehicleId?: number;
-    supervisorId?: number;
-    search?: string;
-    includeDeleted?: boolean;
-  } = {}) {
-    const clauses: string[] = [];
-    const params: unknown[] = [];
+  async list(
+    filters: {
+      fromDate?: string;
+      toDate?: string;
+      status?: string;
+      vehicleId?: number;
+      supervisorId?: number;
+      search?: string;
+      includeDeleted?: boolean;
+      pagination?: PaginationParams | null;
+      full?: boolean;
+    } = {}
+  ): Promise<TripSummary[] | Trip[] | PaginatedResult<TripSummary>> {
+    const { where, params } = buildListWhere(filters);
 
-    if (!filters.includeDeleted) {
-      clauses.push(`deleted = FALSE`);
-    }
-    if (filters.fromDate) {
-      params.push(filters.fromDate);
-      clauses.push(`trip_date >= $${params.length}`);
-    }
-    if (filters.toDate) {
-      params.push(filters.toDate);
-      clauses.push(`trip_date <= $${params.length}`);
-    }
-    if (filters.status) {
-      params.push(filters.status);
-      clauses.push(`status = $${params.length}`);
-    }
-    if (filters.vehicleId) {
-      params.push(filters.vehicleId);
-      clauses.push(`vehicle_id = $${params.length}`);
-    }
-    if (filters.supervisorId) {
-      params.push(filters.supervisorId);
-      clauses.push(`supervisor_id = $${params.length}`);
-    }
-    if (filters.search) {
-      params.push(`%${filters.search}%`);
-      clauses.push(
-        `(trip_no ILIKE $${params.length} OR vehicle_no ILIKE $${params.length} OR driver_name ILIKE $${params.length} OR supervisor_name ILIKE $${params.length} OR source_farm ILIKE $${params.length})`
+    if (filters.pagination) {
+      const countResult = await query<{ c: string }>(
+        `SELECT COUNT(*)::text AS c FROM trips ${where}`,
+        params
       );
+      const total = Number(countResult.rows[0]?.c ?? 0);
+      const pagedParams = [...params, filters.pagination.limit, filters.pagination.offset];
+      const result = await query(
+        `SELECT * FROM trips ${where}
+         ORDER BY trip_date DESC, id DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        pagedParams
+      );
+      const summaries = result.rows.map(toTripSummary);
+      return paginatedResult(summaries, total, filters.pagination);
     }
 
-    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const result = await query(
       `SELECT * FROM trips ${where} ORDER BY trip_date DESC, id DESC`,
       params
     );
 
-    return withTransaction(async (client) => {
-      const trips: Trip[] = [];
-      for (const row of result.rows) {
-        trips.push(await hydrateTrip(client, row));
-      }
-      return trips.map((t) => ({ ...t, ...flattenDiesel(t.dieselEntries ?? []) }));
-    });
+    if (filters.full) {
+      return withTransaction(async (client) => {
+        const trips: Trip[] = [];
+        for (const row of result.rows) {
+          const trip = await hydrateTrip(client, row);
+          trips.push({ ...trip, ...flattenDiesel(trip.dieselEntries ?? []) });
+        }
+        return trips;
+      });
+    }
+
+    return result.rows.map(toTripSummary);
   },
 
   async getById(id: number) {
     const result = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
     if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
+
     return withTransaction(async (client) => {
-      const trip = await hydrateTrip(client, result.rows[0]);
-      return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
+      const trip = await hydrateTrip(client, result.rows[0], { includeDcPhoto: true });
+      const flags = {
+        startStepSubmitted: trip.startStepSubmitted,
+        farmStepSubmitted: trip.farmStepSubmitted,
+        pickupStepSubmitted: trip.pickupStepSubmitted,
+        deliveryStepSubmitted: trip.deliveryStepSubmitted,
+        expensesStepSubmitted: trip.expensesStepSubmitted,
+        endStepSubmitted: trip.endStepSubmitted,
+        status: trip.status,
+        deleted: trip.deleted,
+      };
+      return {
+        ...trip,
+        ...flattenDiesel(trip.dieselEntries ?? []),
+        resumeStep: getResumeStep(flags),
+        resumeStepLabel: getResumeLabel(flags),
+        wizardProgress: getWizardProgress(flags),
+      };
     });
   },
 
   async createDraft(body: Partial<Trip> = {}) {
     return withTransaction(async (client) => {
-      const tripDate =
-        dateOnly(body.tripDate) ??
-        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-      const tripNo = body.tripNo || (await generateTripNo(client, tripDate));
-
-      const inserted = await client.query(
-        `INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,'Draft') RETURNING *`,
-        [tripNo, tripDate]
-      );
-      return hydrateTrip(client, inserted.rows[0]);
-    });
-  },
-
-  /** Full upsert used by wizard autosave / step submits */
-  async save(id: number | null, body: Partial<Trip> & Record<string, unknown>) {
-    return withTransaction(async (client) => {
-      let tripId = id;
-
-      if (!tripId) {
+      try {
         const tripDate =
           dateOnly(body.tripDate) ??
           new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
         const tripNo = body.tripNo || (await generateTripNo(client, tripDate));
+
         const inserted = await client.query(
-          `INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,$3) RETURNING id`,
-          [tripNo, tripDate, body.status ?? "Draft"]
+          `INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,'Draft') RETURNING *`,
+          [tripNo, tripDate]
         );
-        tripId = num(inserted.rows[0].id);
+        const trip = await hydrateTrip(client, inserted.rows[0]);
+        const flags = {
+          startStepSubmitted: trip.startStepSubmitted,
+          farmStepSubmitted: trip.farmStepSubmitted,
+          pickupStepSubmitted: trip.pickupStepSubmitted,
+          deliveryStepSubmitted: trip.deliveryStepSubmitted,
+          expensesStepSubmitted: trip.expensesStepSubmitted,
+          status: trip.status,
+          deleted: trip.deleted,
+        };
+        return {
+          ...trip,
+          resumeStep: getResumeStep(flags) ?? "start",
+          resumeStepLabel: getResumeLabel(flags) ?? "Step 1 — Trip Header",
+          wizardProgress: getWizardProgress(flags),
+        };
+      } catch (err) {
+        rethrowIfAppError(err);
+        throw err;
       }
+    });
+  },
 
-      const dieselEntries = extractDieselFromBody(body);
+  /** Autosave engine — partial upsert with optimistic locking */
+  async save(id: number | null, body: Partial<Trip> & Record<string, unknown>) {
+    parseTripAutosave(body);
 
-      await client.query(
-        `UPDATE trips SET
-          trip_date = COALESCE($2, trip_date),
-          status = COALESCE($3, status),
-          start_time = COALESCE($4, start_time),
-          vehicle_id = COALESCE($5, vehicle_id),
-          vehicle_no = COALESCE($6, vehicle_no),
-          driver_id = COALESCE($7, driver_id),
-          driver_name = COALESCE($8, driver_name),
-          supervisor_id = COALESCE($9, supervisor_id),
-          supervisor_name = COALESCE($10, supervisor_name),
-          opening_meter = COALESCE($11, opening_meter),
-          advance_amount = COALESCE($12, advance_amount),
-          start_step_submitted = COALESCE($13, start_step_submitted),
-          source_farm_id = COALESCE($14, source_farm_id),
-          source_farm = COALESCE($15, source_farm),
-          reached_time = COALESCE($16, reached_time),
-          dest_meter = COALESCE($17, dest_meter),
-          pickup_tolls = COALESCE($18, pickup_tolls),
-          farm_address = COALESCE($19, farm_address),
-          avg_bird_weight = COALESCE($20, avg_bird_weight),
-          farm_remarks = COALESCE($21, farm_remarks),
-          farm_step_submitted = COALESCE($22, farm_step_submitted),
-          dc_weight = COALESCE($23, dc_weight),
-          total_birds = COALESCE($24, total_birds),
-          boxes = COALESCE($25, boxes),
-          avg_weight = COALESCE($26, avg_weight),
-          pickup_load_time = COALESCE($27, pickup_load_time),
-          dc_photo_key = COALESCE($28, dc_photo_key),
-          pickup_step_submitted = COALESCE($29, pickup_step_submitted),
-          delivery_step_submitted = COALESCE($30, delivery_step_submitted),
-          closing_meter = COALESCE($31, closing_meter),
-          end_meter = COALESCE($32, end_meter),
-          end_time = COALESCE($33, end_time),
-          delivery_tolls = COALESCE($34, delivery_tolls),
-          destination_tolls = COALESCE($35, destination_tolls),
-          meals = COALESCE($36, meals),
-          loading = COALESCE($37, loading),
-          meals_tiffin = COALESCE($38, meals_tiffin),
-          vehicle_maintenance = COALESCE($39, vehicle_maintenance),
-          others_rc = COALESCE($40, others_rc),
-          others1_amt = COALESCE($41, others1_amt),
-          others2_amt = COALESCE($42, others2_amt),
-          others3_amt = COALESCE($43, others3_amt),
-          others4_amt = COALESCE($44, others4_amt),
-          others5_amt = COALESCE($45, others5_amt),
-          fuel = COALESCE($46, fuel),
-          expense = COALESCE($47, expense),
-          remarks = COALESCE($48, remarks),
-          submitted_at = COALESCE($49, submitted_at),
-          end_step_submitted = COALESCE($50, end_step_submitted),
-          expenses_step_submitted = COALESCE($51, expenses_step_submitted),
-          total_km = COALESCE($52, total_km),
-          total_shops = COALESCE($53, total_shops),
-          total_weight = COALESCE($54, total_weight),
-          total_delivered_weight = COALESCE($55, total_delivered_weight),
-          total_birds_delivered = COALESCE($56, total_birds_delivered),
-          total_mortality = COALESCE($57, total_mortality),
-          total_mortality_count = COALESCE($58, total_mortality_count),
-          total_mortality_weight = COALESCE($59, total_mortality_weight),
-          weight_loss = COALESCE($60, weight_loss),
-          survival_rate = COALESCE($61, survival_rate),
-          last_shop = COALESCE($62, last_shop),
-          rate_completed = COALESCE($63, rate_completed),
-          deleted = COALESCE($64, deleted),
-          deleted_reason = COALESCE($65, deleted_reason),
-          approved_by = COALESCE($66, approved_by)
-         WHERE id = $1`,
-        [
-          tripId,
-          dateOnly(body.tripDate),
-          body.status ?? null,
-          body.startTime || null,
-          body.vehicleId ?? null,
-          body.vehicleNo ?? null,
-          body.driverId ?? null,
-          body.driverName ?? null,
-          body.supervisorId ?? null,
-          body.supervisorName ?? null,
-          body.openingMeter ?? null,
-          body.advanceAmount ?? null,
-          body.startStepSubmitted ?? null,
-          body.sourceFarmId ?? null,
-          body.sourceFarm ?? null,
-          body.reachedTime || null,
-          body.destMeter ?? null,
-          body.pickupTolls ?? null,
-          body.farmAddress ?? null,
-          body.avgBirdWeight ?? null,
-          body.farmRemarks ?? null,
-          body.farmStepSubmitted ?? null,
-          body.dcWeight ?? null,
-          body.totalBirds ?? null,
-          body.boxes ?? null,
-          body.avgWeight ?? null,
-          body.pickupLoadTime || null,
-          body.dcPhotoKey ?? null,
-          body.pickupStepSubmitted ?? null,
-          body.deliveryStepSubmitted ?? null,
-          body.closingMeter ?? body.endMeter ?? null,
-          body.endMeter ?? body.closingMeter ?? null,
-          body.endTime || null,
-          body.deliveryTolls ?? body.destinationTolls ?? null,
-          body.destinationTolls ?? body.deliveryTolls ?? null,
-          body.meals ?? null,
-          body.loading ?? null,
-          body.mealsTiffin ?? null,
-          body.vehicleMaintenance ?? null,
-          body.othersRC ?? null,
-          body.others1Amt ?? null,
-          body.others2Amt ?? null,
-          body.others3Amt ?? null,
-          body.others4Amt ?? null,
-          body.others5Amt ?? null,
-          body.fuel ?? null,
-          body.expense ?? null,
-          body.remarks ?? null,
-          body.submittedAt || null,
-          body.endStepSubmitted ?? null,
-          body.expensesStepSubmitted ?? null,
-          body.totalKm ?? null,
-          body.totalShops ?? null,
-          body.totalWeight ?? null,
-          body.totalDeliveredWeight ?? null,
-          body.totalBirdsDelivered ?? null,
-          body.totalMortality ?? null,
-          body.totalMortalityCount ?? null,
-          body.totalMortalityWeight ?? null,
-          body.weightLoss ?? null,
-          body.survivalRate ?? null,
-          body.lastShop ?? null,
-          body.rateCompleted ?? null,
-          body.deleted ?? null,
-          body.deletedReason ?? null,
-          body.approvedBy ?? null,
-        ]
-      );
-
-      // Optional columns from later alters — ignore if not present on finalized schema
-      const bodyRec = body as Partial<Trip> & Record<string, unknown>;
-      const expenseParts = computeTripExpense({
-        fuel: bodyRec.fuel as number | undefined,
-        pickupTolls: bodyRec.pickupTolls as number | undefined,
-        deliveryTolls: bodyRec.deliveryTolls as number | undefined,
-        destinationTolls: bodyRec.destinationTolls as number | undefined,
-        meals: bodyRec.meals as number | undefined,
-        mealsTiffin: bodyRec.mealsTiffin as number | undefined,
-        driverBata: bodyRec.driverBata as number | undefined,
-        helperBata: bodyRec.helperBata as number | undefined,
-        loading: bodyRec.loading as number | undefined,
-        vehicleMaintenance: bodyRec.vehicleMaintenance as number | undefined,
-        othersRC: bodyRec.othersRC as number | undefined,
-        others1Amt: bodyRec.others1Amt as number | undefined,
-        others2Amt: bodyRec.others2Amt as number | undefined,
-        others3Amt: bodyRec.others3Amt as number | undefined,
-        others4Amt: bodyRec.others4Amt as number | undefined,
-        others5Amt: bodyRec.others5Amt as number | undefined,
-        expense: bodyRec.expense as number | undefined,
-      });
-
+    return withTransaction(async (client) => {
       try {
+        let tripId = id;
+
+        if (tripId) {
+          const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+          if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
+          if (existing.rows[0].deleted) {
+            throw new AppError(422, "Cannot modify a deleted trip", { tripId });
+          }
+          await assertOptimisticLock(
+            client,
+            tripId,
+            (body.expectedUpdatedAt as string) ?? (body.updatedAt as string)
+          );
+        }
+
+        await validateTripForeignKeys(body, client);
+        await enrichMasterDenorm(client, body);
+
+        if (!tripId) {
+          const tripDate =
+            dateOnly(body.tripDate) ??
+            new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const tripNo = body.tripNo || (await generateTripNo(client, tripDate));
+          const inserted = await client.query(
+            `INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,$3) RETURNING id`,
+            [tripNo, tripDate, body.status ?? "Draft"]
+          );
+          tripId = num(inserted.rows[0].id);
+        }
+
+        const dieselEntries = extractDieselFromBody(body);
+        const boxDetails = (body.boxDetails as BoxDetail[]) ?? [];
+        const deliveries = (body.deliveries as ShopDelivery[]) ?? [];
+
+        if (boxDetails.length || deliveries.length) {
+          applyComputedFields(body, boxDetails, deliveries);
+        } else if (body.openingMeter != null && (body.closingMeter != null || body.endMeter != null)) {
+          body.totalKm = computeTotalKm(
+            body.openingMeter as number,
+            body.closingMeter as number | null,
+            body.endMeter as number | null
+          );
+        }
+
+        if (dieselEntries.length) {
+          body.fuel = sumDieselFuel(dieselEntries);
+        }
+
+        const expenseParts = computeTripExpense({
+          fuel: body.fuel as number | undefined,
+          pickupTolls: body.pickupTolls as number | undefined,
+          deliveryTolls: body.deliveryTolls as number | undefined,
+          destinationTolls: body.destinationTolls as number | undefined,
+          meals: body.meals as number | undefined,
+          mealsTiffin: body.mealsTiffin as number | undefined,
+          driverBata: body.driverBata as number | undefined,
+          helperBata: body.helperBata as number | undefined,
+          loading: body.loading as number | undefined,
+          vehicleMaintenance: body.vehicleMaintenance as number | undefined,
+          othersRC: body.othersRC as number | undefined,
+          others1Amt: body.others1Amt as number | undefined,
+          others2Amt: body.others2Amt as number | undefined,
+          others3Amt: body.others3Amt as number | undefined,
+          others4Amt: body.others4Amt as number | undefined,
+          others5Amt: body.others5Amt as number | undefined,
+          expense: body.expense as number | undefined,
+        });
+
+        if (
+          body.fuel != null ||
+          body.driverBata != null ||
+          body.meals != null ||
+          body.expense != null
+        ) {
+          body.totalTripExpense = body.totalTripExpense ?? expenseParts.totalTripExpense;
+        }
+
         await client.query(
           `UPDATE trips SET
-             farm_bird_type_id = COALESCE($2, farm_bird_type_id),
-             farm_bird_type = COALESCE($3, farm_bird_type),
-             farm_bird_count = COALESCE($4, farm_bird_count),
-             farm_load_weight = COALESCE($5, farm_load_weight),
-             farm_rate = COALESCE($6, farm_rate),
-             farm_amount = COALESCE($7, farm_amount),
-             driver_bata = COALESCE($8, driver_bata),
-             helper_bata = COALESCE($9, helper_bata),
-             total_trip_expense = CASE
-               WHEN $10::boolean THEN $11
-               ELSE total_trip_expense
-             END
+            trip_date = COALESCE($2, trip_date),
+            status = COALESCE($3, status),
+            start_time = COALESCE($4, start_time),
+            vehicle_id = COALESCE($5, vehicle_id),
+            vehicle_no = COALESCE($6, vehicle_no),
+            driver_id = COALESCE($7, driver_id),
+            driver_name = COALESCE($8, driver_name),
+            supervisor_id = COALESCE($9, supervisor_id),
+            supervisor_name = COALESCE($10, supervisor_name),
+            opening_meter = COALESCE($11, opening_meter),
+            advance_amount = COALESCE($12, advance_amount),
+            start_step_submitted = COALESCE($13, start_step_submitted),
+            source_farm_id = COALESCE($14, source_farm_id),
+            source_farm = COALESCE($15, source_farm),
+            reached_time = COALESCE($16, reached_time),
+            dest_meter = COALESCE($17, dest_meter),
+            pickup_tolls = COALESCE($18, pickup_tolls),
+            farm_address = COALESCE($19, farm_address),
+            avg_bird_weight = COALESCE($20, avg_bird_weight),
+            farm_remarks = COALESCE($21, farm_remarks),
+            farm_step_submitted = COALESCE($22, farm_step_submitted),
+            dc_weight = COALESCE($23, dc_weight),
+            total_birds = COALESCE($24, total_birds),
+            boxes = COALESCE($25, boxes),
+            avg_weight = COALESCE($26, avg_weight),
+            pickup_load_time = COALESCE($27, pickup_load_time),
+            dc_photo_key = COALESCE($28, dc_photo_key),
+            pickup_step_submitted = COALESCE($29, pickup_step_submitted),
+            delivery_step_submitted = COALESCE($30, delivery_step_submitted),
+            closing_meter = COALESCE($31, closing_meter),
+            end_meter = COALESCE($32, end_meter),
+            end_time = COALESCE($33, end_time),
+            delivery_tolls = COALESCE($34, delivery_tolls),
+            destination_tolls = COALESCE($35, destination_tolls),
+            meals = COALESCE($36, meals),
+            loading = COALESCE($37, loading),
+            meals_tiffin = COALESCE($38, meals_tiffin),
+            vehicle_maintenance = COALESCE($39, vehicle_maintenance),
+            others_rc = COALESCE($40, others_rc),
+            others1_amt = COALESCE($41, others1_amt),
+            others2_amt = COALESCE($42, others2_amt),
+            others3_amt = COALESCE($43, others3_amt),
+            others4_amt = COALESCE($44, others4_amt),
+            others5_amt = COALESCE($45, others5_amt),
+            fuel = COALESCE($46, fuel),
+            expense = COALESCE($47, expense),
+            remarks = COALESCE($48, remarks),
+            submitted_at = COALESCE($49, submitted_at),
+            end_step_submitted = COALESCE($50, end_step_submitted),
+            expenses_step_submitted = COALESCE($51, expenses_step_submitted),
+            total_km = COALESCE($52, total_km),
+            total_shops = COALESCE($53, total_shops),
+            total_weight = COALESCE($54, total_weight),
+            total_delivered_weight = COALESCE($55, total_delivered_weight),
+            total_birds_delivered = COALESCE($56, total_birds_delivered),
+            total_mortality = COALESCE($57, total_mortality),
+            total_mortality_count = COALESCE($58, total_mortality_count),
+            total_mortality_weight = COALESCE($59, total_mortality_weight),
+            weight_loss = COALESCE($60, weight_loss),
+            survival_rate = COALESCE($61, survival_rate),
+            last_shop = COALESCE($62, last_shop),
+            rate_completed = COALESCE($63, rate_completed),
+            deleted = COALESCE($64, deleted),
+            deleted_reason = COALESCE($65, deleted_reason),
+            approved_by = COALESCE($66, approved_by)
            WHERE id = $1`,
           [
             tripId,
-            bodyRec.farmBirdTypeId ?? null,
-            bodyRec.farmBirdType ?? null,
-            bodyRec.farmBirdCount ?? null,
-            bodyRec.farmLoadWeight ?? null,
-            bodyRec.farmRate ?? null,
-            bodyRec.farmAmount ?? null,
-            bodyRec.driverBata ?? null,
-            bodyRec.helperBata ?? null,
-            Boolean(
-              bodyRec.fuel != null ||
-                bodyRec.driverBata != null ||
-                bodyRec.helperBata != null ||
-                bodyRec.meals != null ||
-                bodyRec.pickupTolls != null ||
-                bodyRec.deliveryTolls != null ||
-                bodyRec.expense != null ||
-                bodyRec.totalTripExpense != null
-            ),
-            bodyRec.totalTripExpense ?? expenseParts.totalTripExpense,
+            dateOnly(body.tripDate),
+            body.status ?? null,
+            body.startTime || null,
+            body.vehicleId ?? null,
+            body.vehicleNo ?? null,
+            body.driverId ?? null,
+            body.driverName ?? null,
+            body.supervisorId ?? null,
+            body.supervisorName ?? null,
+            body.openingMeter ?? null,
+            body.advanceAmount ?? null,
+            body.startStepSubmitted ?? null,
+            body.sourceFarmId ?? null,
+            body.sourceFarm ?? null,
+            body.reachedTime || null,
+            body.destMeter ?? null,
+            body.pickupTolls ?? null,
+            body.farmAddress ?? null,
+            body.avgBirdWeight ?? null,
+            body.farmRemarks ?? null,
+            body.farmStepSubmitted ?? null,
+            body.dcWeight ?? null,
+            body.totalBirds ?? null,
+            body.boxes ?? null,
+            body.avgWeight ?? null,
+            body.pickupLoadTime || null,
+            body.dcPhotoKey ?? null,
+            body.pickupStepSubmitted ?? null,
+            body.deliveryStepSubmitted ?? null,
+            body.closingMeter ?? body.endMeter ?? null,
+            body.endMeter ?? body.closingMeter ?? null,
+            body.endTime || null,
+            body.deliveryTolls ?? body.destinationTolls ?? null,
+            body.destinationTolls ?? body.deliveryTolls ?? null,
+            body.meals ?? null,
+            body.loading ?? null,
+            body.mealsTiffin ?? null,
+            body.vehicleMaintenance ?? null,
+            body.othersRC ?? null,
+            body.others1Amt ?? null,
+            body.others2Amt ?? null,
+            body.others3Amt ?? null,
+            body.others4Amt ?? null,
+            body.others5Amt ?? null,
+            body.fuel ?? null,
+            body.expense ?? null,
+            body.remarks ?? null,
+            body.submittedAt || null,
+            body.endStepSubmitted ?? null,
+            body.expensesStepSubmitted ?? null,
+            body.totalKm ?? null,
+            body.totalShops ?? null,
+            body.totalWeight ?? null,
+            body.totalDeliveredWeight ?? null,
+            body.totalBirdsDelivered ?? null,
+            body.totalMortality ?? null,
+            body.totalMortalityCount ?? null,
+            body.totalMortalityWeight ?? null,
+            body.weightLoss ?? null,
+            body.survivalRate ?? null,
+            body.lastShop ?? null,
+            body.rateCompleted ?? null,
+            body.deleted ?? null,
+            body.deletedReason ?? null,
+            body.approvedBy ?? null,
           ]
         );
-      } catch (err) {
-        const code = (err as { code?: string }).code;
-        if (code !== "42703") throw err; // undefined_column — finalized schema without ops alters
-      }
 
-      if (body.helpers || body.loaders) {
-        await replaceCrew(
-          client,
-          tripId,
-          (body.helpers as string[]) ?? [],
-          (body.loaders as string[]) ?? []
-        );
-      }
-      if (body.boxDetails) {
-        await replaceBoxes(client, tripId, body.boxDetails as BoxDetail[]);
-      }
-      if (body.deliveries) {
-        await replaceDeliveries(client, tripId, body.deliveries as ShopDelivery[]);
-      }
-      if (dieselEntries.length || body.dieselEntries) {
-        await replaceDiesel(client, tripId, dieselEntries);
-      }
+        try {
+          await client.query(
+            `UPDATE trips SET
+               farm_bird_type_id = COALESCE($2, farm_bird_type_id),
+               farm_bird_type = COALESCE($3, farm_bird_type),
+               farm_bird_count = COALESCE($4, farm_bird_count),
+               farm_load_weight = COALESCE($5, farm_load_weight),
+               farm_rate = COALESCE($6, farm_rate),
+               farm_amount = COALESCE($7, farm_amount),
+               driver_bata = COALESCE($8, driver_bata),
+               helper_bata = COALESCE($9, helper_bata),
+               total_trip_expense = COALESCE($10, total_trip_expense)
+             WHERE id = $1`,
+            [
+              tripId,
+              body.farmBirdTypeId ?? null,
+              body.farmBirdType ?? null,
+              body.farmBirdCount ?? null,
+              body.farmLoadWeight ?? null,
+              body.farmRate ?? null,
+              body.farmAmount ?? null,
+              body.driverBata ?? null,
+              body.helperBata ?? null,
+              body.totalTripExpense ?? null,
+            ]
+          );
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          if (code !== "42703") throw err;
+        }
 
-      if (body.dcPhotoData && body.dcPhotoKey) {
-        await client.query(
-          `INSERT INTO trip_media (trip_id, media_key, media_type, mime_type, data_base64)
-           VALUES ($1,$2,'image',$3,$4)
-           ON CONFLICT (trip_id, media_key) DO UPDATE
-             SET data_base64 = EXCLUDED.data_base64, mime_type = EXCLUDED.mime_type`,
-          [
+        if (body.helpers || body.loaders) {
+          await replaceCrew(
+            client,
             tripId,
-            str(body.dcPhotoKey),
-            body.dcPhotoMime ?? "image/jpeg",
-            str(body.dcPhotoData),
-          ]
-        );
-      }
+            (body.helpers as string[]) ?? [],
+            (body.loaders as string[]) ?? []
+          );
+        }
+        if (body.boxDetails) {
+          await replaceBoxes(client, tripId, body.boxDetails as BoxDetail[]);
+        }
+        if (body.deliveries) {
+          await replaceDeliveries(client, tripId, body.deliveries as ShopDelivery[]);
+        }
+        if (dieselEntries.length || body.dieselEntries) {
+          await replaceDiesel(client, tripId, dieselEntries);
+        }
 
-      const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
-      const trip = await hydrateTrip(client, row.rows[0]);
-      return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
+        if (body.dcPhotoData && body.dcPhotoKey) {
+          await client.query(
+            `INSERT INTO trip_media (trip_id, media_key, media_type, mime_type, data_base64)
+             VALUES ($1,$2,'image',$3,$4)
+             ON CONFLICT (trip_id, media_key) DO UPDATE
+               SET data_base64 = EXCLUDED.data_base64, mime_type = EXCLUDED.mime_type`,
+            [
+              tripId,
+              str(body.dcPhotoKey),
+              body.dcPhotoMime ?? "image/jpeg",
+              str(body.dcPhotoData),
+            ]
+          );
+        }
+
+        const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+        const tripRow = row.rows[0];
+        const tripDate = dateOnly(tripRow.trip_date) ?? "";
+
+        if (dieselEntries.length && (body.expensesStepSubmitted || body.syncFuel)) {
+          await syncDieselToFuelExpenses(client, tripId, tripDate, dieselEntries, {
+            vehicleId: numOrNull(tripRow.vehicle_id),
+            vehicleNo: tripRow.vehicle_no ? str(tripRow.vehicle_no) : null,
+            driverId: numOrNull(tripRow.driver_id),
+            driverName: tripRow.driver_name ? str(tripRow.driver_name) : null,
+            supervisorId: numOrNull(tripRow.supervisor_id),
+            supervisorName: tripRow.supervisor_name ? str(tripRow.supervisor_name) : null,
+            createdBy: str(body.createdBy ?? "trip-autosave"),
+          });
+        }
+
+        const trip = await hydrateTrip(client, tripRow, { includeDcPhoto: true });
+        const flags = {
+          startStepSubmitted: trip.startStepSubmitted,
+          farmStepSubmitted: trip.farmStepSubmitted,
+          pickupStepSubmitted: trip.pickupStepSubmitted,
+          deliveryStepSubmitted: trip.deliveryStepSubmitted,
+          expensesStepSubmitted: trip.expensesStepSubmitted,
+          status: trip.status,
+          deleted: trip.deleted,
+        };
+        return {
+          ...trip,
+          ...flattenDiesel(trip.dieselEntries ?? []),
+          resumeStep: getResumeStep(flags),
+          resumeStepLabel: getResumeLabel(flags),
+          wizardProgress: getWizardProgress(flags),
+        };
+      } catch (err) {
+        rethrowIfAppError(err);
+        throw err;
+      }
     });
   },
 
   async submitStep(
     id: number,
-    step: "start" | "farm" | "pickup" | "deliveries" | "expenses",
+    step: TripWizardStep,
     body: Partial<Trip> & Record<string, unknown>
   ) {
-    const flags: Record<string, Partial<Trip>> = {
+    validateStepSubmit(step, body);
+
+    const existing = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
+    if (!existing.rowCount) throw new AppError(404, `Trip ${id} not found`);
+    const current = existing.rows[0];
+
+    const flags = {
+      startStepSubmitted: Boolean(current.start_step_submitted),
+      farmStepSubmitted: Boolean(current.farm_step_submitted),
+      pickupStepSubmitted: Boolean(current.pickup_step_submitted),
+      deliveryStepSubmitted: Boolean(current.delivery_step_submitted),
+      expensesStepSubmitted: Boolean(current.expenses_step_submitted),
+      endStepSubmitted: Boolean(current.end_step_submitted),
+      status: str(current.status),
+      deleted: Boolean(current.deleted),
+    };
+
+    assertStepOrder(step, flags);
+
+    const stepFlags: Record<string, Partial<Trip> & Record<string, unknown>> = {
       start: { startStepSubmitted: true, status: (body.status as TripStatus) ?? "Draft" },
       farm: { farmStepSubmitted: true },
       pickup: { pickupStepSubmitted: true },
@@ -748,22 +1088,26 @@ export const tripsService = {
       expenses: {
         expensesStepSubmitted: true,
         endStepSubmitted: true,
-        status: (body.status as TripStatus) ?? "Completed",
+        status: "Pending" as TripStatus,
         submittedAt: body.submittedAt ?? new Date().toISOString(),
+        syncFuel: true,
       },
     };
 
-    return this.save(id, { ...body, ...flags[step] });
+    return this.save(id, { ...body, ...stepFlags[step] });
   },
 
   async softDelete(id: number, reason?: string) {
-    const result = await query(
-      `UPDATE trips SET deleted = TRUE, deleted_reason = $2, status = 'Deleted'
-       WHERE id = $1 RETURNING id`,
-      [id, reason ?? null]
-    );
-    if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
-    return { id, deleted: true };
+    return withTransaction(async (client) => {
+      const result = await client.query(
+        `UPDATE trips SET deleted = TRUE, deleted_reason = $2, status = 'Deleted'
+         WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE
+         RETURNING id`,
+        [id, reason ?? null]
+      );
+      if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
+      return { id, deleted: true };
+    });
   },
 
   async updateStatus(
@@ -779,55 +1123,62 @@ export const tripsService = {
     assertTripStatus(body.status);
     const status = body.status;
 
-    // Workflow: Draft -> Pending -> Completed; Deleted remains Deleted
-    let sql = `UPDATE trips SET status = $2`;
-    const params: unknown[] = [id, status];
+    return withTransaction(async (client) => {
+      const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [id]);
+      if (!existing.rowCount) throw new AppError(404, `Trip ${id} not found`);
 
-    if (status === "Completed") {
-      params.push(body.approvedBy ?? "system");
-      // approved_at may be absent on older schemas
-      sql += `, approved_by = $${params.length}`;
-      try {
-        // probe optional column in same statement; fallback below on undefined_column
-        const probe = await query(
-          `UPDATE trips SET status = $2, approved_by = $3, approved_at = NOW(), deleted = FALSE
-           WHERE id = $1 RETURNING *`,
-          [id, status, body.approvedBy ?? "system"]
-        );
-        if (!probe.rowCount) throw new AppError(404, `Trip ${id} not found`);
-        return withTransaction(async (client) => {
-          const trip = await hydrateTrip(client, probe.rows[0]);
-          return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
-        });
-      } catch (err) {
-        if ((err as { code?: string }).code !== "42703") throw err;
-        sql = `UPDATE trips SET status = $2, approved_by = $3, deleted = FALSE WHERE id = $1 RETURNING *`;
-        const result = await query(sql, [id, status, body.approvedBy ?? "system"]);
-        if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
-        return withTransaction(async (client) => {
-          const trip = await hydrateTrip(client, result.rows[0]);
-          return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
+      const currentStatus = str(existing.rows[0].status);
+      assertTripStatusTransition(currentStatus, status);
+
+      if (status === "Completed") {
+        assertTripReadyForCompletion({
+          startStepSubmitted: Boolean(existing.rows[0].start_step_submitted),
+          farmStepSubmitted: Boolean(existing.rows[0].farm_step_submitted),
+          pickupStepSubmitted: Boolean(existing.rows[0].pickup_step_submitted),
+          deliveryStepSubmitted: Boolean(existing.rows[0].delivery_step_submitted),
+          expensesStepSubmitted: Boolean(existing.rows[0].expenses_step_submitted),
         });
       }
-    } else if (status === "Deleted") {
-      params.push(true);
-      sql += `, deleted = $${params.length}`;
-      params.push(body.reason ?? body.rejectedReason ?? null);
-      sql += `, deleted_reason = $${params.length}`;
-    } else if (status === "Pending" || status === "Draft") {
-      sql += `, deleted = FALSE`;
-    }
 
-    sql += ` WHERE id = $1 RETURNING *`;
-    const result = await query(sql, params);
-    if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
-    return withTransaction(async (client) => {
-      const trip = await hydrateTrip(client, result.rows[0]);
+      let result;
+      try {
+        if (status === "Completed") {
+          result = await client.query(
+            `UPDATE trips SET status = $2, approved_by = $3, approved_at = NOW(), deleted = FALSE
+             WHERE id = $1 RETURNING *`,
+            [id, status, body.approvedBy ?? "system"]
+          );
+        } else if (status === "Deleted") {
+          result = await client.query(
+            `UPDATE trips SET status = 'Deleted', deleted = TRUE, deleted_reason = $2
+             WHERE id = $1 RETURNING *`,
+            [id, body.reason ?? body.rejectedReason ?? null]
+          );
+        } else {
+          result = await client.query(
+            `UPDATE trips SET status = $2::trip_status, deleted = FALSE WHERE id = $1 RETURNING *`,
+            [id, status]
+          );
+        }
+      } catch (err) {
+        rethrowIfAppError(err);
+        if ((err as { code?: string }).code === "42703" && status === "Completed") {
+          result = await client.query(
+            `UPDATE trips SET status = $2, approved_by = $3, deleted = FALSE WHERE id = $1 RETURNING *`,
+            [id, status, body.approvedBy ?? "system"]
+          );
+        } else {
+          throw err;
+        }
+      }
+
+      const trip = await hydrateTrip(client, result!.rows[0], { includeDcPhoto: true });
       return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
     });
   },
 
   async lastClosingMeter(vehicleId: number) {
+    await validateTripForeignKeys({ vehicleId });
     const result = await query(
       `SELECT closing_meter, end_meter, trip_no, trip_date
        FROM trips
