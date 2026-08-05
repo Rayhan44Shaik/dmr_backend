@@ -1,7 +1,18 @@
-import { query } from "../config/db.js";
+import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import type { ShopSale } from "../types/operations.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
+import {
+  assertBirdTypeExists,
+  assertShopExists,
+  assertTripExists,
+} from "../utils/fkValidation.js";
+import {
+  paginatedResult,
+  type PaginatedResult,
+  type PaginationParams,
+} from "../utils/pagination.js";
+import { rethrowIfAppError } from "../utils/pgErrors.js";
 import {
   assertOpsStatus,
   parseBody,
@@ -65,13 +76,16 @@ const SALE_SELECT = `
  * No shop_sales table.
  */
 export const shopSalesService = {
-  async list(filters: {
-    shopId?: number;
-    fromDate?: string;
-    toDate?: string;
-    status?: string;
-    includeDeleted?: boolean;
-  } = {}) {
+  async list(
+    filters: {
+      shopId?: number;
+      fromDate?: string;
+      toDate?: string;
+      status?: string;
+      includeDeleted?: boolean;
+      pagination?: PaginationParams | null;
+    } = {}
+  ): Promise<ShopSale[] | PaginatedResult<ShopSale>> {
     const clauses: string[] = [];
     const params: unknown[] = [];
 
@@ -100,6 +114,24 @@ export const shopSalesService = {
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+    if (filters.pagination) {
+      const countResult = await query<{ c: string }>(
+        `SELECT COUNT(*)::text AS c FROM trip_deliveries d
+         INNER JOIN trips t ON t.id = d.trip_id ${where}`,
+        params
+      );
+      const total = Number(countResult.rows[0]?.c ?? 0);
+      const pagedParams = [...params, filters.pagination.limit, filters.pagination.offset];
+      const result = await query(
+        `${SALE_SELECT} ${where}
+         ORDER BY t.trip_date DESC, d.id DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        pagedParams
+      );
+      return paginatedResult(result.rows.map(mapDeliverySale), total, filters.pagination);
+    }
+
     const result = await query(
       `${SALE_SELECT} ${where} ORDER BY t.trip_date DESC, d.id DESC`,
       params
@@ -118,35 +150,46 @@ export const shopSalesService = {
     if (!data.tripId) {
       throw new AppError(400, "tripId is required (sales are stored on trip_deliveries)");
     }
-    const trip = await query(`SELECT id FROM trips WHERE id = $1`, [data.tripId]);
-    if (!trip.rowCount) throw new AppError(404, `Trip ${data.tripId} not found`);
 
-    const birds = data.birds ?? 0;
-    const weight = data.weight ?? 0;
-    const rate = data.rate ?? 0;
-    const amount = data.amount ?? Number((weight * rate).toFixed(2));
+    return withTransaction(async (client) => {
+      try {
+        await assertTripExists(data.tripId, client);
+        if (data.shopId != null) await assertShopExists(data.shopId, client);
+        if (data.birdTypeId != null) await assertBirdTypeExists(data.birdTypeId, client);
 
-    const result = await query(
-      `INSERT INTO trip_deliveries (
-         trip_id, shop_id, shop_name, bird_type_id, bird_type,
-         birds, weight, mortality, rate, amount, remarks
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       RETURNING id`,
-      [
-        data.tripId,
-        data.shopId ?? null,
-        data.shopName ?? "",
-        data.birdTypeId ?? null,
-        data.birdType ?? "",
-        birds,
-        weight,
-        data.mortality ?? 0,
-        rate,
-        amount,
-        data.remarks ?? "",
-      ]
-    );
-    return this.getById(num(result.rows[0].id));
+        const birds = data.birds ?? 0;
+        const weight = data.weight ?? 0;
+        const rate = data.rate ?? 0;
+        const amount = data.amount ?? Number((weight * rate).toFixed(2));
+
+        const result = await client.query(
+          `INSERT INTO trip_deliveries (
+             trip_id, shop_id, shop_name, bird_type_id, bird_type,
+             birds, weight, mortality, rate, amount, remarks
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+           RETURNING id`,
+          [
+            data.tripId,
+            data.shopId ?? null,
+            data.shopName ?? "",
+            data.birdTypeId ?? null,
+            data.birdType ?? "",
+            birds,
+            weight,
+            data.mortality ?? 0,
+            rate,
+            amount,
+            data.remarks ?? "",
+          ]
+        );
+        const saleId = num(result.rows[0].id);
+        const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [saleId]);
+        return mapDeliverySale(row.rows[0]);
+      } catch (err) {
+        rethrowIfAppError(err);
+        throw err;
+      }
+    });
   },
 
   async update(id: number, body: unknown) {
@@ -189,32 +232,36 @@ export const shopSalesService = {
     const tripStatus = opsToTripStatus(status);
     const patch = body as { approvedBy?: string; reason?: string };
 
-    const delivery = await query<{ trip_id: number }>(
-      `SELECT trip_id FROM trip_deliveries WHERE id = $1`,
-      [id]
-    );
-    if (!delivery.rowCount) throw new AppError(404, "Shop sale not found");
-    const tripId = num(delivery.rows[0].trip_id);
+    return withTransaction(async (client) => {
+      const delivery = await client.query<{ trip_id: number }>(
+        `SELECT trip_id FROM trip_deliveries WHERE id = $1`,
+        [id]
+      );
+      if (!delivery.rowCount) throw new AppError(404, "Shop sale not found");
+      const tripId = num(delivery.rows[0].trip_id);
 
-    if (tripStatus === "Deleted") {
-      await query(
-        `UPDATE trips SET status = 'Deleted', deleted = TRUE, deleted_reason = $2 WHERE id = $1`,
-        [tripId, patch.reason ?? null]
-      );
-    } else if (tripStatus === "Completed") {
-      await query(
-        `UPDATE trips SET status = 'Completed', deleted = FALSE,
-           approved_by = COALESCE($2, approved_by), approved_at = NOW()
-         WHERE id = $1`,
-        [tripId, patch.approvedBy ?? "system"]
-      );
-    } else {
-      await query(`UPDATE trips SET status = $2::trip_status, deleted = FALSE WHERE id = $1`, [
-        tripId,
-        tripStatus,
-      ]);
-    }
-    return this.getById(id);
+      if (tripStatus === "Deleted") {
+        await client.query(
+          `UPDATE trip_deliveries SET amount = 0, birds = 0, weight = 0 WHERE id = $1`,
+          [id]
+        );
+      } else if (tripStatus === "Completed") {
+        await client.query(
+          `UPDATE trips SET status = 'Completed', deleted = FALSE,
+             approved_by = COALESCE($2, approved_by), approved_at = NOW()
+           WHERE id = $1`,
+          [tripId, patch.approvedBy ?? "system"]
+        );
+      } else {
+        await client.query(`UPDATE trips SET status = $2::trip_status, deleted = FALSE WHERE id = $1`, [
+          tripId,
+          tripStatus,
+        ]);
+      }
+
+      const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [id]);
+      return mapDeliverySale(row.rows[0]);
+    });
   },
 
   async softDelete(id: number, reason?: string) {

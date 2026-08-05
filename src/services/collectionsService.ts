@@ -1,7 +1,14 @@
-import { query } from "../config/db.js";
+import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import type { Collection, RunningBalanceRow } from "../types/operations.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
+import { assertShopExists, assertTripExists } from "../utils/fkValidation.js";
+import {
+  paginatedResult,
+  type PaginatedResult,
+  type PaginationParams,
+} from "../utils/pagination.js";
+import { rethrowIfAppError } from "../utils/pgErrors.js";
 import {
   assertOpsStatus,
   collectionBodySchema,
@@ -57,13 +64,16 @@ const COL_SELECT = `
 `;
 
 export const collectionsService = {
-  async list(filters: {
-    shopId?: number;
-    fromDate?: string;
-    toDate?: string;
-    status?: string;
-    includeDeleted?: boolean;
-  } = {}) {
+  async list(
+    filters: {
+      shopId?: number;
+      fromDate?: string;
+      toDate?: string;
+      status?: string;
+      includeDeleted?: boolean;
+      pagination?: PaginationParams | null;
+    } = {}
+  ): Promise<Collection[] | PaginatedResult<Collection>> {
     const clauses: string[] = [];
     const params: unknown[] = [];
 
@@ -94,6 +104,24 @@ export const collectionsService = {
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+    if (filters.pagination) {
+      const countResult = await query<{ c: string }>(
+        `SELECT COUNT(*)::text AS c FROM trip_deliveries d
+         INNER JOIN trips t ON t.id = d.trip_id ${where}`,
+        params
+      );
+      const total = Number(countResult.rows[0]?.c ?? 0);
+      const pagedParams = [...params, filters.pagination.limit, filters.pagination.offset];
+      const result = await query(
+        `${COL_SELECT} ${where}
+         ORDER BY t.trip_date DESC, d.id DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        pagedParams
+      );
+      return paginatedResult(result.rows.map(mapCollection), total, filters.pagination);
+    }
+
     const result = await query(
       `${COL_SELECT} ${where} ORDER BY t.trip_date DESC, d.id DESC`,
       params
@@ -189,110 +217,141 @@ export const collectionsService = {
       );
     }
 
-    let tripId = data.tripId ?? null;
-    if (data.saleId) {
-      const delivery = await query<{ trip_id: number }>(
-        `SELECT trip_id FROM trip_deliveries WHERE id = $1`,
-        [data.saleId]
-      );
-      if (!delivery.rowCount) throw new AppError(404, "Delivery/sale not found");
-      tripId = num(delivery.rows[0].trip_id);
-    }
+    return withTransaction(async (client) => {
+      try {
+        let tripId = data.tripId ?? null;
+        let deliveryId = data.saleId ?? null;
 
-    // Mark trip rates completed when a collection is recorded
-    const collected = data.amountCollected ?? 0;
-    const due = data.amountDue ?? 0;
-    const rateCompleted = due > 0 ? collected >= due : collected > 0;
+        if (data.saleId) {
+          const delivery = await client.query<{ trip_id: number }>(
+            `SELECT trip_id FROM trip_deliveries WHERE id = $1`,
+            [data.saleId]
+          );
+          if (!delivery.rowCount) throw new AppError(404, "Delivery/sale not found");
+          tripId = num(delivery.rows[0].trip_id);
+          deliveryId = data.saleId;
+        } else {
+          await assertTripExists(tripId, client);
+        }
 
-    await query(
-      `UPDATE trips SET rate_completed = $2, status = CASE
-         WHEN status = 'Draft' THEN 'Pending'::trip_status
-         ELSE status
-       END
-       WHERE id = $1`,
-      [tripId, rateCompleted]
-    );
+        if (data.shopId != null) await assertShopExists(data.shopId, client);
 
-    if (data.saleId) return this.getById(data.saleId);
+        const collected = data.amountCollected ?? 0;
+        const due = data.amountDue ?? 0;
+        const rateCompleted = due > 0 ? collected >= due : collected > 0;
 
-    const first = await query(
-      `SELECT id FROM trip_deliveries WHERE trip_id = $1 ORDER BY id LIMIT 1`,
-      [tripId]
-    );
-    if (!first.rowCount) {
-      throw new AppError(404, "No trip deliveries found for collection");
-    }
-    return this.getById(num(first.rows[0].id));
+        await client.query(
+          `UPDATE trips SET rate_completed = $2, status = CASE
+             WHEN status = 'Draft' THEN 'Pending'::trip_status
+             ELSE status
+           END
+           WHERE id = $1`,
+          [tripId, rateCompleted]
+        );
+
+        if (deliveryId) {
+          const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [deliveryId]);
+          return mapCollection(row.rows[0]);
+        }
+
+        const first = await client.query(
+          `SELECT id FROM trip_deliveries WHERE trip_id = $1 ORDER BY id LIMIT 1`,
+          [tripId]
+        );
+        if (!first.rowCount) {
+          throw new AppError(404, "No trip deliveries found for collection");
+        }
+        const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [
+          first.rows[0].id,
+        ]);
+        return mapCollection(row.rows[0]);
+      } catch (err) {
+        rethrowIfAppError(err);
+        throw err;
+      }
+    });
   },
 
   async update(id: number, body: unknown) {
     const data = parseBody(collectionBodySchema.partial(), body);
-    const delivery = await query<{ trip_id: number }>(
-      `SELECT trip_id FROM trip_deliveries WHERE id = $1`,
-      [id]
-    );
-    if (!delivery.rowCount) throw new AppError(404, "Collection not found");
-    const tripId = num(delivery.rows[0].trip_id);
 
-    if (data.amountDue != null || data.shopId != null || data.shopName != null) {
-      await query(
-        `UPDATE trip_deliveries SET
-           amount = COALESCE($2, amount),
-           shop_id = COALESCE($3, shop_id),
-           shop_name = COALESCE($4, shop_name)
-         WHERE id = $1`,
-        [id, data.amountDue ?? null, data.shopId ?? null, data.shopName ?? null]
+    return withTransaction(async (client) => {
+      const delivery = await client.query<{ trip_id: number }>(
+        `SELECT trip_id FROM trip_deliveries WHERE id = $1`,
+        [id]
       );
-    }
+      if (!delivery.rowCount) throw new AppError(404, "Collection not found");
+      const tripId = num(delivery.rows[0].trip_id);
 
-    if (data.amountCollected != null || data.amountDue != null) {
-      const current = await this.getById(id);
-      const due = data.amountDue ?? current.amountDue;
-      const collected = data.amountCollected ?? current.amountCollected;
-      await query(`UPDATE trips SET rate_completed = $2 WHERE id = $1`, [
-        tripId,
-        due > 0 && collected >= due,
-      ]);
-    }
+      if (data.shopId != null) await assertShopExists(data.shopId, client);
 
-    return this.getById(id);
+      if (data.amountDue != null || data.shopId != null || data.shopName != null) {
+        await client.query(
+          `UPDATE trip_deliveries SET
+             amount = COALESCE($2, amount),
+             shop_id = COALESCE($3, shop_id),
+             shop_name = COALESCE($4, shop_name)
+           WHERE id = $1`,
+          [id, data.amountDue ?? null, data.shopId ?? null, data.shopName ?? null]
+        );
+      }
+
+      if (data.amountCollected != null || data.amountDue != null) {
+        const currentRow = await client.query(`${COL_SELECT} WHERE d.id = $1`, [id]);
+        const current = mapCollection(currentRow.rows[0]);
+        const due = data.amountDue ?? current.amountDue;
+        const collected = data.amountCollected ?? current.amountCollected;
+        await client.query(`UPDATE trips SET rate_completed = $2 WHERE id = $1`, [
+          tripId,
+          due > 0 && collected >= due,
+        ]);
+      }
+
+      const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [id]);
+      return mapCollection(row.rows[0]);
+    });
   },
 
   async updateStatus(id: number, body: unknown) {
     const status = String((body as { status?: string })?.status ?? "");
     assertOpsStatus(status);
-    const delivery = await query<{ trip_id: number }>(
-      `SELECT trip_id FROM trip_deliveries WHERE id = $1`,
-      [id]
-    );
-    if (!delivery.rowCount) throw new AppError(404, "Collection not found");
-    const tripId = num(delivery.rows[0].trip_id);
     const patch = body as { approvedBy?: string; reason?: string };
 
-    if (status === "Approved") {
-      await query(
-        `UPDATE trips SET status = 'Completed', rate_completed = TRUE, deleted = FALSE,
-           approved_by = COALESCE($2, approved_by), approved_at = NOW()
-         WHERE id = $1`,
-        [tripId, patch.approvedBy ?? "system"]
+    return withTransaction(async (client) => {
+      const delivery = await client.query<{ trip_id: number }>(
+        `SELECT trip_id FROM trip_deliveries WHERE id = $1`,
+        [id]
       );
-    } else if (status === "Pending Approval") {
-      await query(
-        `UPDATE trips SET status = 'Pending', rate_completed = FALSE, deleted = FALSE WHERE id = $1`,
-        [tripId]
-      );
-    } else if (status === "Deleted") {
-      await query(
-        `UPDATE trips SET status = 'Deleted', deleted = TRUE, deleted_reason = $2 WHERE id = $1`,
-        [tripId, patch.reason ?? null]
-      );
-    } else {
-      await query(
-        `UPDATE trips SET status = 'Draft', rate_completed = FALSE, deleted = FALSE WHERE id = $1`,
-        [tripId]
-      );
-    }
-    return this.getById(id);
+      if (!delivery.rowCount) throw new AppError(404, "Collection not found");
+      const tripId = num(delivery.rows[0].trip_id);
+
+      if (status === "Approved") {
+        await client.query(
+          `UPDATE trips SET status = 'Completed', rate_completed = TRUE, deleted = FALSE,
+             approved_by = COALESCE($2, approved_by), approved_at = NOW()
+           WHERE id = $1`,
+          [tripId, patch.approvedBy ?? "system"]
+        );
+      } else if (status === "Pending Approval") {
+        await client.query(
+          `UPDATE trips SET status = 'Pending', rate_completed = FALSE, deleted = FALSE WHERE id = $1`,
+          [tripId]
+        );
+      } else if (status === "Deleted") {
+        await client.query(
+          `UPDATE trips SET status = 'Deleted', deleted = TRUE, deleted_reason = $2 WHERE id = $1`,
+          [tripId, patch.reason ?? null]
+        );
+      } else {
+        await client.query(
+          `UPDATE trips SET status = 'Draft', rate_completed = FALSE, deleted = FALSE WHERE id = $1`,
+          [tripId]
+        );
+      }
+
+      const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [id]);
+      return mapCollection(row.rows[0]);
+    });
   },
 
   async softDelete(id: number, reason?: string) {
