@@ -258,7 +258,8 @@ async function seed() {
     createdBy: "seed",
   });
 
-  const rates = await shopRatesService.list({ shopId: shop.id });
+  const ratesResult = await shopRatesService.list({ shopId: shop.id });
+  const rates = Array.isArray(ratesResult) ? ratesResult : ratesResult.data;
   const rate = rates[0] ?? (await shopRatesService.getById(sale.id));
 
   // Partial pending: rate_completed false → pending collections

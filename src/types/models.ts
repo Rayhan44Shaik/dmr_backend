@@ -224,6 +224,22 @@ export interface Trip {
   updatedAt?: string | null;
 }
 
+/** List-view DTO: scalar trip fields + resume metadata (no nested hydration). */
+export interface TripSummary extends Trip {
+  resumeStep: "start" | "farm" | "pickup" | "deliveries" | "expenses" | null;
+  resumeStepLabel: string | null;
+  wizardProgress: {
+    start: boolean;
+    farm: boolean;
+    pickup: boolean;
+    deliveries: boolean;
+    expenses: boolean;
+    completedSteps: number;
+    totalSteps: number;
+    percentComplete: number;
+  };
+}
+
 export interface DutyAssignment {
   id: string;
   employeeId: number;

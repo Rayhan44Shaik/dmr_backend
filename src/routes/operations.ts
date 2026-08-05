@@ -1,13 +1,34 @@
 import { Router } from "express";
-import { asyncHandler } from "../middleware/errorHandler.js";
+import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { collectionsService } from "../services/collectionsService.js";
 import { dashboardService } from "../services/dashboardService.js";
 import { fuelExpensesService } from "../services/fuelExpensesService.js";
 import { shopRatesService } from "../services/shopRatesService.js";
 import { shopSalesService } from "../services/shopSalesService.js";
 import { tripsService } from "../services/tripsService.js";
+import { parsePagination } from "../utils/pagination.js";
 
 export const operationsRouter = Router();
+
+function tripListFilters(req: { query: Record<string, unknown> }) {
+  const { params: pagination, enabled } = parsePagination(req.query);
+  return {
+    fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+    toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+    status: typeof req.query.status === "string" ? req.query.status : undefined,
+    vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+    supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
+    search: typeof req.query.search === "string" ? req.query.search : undefined,
+    includeDeleted: req.query.includeDeleted === "true",
+    full: req.query.full === "true",
+    pagination: enabled ? pagination : null,
+  };
+}
+
+function opsListPagination(req: { query: Record<string, unknown> }) {
+  const { params, enabled } = parsePagination(req.query);
+  return enabled ? params : null;
+}
 
 // ── Dashboard ────────────────────────────────────────────────────
 operationsRouter.get(
@@ -22,17 +43,7 @@ operationsRouter.get(
 operationsRouter.get(
   "/trips",
   asyncHandler(async (req, res) => {
-    res.json(
-      await tripsService.list({
-        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
-        status: typeof req.query.status === "string" ? req.query.status : undefined,
-        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
-        supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
-        search: typeof req.query.search === "string" ? req.query.search : undefined,
-        includeDeleted: req.query.includeDeleted === "true",
-      })
-    );
+    res.json(await tripsService.list(tripListFilters(req)));
   })
 );
 
@@ -64,8 +75,17 @@ operationsRouter.put(
 operationsRouter.post(
   "/trips/:id/steps/:step",
   asyncHandler(async (req, res) => {
-    const step = req.params.step as "start" | "farm" | "pickup" | "deliveries" | "expenses";
-    res.json(await tripsService.submitStep(Number(req.params.id), step, req.body));
+    const step = req.params.step;
+    if (!["start", "farm", "pickup", "deliveries", "expenses"].includes(step)) {
+      throw new AppError(400, "Invalid step. Use start|farm|pickup|deliveries|expenses");
+    }
+    res.json(
+      await tripsService.submitStep(
+        Number(req.params.id),
+        step as "start" | "farm" | "pickup" | "deliveries" | "expenses",
+        req.body
+      )
+    );
   })
 );
 
@@ -97,6 +117,7 @@ operationsRouter.get(
         shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         includeDeleted: req.query.includeDeleted === "true",
+        pagination: opsListPagination(req),
       })
     );
   })
@@ -153,6 +174,7 @@ operationsRouter.get(
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         includeDeleted: req.query.includeDeleted === "true",
+        pagination: opsListPagination(req),
       })
     );
   })
@@ -244,6 +266,7 @@ operationsRouter.get(
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         includeDeleted: req.query.includeDeleted === "true",
+        pagination: opsListPagination(req),
       })
     );
   })
@@ -300,6 +323,7 @@ operationsRouter.get(
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         includeDeleted: req.query.includeDeleted === "true",
+        pagination: opsListPagination(req),
       })
     );
   })

@@ -1,23 +1,31 @@
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { tripsService } from "../services/tripsService.js";
+import { parsePagination } from "../utils/pagination.js";
 
 export const tripsRouter = Router();
+
+function tripListFilters(req: {
+  query: Record<string, unknown>;
+}) {
+  const { params: pagination, enabled } = parsePagination(req.query);
+  return {
+    fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+    toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+    status: typeof req.query.status === "string" ? req.query.status : undefined,
+    vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+    supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
+    search: typeof req.query.search === "string" ? req.query.search : undefined,
+    includeDeleted: req.query.includeDeleted === "true",
+    full: req.query.full === "true",
+    pagination: enabled ? pagination : null,
+  };
+}
 
 tripsRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    res.json(
-      await tripsService.list({
-        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
-        status: typeof req.query.status === "string" ? req.query.status : undefined,
-        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
-        supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
-        search: typeof req.query.search === "string" ? req.query.search : undefined,
-        includeDeleted: req.query.includeDeleted === "true",
-      })
-    );
+    res.json(await tripsService.list(tripListFilters(req)));
   })
 );
 
