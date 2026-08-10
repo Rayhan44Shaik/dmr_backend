@@ -36,6 +36,26 @@ tripsRouter.get(
   })
 );
 
+/**
+ * Final Step 1 submission.
+ * This is intentionally the only API call made while submitting Step 1.
+ * It creates the trip once in PostgreSQL; it is NOT a draft/autosave endpoint.
+ * Keep this route before GET /:id so "steps" is not interpreted as an id.
+ */
+tripsRouter.post(
+  "/steps/start",
+  asyncHandler(async (req, res) => {
+    const payload = {
+      ...req.body,
+      status: "Draft" as const,
+      startStepSubmitted: true,
+      startTime: req.body?.startTime || new Date().toISOString(),
+    };
+
+    res.status(201).json(await tripsService.save(null, payload));
+  })
+);
+
 tripsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
