@@ -65,6 +65,7 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     openingMeter: numOrNull(row.opening_meter),
     advanceAmount: num(row.advance_amount),
     startStepSubmitted: Boolean(row.start_step_submitted),
+    startStepSubmittedAt: isoOrNull(row.start_step_submitted_at),
 
     sourceFarmId: numOrNull(row.source_farm_id),
     sourceFarm: row.source_farm == null ? null : str(row.source_farm),
@@ -81,6 +82,7 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     farmRate: numOrNull(row.farm_rate),
     farmAmount: numOrNull(row.farm_amount),
     farmStepSubmitted: Boolean(row.farm_step_submitted),
+    farmStepSubmittedAt: isoOrNull(row.farm_step_submitted_at),
 
     dcWeight: num(row.dc_weight),
     totalBirds: num(row.total_birds),
@@ -89,8 +91,10 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     pickupLoadTime: isoOrNull(row.pickup_load_time),
     dcPhotoKey: row.dc_photo_key == null ? null : str(row.dc_photo_key),
     pickupStepSubmitted: Boolean(row.pickup_step_submitted),
+    pickupStepSubmittedAt: isoOrNull(row.pickup_step_submitted_at),
 
     deliveryStepSubmitted: Boolean(row.delivery_step_submitted),
+    deliveriesStepSubmittedAt: isoOrNull(row.deliveries_step_submitted_at),
 
     closingMeter: numOrNull(row.closing_meter),
     endMeter: numOrNull(row.end_meter),
@@ -116,6 +120,7 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     submittedAt: isoOrNull(row.submitted_at),
     endStepSubmitted: Boolean(row.end_step_submitted),
     expensesStepSubmitted: Boolean(row.expenses_step_submitted),
+    expensesStepSubmittedAt: isoOrNull(row.expenses_step_submitted_at),
 
     totalKm: num(row.total_km),
     totalShops: num(row.total_shops),
@@ -983,6 +988,41 @@ export const tripsService = {
           if (code !== "42703") throw err;
         }
 
+        // First-submission timestamps (idempotent: first write wins, DB server time).
+        // Guarded so code keeps working if the 011 migration hasn't been applied yet.
+        try {
+          await client.query(
+            `UPDATE trips SET
+               start_step_submitted_at = CASE
+                 WHEN COALESCE($2::boolean, FALSE) AND start_step_submitted_at IS NULL THEN NOW()
+                 ELSE start_step_submitted_at END,
+               farm_step_submitted_at = CASE
+                 WHEN COALESCE($3::boolean, FALSE) AND farm_step_submitted_at IS NULL THEN NOW()
+                 ELSE farm_step_submitted_at END,
+               pickup_step_submitted_at = CASE
+                 WHEN COALESCE($4::boolean, FALSE) AND pickup_step_submitted_at IS NULL THEN NOW()
+                 ELSE pickup_step_submitted_at END,
+               deliveries_step_submitted_at = CASE
+                 WHEN COALESCE($5::boolean, FALSE) AND deliveries_step_submitted_at IS NULL THEN NOW()
+                 ELSE deliveries_step_submitted_at END,
+               expenses_step_submitted_at = CASE
+                 WHEN COALESCE($6::boolean, FALSE) AND expenses_step_submitted_at IS NULL THEN NOW()
+                 ELSE expenses_step_submitted_at END
+             WHERE id = $1`,
+            [
+              tripId,
+              body.startStepSubmitted ?? null,
+              body.farmStepSubmitted ?? null,
+              body.pickupStepSubmitted ?? null,
+              body.deliveryStepSubmitted ?? null,
+              body.expensesStepSubmitted ?? null,
+            ]
+          );
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          if (code !== "42703") throw err;
+        }
+
         if (body.helpers || body.loaders) {
           await replaceCrew(
             client,
@@ -1089,7 +1129,10 @@ export const tripsService = {
         expensesStepSubmitted: true,
         endStepSubmitted: true,
         status: "Pending" as TripStatus,
-        submittedAt: body.submittedAt ?? new Date().toISOString(),
+        // submitted_at is a first-submission marker: never overwrite it.
+        submittedAt: current.expenses_step_submitted
+          ? undefined
+          : (body.submittedAt ?? new Date().toISOString()),
         syncFuel: true,
       },
     };
@@ -1170,6 +1213,18 @@ export const tripsService = {
         } else {
           throw err;
         }
+      }
+
+      // Diesel bills synced to fuel_expenses get Approved only when the whole
+      // trip completion succeeds — same transaction, so failure rolls both back.
+      if (status === "Completed") {
+        await client.query(
+          `UPDATE fuel_expenses
+             SET status = 'Approved', approved_by = $2, approved_date = NOW(),
+                 ops_status = 'Approved', updated_at = NOW()
+           WHERE trip_id = $1 AND status = 'Pending'`,
+          [id, body.approvedBy ?? "system"]
+        );
       }
 
       const trip = await hydrateTrip(client, result!.rows[0], { includeDcPhoto: true });

@@ -15,15 +15,23 @@ export function str(value: unknown, fallback = ""): string {
   return String(value);
 }
 
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
 export function dateOnly(value: unknown): string | null {
   if (!value) return null;
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value.toISOString().slice(0, 10);
+    // node-postgres parses `date` columns as JS Dates at LOCAL midnight, so
+    // use local date components (not toISOString) to avoid a UTC off-by-one.
+    return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
   }
   const s = String(value);
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
   const parsed = new Date(s);
-  if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+  if (!Number.isNaN(parsed.getTime())) {
+    return `${parsed.getFullYear()}-${pad2(parsed.getMonth() + 1)}-${pad2(parsed.getDate())}`;
+  }
   return s.slice(0, 10);
 }
 

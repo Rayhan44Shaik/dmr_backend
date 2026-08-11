@@ -102,11 +102,14 @@ tripsRouter.post(
 tripsRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
+    const reason =
+      typeof req.body?.reason === "string"
+        ? req.body.reason
+        : typeof req.query.reason === "string"
+          ? req.query.reason
+          : undefined;
     res.json(
-      await tripsService.softDelete(
-        Number(req.params.id),
-        typeof req.body?.reason === "string" ? req.body.reason : undefined
-      )
+      await tripsService.softDelete(Number(req.params.id), reason)
     );
   })
 );

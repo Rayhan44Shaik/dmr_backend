@@ -9,6 +9,16 @@ import type {
   Vehicle,
 } from "../types/models.js";
 import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
+import {
+  aadharNumberOrNull,
+  isMissing,
+  licenseNumberOrNull,
+  validateBirdTypeFields,
+  validateEmployeeFields,
+  validateFarmFields,
+  validateShopFields,
+  validateVehicleFields,
+} from "../utils/masterValidation.js";
 
 function mapEmployee(row: Record<string, unknown>): Employee {
   return {
@@ -108,8 +118,11 @@ function mapBirdType(row: Record<string, unknown>): BirdType {
   };
 }
 
-const UNIQUE_CHECK: Record<string, { table: string; column: string; label: string }> = {
-  employee: { table: "employees", column: "employee_no", label: "Employee No" },
+const UNIQUE_CHECK: Record<
+  string,
+  { table: string; column: string; label: string; numeric?: boolean }
+> = {
+  employee: { table: "employees", column: "employee_no", label: "Employee No", numeric: true },
   vehicle: { table: "vehicles", column: "vehicle_number", label: "Vehicle number" },
   farm: { table: "farms", column: "farm_name", label: "Farm" },
   shop: { table: "shops", column: "shop_name", label: "Shop" },
@@ -122,9 +135,11 @@ async function assertUnique(
   value: string,
   excludeId?: number
 ) {
-  const { table, column, label } = UNIQUE_CHECK[key];
+  const { table, column, label, numeric } = UNIQUE_CHECK[key];
+  // LOWER() is only valid on text columns (employee_no is INTEGER).
+  const compare = numeric ? `${column} = $1` : `LOWER(${column}) = LOWER($1)`;
   const result = await query(
-    `SELECT id FROM ${table} WHERE LOWER(${column}) = LOWER($1)
+    `SELECT id FROM ${table} WHERE ${compare}
        AND ($2::int IS NULL OR id <> $2) LIMIT 1`,
     [value, excludeId ?? null]
   );
@@ -140,6 +155,63 @@ function requireFields(body: Record<string, unknown>, fields: string[]) {
   }
 }
 
+/** Throws the first shared-validation error as a 400 (normal CRUD format). */
+function assertValid(
+  errors: { field: string; message: string }[]
+): void {
+  if (errors.length) throw new AppError(400, errors[0].message);
+}
+
+/**
+ * Rejects employee duplicates for department+name (case-insensitive),
+ * phone and email — excluding the row being updated. Matches bulk rules.
+ */
+async function assertEmployeeUnique(
+  body: {
+    department?: string;
+    employeeName?: string;
+    phoneNumber?: string;
+    email?: string;
+  },
+  excludeId?: number
+) {
+  const department = str(body.department ?? "").trim();
+  const employeeName = str(body.employeeName ?? "").trim();
+  const phoneNumber = str(body.phoneNumber ?? "").trim();
+  const email = str(body.email ?? "").trim();
+
+  const nameDup = await query(
+    `SELECT id FROM employees
+     WHERE LOWER(department) = LOWER($1) AND LOWER(employee_name) = LOWER($2)
+       AND ($3::int IS NULL OR id <> $3) LIMIT 1`,
+    [department, employeeName, excludeId ?? null]
+  );
+  if (nameDup.rowCount) {
+    throw new AppError(
+      409,
+      `An employee with the name "${employeeName}" already exists in the ${department} department.`
+    );
+  }
+
+  if (phoneNumber) {
+    const phoneDup = await query(
+      `SELECT id FROM employees
+       WHERE phone_number = $1 AND ($2::int IS NULL OR id <> $2) LIMIT 1`,
+      [phoneNumber, excludeId ?? null]
+    );
+    if (phoneDup.rowCount) throw new AppError(409, `Phone Number "${phoneNumber}" already exists.`);
+  }
+
+  if (email) {
+    const emailDup = await query(
+      `SELECT id FROM employees
+       WHERE LOWER(email) = LOWER($1) AND ($2::int IS NULL OR id <> $2) LIMIT 1`,
+      [email, excludeId ?? null]
+    );
+    if (emailDup.rowCount) throw new AppError(409, `Email "${email}" already exists.`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Bulk-import helpers (Farms / Vehicles / Employees / Bird Types)
 // ---------------------------------------------------------------------------
@@ -148,49 +220,6 @@ type BulkRowError = { row: number; field?: string; message: string };
 
 function bulkValidationFailed(errors: BulkRowError[]): never {
   throw new AppError(400, "Bulk import validation failed", { errors });
-}
-
-const EMPLOYEE_DEPARTMENTS = [
-  "Accountant",
-  "Collection",
-  "Driver",
-  "Helper",
-  "Loader",
-  "Office Staff",
-  "Operations",
-  "Other",
-  "Sales",
-  "Supervisor",
-];
-
-const ACTIVE_STATUSES = ["Active", "Inactive"];
-const EMPLOYEE_STATUSES = ["Active", "Inactive", "Suspended"];
-
-function isMissing(value: unknown): boolean {
-  return value === undefined || value === null || String(value).trim() === "";
-}
-
-function isPositiveNumber(value: unknown): boolean {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0;
-}
-
-function isValidDateInput(value: unknown): boolean {
-  if (isMissing(value)) return true;
-  const s = String(value).trim();
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return true;
-  const parsed = new Date(s);
-  return !Number.isNaN(parsed.getTime());
-}
-
-function aadharNumberOrNull(raw: Record<string, unknown>): string | null {
-  const value = str(raw.aadharNumber ?? raw.aadhar_number ?? "").replace(/\s/g, "");
-  return value || null;
-}
-
-function licenseNumberOrNull(raw: Record<string, unknown>): string | null {
-  const value = str(raw.licenseNumber ?? raw.license_number ?? "").trim();
-  return value || null;
 }
 
 export const mastersService = {
@@ -205,12 +234,13 @@ export const mastersService = {
   },
 
   async upsertEmployee(body: Partial<Employee> & { employeeName: string }) {
-    requireFields(body, ["employeeName"]);
+    assertValid(validateEmployeeFields(body));
 
     if (body.id) {
       if (body.employeeNo != null) {
         await assertUnique("employee", String(body.employeeNo), body.id);
       }
+      await assertEmployeeUnique(body, body.id);
       const result = await query(
         `UPDATE employees SET
           employee_no=$2, employee_name=$3, department=$4, role=$5,
@@ -243,6 +273,7 @@ export const mastersService = {
     if (body.employeeNo != null) {
       await assertUnique("employee", String(body.employeeNo));
     }
+    await assertEmployeeUnique(body);
     const result = await query(
       `INSERT INTO employees (
          employee_no, employee_name, department, role, phone_number, email,
@@ -291,7 +322,7 @@ export const mastersService = {
   },
 
   async upsertVehicle(body: Partial<Vehicle> & { vehicleNumber: string }) {
-    requireFields(body, ["vehicleNumber", "vehicleType", "engineNumber", "chassisNumber"]);
+    assertValid(validateVehicleFields(body));
 
     if (body.id) {
       await assertUnique("vehicle", body.vehicleNumber, body.id);
@@ -393,7 +424,7 @@ export const mastersService = {
   },
 
   async upsertFarm(body: Partial<Farm> & { farmName: string }) {
-    requireFields(body, ["farmName"]);
+    assertValid(validateFarmFields(body));
 
     if (body.id) {
       await assertUnique("farm", body.farmName, body.id);
@@ -466,7 +497,7 @@ export const mastersService = {
   },
 
   async upsertShop(body: Partial<Shop> & { shopName: string }) {
-    requireFields(body, ["shopName", "ownerName", "phoneNumber", "village"]);
+    assertValid(validateShopFields(body));
 
     if (body.id) {
       await assertUnique("shop", body.shopName, body.id);
@@ -537,14 +568,19 @@ export const mastersService = {
       throw new AppError(400, "No shop rows provided.");
     }
 
+    const errors: BulkRowError[] = [];
+    inputs.forEach((raw, index) => {
+      const row = index + 1;
+      validateShopFields(raw).forEach(({ field, message }) =>
+        errors.push({ row, field, message })
+      );
+    });
+    if (errors.length) bulkValidationFailed(errors);
+
     return withTransaction(async (client) => {
       const created: Shop[] = [];
       for (const input of inputs) {
         const shopName = str(input.shopName).trim();
-        requireFields(
-          { ...input, shopName },
-          ["shopName", "ownerName", "phoneNumber", "village"]
-        );
 
         const dup = await client.query(
           `SELECT 1 FROM shops WHERE LOWER(shop_name) = LOWER($1) LIMIT 1`,
@@ -591,24 +627,9 @@ export const mastersService = {
     const errors: BulkRowError[] = [];
     inputs.forEach((raw, index) => {
       const row = index + 1;
-      const farmName = str(raw.farmName ?? raw.farm_name).trim();
-      const ownerName = str(raw.ownerName ?? raw.owner_name).trim();
-      const supervisorName = str(raw.supervisorName ?? raw.supervisor_name).trim();
-      const phoneNumber = str(raw.phoneNumber ?? raw.phone ?? raw.phone_number).trim();
-      const village = str(raw.village).trim();
-      const capacity = raw.capacity ?? raw.birdCapacity;
-
-      if (isMissing(farmName)) errors.push({ row, field: "farmName", message: "Farm Name is required." });
-      if (isMissing(ownerName)) errors.push({ row, field: "ownerName", message: "Owner Name is required." });
-      else if (ownerName.length < 3) errors.push({ row, field: "ownerName", message: "Owner Name must contain at least 3 characters." });
-      if (isMissing(supervisorName)) errors.push({ row, field: "supervisorName", message: "Supervisor Name is required." });
-      if (isMissing(phoneNumber)) errors.push({ row, field: "phoneNumber", message: "Mobile Number is required." });
-      else if (!/^[0-9]{10}$/.test(phoneNumber)) errors.push({ row, field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
-      if (isMissing(village)) errors.push({ row, field: "village", message: "Village is required." });
-      if (!isPositiveNumber(capacity)) errors.push({ row, field: "capacity", message: "Bird Capacity must be a positive number." });
-      if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
-        errors.push({ row, field: "status", message: "Status must be Active or Inactive." });
-      }
+      validateFarmFields(raw).forEach(({ field, message }) =>
+        errors.push({ row, field, message })
+      );
     });
     if (errors.length) bulkValidationFailed(errors);
 
@@ -668,43 +689,9 @@ export const mastersService = {
     const errors: BulkRowError[] = [];
     inputs.forEach((raw, index) => {
       const row = index + 1;
-      const vehicleNumber = str(raw.vehicleNumber ?? raw.vehicle_number).trim();
-      const vehicleType = str(raw.vehicleType ?? raw.vehicle_type).trim();
-      const engineNumber = str(raw.engineNumber ?? raw.engine_number).trim();
-      const chassisNumber = str(raw.chassisNumber ?? raw.chassis_number).trim();
-      const noOfBoxes = raw.noOfBoxes;
-      const birdCapacity = raw.birdCapacity;
-      const capacityKg = raw.capacityKg;
-      const emiDay = raw.emiDay;
-      const totalEMIs = raw.totalEMIs;
-
-      if (isMissing(vehicleNumber)) errors.push({ row, field: "vehicleNumber", message: "Vehicle Number is required." });
-      if (isMissing(vehicleType)) errors.push({ row, field: "vehicleType", message: "Vehicle Type is required." });
-      if (!isPositiveNumber(noOfBoxes)) errors.push({ row, field: "noOfBoxes", message: "No. of Boxes must be a positive number." });
-      if (!isPositiveNumber(birdCapacity)) errors.push({ row, field: "birdCapacity", message: "Bird Capacity must be a positive number." });
-      if (!isPositiveNumber(capacityKg)) errors.push({ row, field: "capacityKg", message: "Capacity (Kg) must be a positive number." });
-      if (isMissing(engineNumber)) errors.push({ row, field: "engineNumber", message: "Engine Number is required." });
-      if (isMissing(chassisNumber)) errors.push({ row, field: "chassisNumber", message: "Chassis Number is required." });
-
-      if (!isMissing(emiDay)) {
-        const day = Number(emiDay);
-        if (!Number.isInteger(day) || day < 1 || day > 31) {
-          errors.push({ row, field: "emiDay", message: "EMI Day must be between 1 and 31." });
-        }
-      }
-      if (!isMissing(totalEMIs)) {
-        const count = Number(totalEMIs);
-        if (!Number.isFinite(count) || count <= 0) {
-          errors.push({ row, field: "totalEMIs", message: "Total EMIs must be greater than zero." });
-        }
-      }
-
-      for (const field of ["insuranceExpiry", "permitExpiry", "fitnessExpiry", "purchaseDate", "emiStartDate", "rcDate"]) {
-        if (!isValidDateInput(raw[field])) errors.push({ row, field, message: `${field} must be a valid date (YYYY-MM-DD).` });
-      }
-      if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
-        errors.push({ row, field: "status", message: "Status must be Active or Inactive." });
-      }
+      validateVehicleFields(raw).forEach(({ field, message }) =>
+        errors.push({ row, field, message })
+      );
     });
     if (errors.length) bulkValidationFailed(errors);
 
@@ -778,45 +765,9 @@ export const mastersService = {
     const errors: BulkRowError[] = [];
     inputs.forEach((raw, index) => {
       const row = index + 1;
-      const employeeName = str(raw.employeeName ?? raw.employee_name).trim();
-      const department = str(raw.department).trim();
-      const phoneNumber = str(raw.phoneNumber ?? raw.phone ?? raw.phone_number).trim();
-      const email = str(raw.email).trim();
-      const aadharNumber = str(raw.aadharNumber ?? raw.aadhar_number).replace(/\s/g, "");
-      const salary = raw.salary;
-
-      if (isMissing(employeeName)) errors.push({ row, field: "employeeName", message: "Employee Name is required." });
-      if (isMissing(department)) errors.push({ row, field: "department", message: "Department is required." });
-      else if (!EMPLOYEE_DEPARTMENTS.some((d) => d.toLowerCase() === department.toLowerCase())) {
-        errors.push({ row, field: "department", message: `Department "${department}" is not valid.` });
-      }
-      if (isMissing(phoneNumber)) errors.push({ row, field: "phoneNumber", message: "Phone Number is required." });
-      else if (!/^[0-9]{10}$/.test(phoneNumber)) errors.push({ row, field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
-
-      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        errors.push({ row, field: "email", message: "Please enter a valid email address." });
-      }
-
-      const salaryNum = Number(salary);
-      if (isMissing(salary) || !Number.isFinite(salaryNum) || salaryNum < 0) {
-        errors.push({ row, field: "salary", message: "Salary must be a non-negative number." });
-      }
-
-      if (aadharNumber && !/^[0-9]{12}$/.test(aadharNumber)) {
-        errors.push({ row, field: "aadharNumber", message: "Aadhar Number must be exactly 12 digits." });
-      }
-      if (
-        (department.toLowerCase() === "driver" || department.toLowerCase() === "collection") &&
-        isMissing(raw.licenseNumber)
-      ) {
-        errors.push({ row, field: "licenseNumber", message: "License Number is required for Driver and Collection departments." });
-      }
-      if (!isValidDateInput(raw.joiningDate)) {
-        errors.push({ row, field: "joiningDate", message: "Joining Date must be a valid date (YYYY-MM-DD)." });
-      }
-      if (!isMissing(raw.status) && !EMPLOYEE_STATUSES.includes(String(raw.status).trim())) {
-        errors.push({ row, field: "status", message: "Status must be Active, Inactive or Suspended." });
-      }
+      validateEmployeeFields(raw).forEach(({ field, message }) =>
+        errors.push({ row, field, message })
+      );
     });
     if (errors.length) bulkValidationFailed(errors);
 
@@ -912,16 +863,9 @@ export const mastersService = {
     const errors: BulkRowError[] = [];
     inputs.forEach((raw, index) => {
       const row = index + 1;
-      const birdType = str(raw.birdType ?? raw.bird_type).trim();
-      const averageWeight = raw.averageWeight ?? raw.averageWeightKg ?? raw.average_weight;
-
-      if (isMissing(birdType)) errors.push({ row, field: "birdType", message: "Bird Type is required." });
-      if (!isPositiveNumber(averageWeight)) {
-        errors.push({ row, field: "averageWeight", message: "Average Weight must be a positive number." });
-      }
-      if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
-        errors.push({ row, field: "status", message: "Status must be Active or Inactive." });
-      }
+      validateBirdTypeFields(raw).forEach(({ field, message }) =>
+        errors.push({ row, field, message })
+      );
     });
     if (errors.length) bulkValidationFailed(errors);
 
@@ -1038,7 +982,7 @@ export const mastersService = {
   },
 
   async upsertBirdType(body: Partial<BirdType> & { birdType: string }) {
-    requireFields(body, ["birdType"]);
+    assertValid(validateBirdTypeFields(body));
 
     if (body.id) {
       await assertUnique("birdType", body.birdType, body.id);

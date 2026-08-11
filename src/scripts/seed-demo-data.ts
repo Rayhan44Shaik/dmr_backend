@@ -70,6 +70,7 @@ async function findOrCreateEmployee(input: {
   role: string;
   phoneNumber: string;
   salary: number;
+  licenseNumber?: string | null;
   joiningDate?: string | null;
 }): Promise<Employee> {
   const existing = (await mastersService.listEmployees()).find(
@@ -93,6 +94,8 @@ async function findOrCreateVehicle(input: {
   noOfBoxes: number;
   birdCapacity: number;
   capacityKg: number;
+  engineNumber: string;
+  chassisNumber: string;
 }): Promise<Vehicle> {
   const existing = (await mastersService.listVehicles()).find(
     (v) =>
@@ -444,6 +447,7 @@ async function main() {
     department: "Driver",
     role: "Driver",
     phoneNumber: "9000000011",
+    licenseNumber: "AP09-2017-0000013",
     salary: 18000,
     joiningDate: "2022-03-15",
   });
@@ -478,6 +482,8 @@ async function main() {
     noOfBoxes: 85,
     birdCapacity: 4500,
     capacityKg: 10500,
+    engineNumber: "ENG160001",
+    chassisNumber: "CHS160001",
   });
   const tata407 = await findOrCreateVehicle({
     vehicleNumber: "AP16AC5678",
@@ -485,6 +491,8 @@ async function main() {
     noOfBoxes: 50,
     birdCapacity: 2300,
     capacityKg: 5000,
+    engineNumber: "ENG160002",
+    chassisNumber: "CHS160002",
   });
 
   const lakshmiFarm = await findOrCreateFarm({

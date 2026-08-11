@@ -17,6 +17,7 @@ async function seed() {
     department: "Driver",
     role: "Driver",
     phoneNumber: "9000000001",
+    licenseNumber: "AP09-2017-0000012",
     salary: 18000,
     status: "Active",
     joiningDate: "2024-01-15",
@@ -58,12 +59,16 @@ async function seed() {
     noOfBoxes: 85,
     birdCapacity: 3500,
     capacityKg: 7000,
+    engineNumber: "ENG390001",
+    chassisNumber: "CHS390001",
     status: "Active",
   });
 
   const farm = await mastersService.upsertFarm({
     farmName: "Sri Venkateswara Farm",
     ownerName: "Venkat",
+    supervisorName: "Suresh",
+    phoneNumber: "9652000001",
     village: "Guntur",
     capacity: 20000,
     status: "Active",
@@ -72,6 +77,7 @@ async function seed() {
   const shop = await mastersService.upsertShop({
     shopName: "City Broiler",
     ownerName: "Raju",
+    phoneNumber: "9885000001",
     village: "Vijayawada",
     status: "Active",
   });

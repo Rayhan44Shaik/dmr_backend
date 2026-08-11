@@ -157,6 +157,7 @@ export interface Trip {
   openingMeter: number | null;
   advanceAmount: number;
   startStepSubmitted: boolean;
+  startStepSubmittedAt: string | null;
 
   sourceFarmId: number | null;
   sourceFarm: string | null;
@@ -173,6 +174,7 @@ export interface Trip {
   farmRate?: number | null;
   farmAmount?: number | null;
   farmStepSubmitted: boolean;
+  farmStepSubmittedAt: string | null;
 
   dcWeight: number;
   totalBirds: number;
@@ -182,9 +184,11 @@ export interface Trip {
   boxDetails: BoxDetail[];
   dcPhotoKey?: string | null;
   pickupStepSubmitted: boolean;
+  pickupStepSubmittedAt: string | null;
 
   deliveries: ShopDelivery[];
   deliveryStepSubmitted: boolean;
+  deliveriesStepSubmittedAt: string | null;
 
   closingMeter: number | null;
   endMeter?: number | null;
@@ -211,6 +215,7 @@ export interface Trip {
   submittedAt?: string | null;
   endStepSubmitted: boolean;
   expensesStepSubmitted: boolean;
+  expensesStepSubmittedAt: string | null;
 
   totalKm: number;
   totalShops: number;

@@ -2,6 +2,7 @@ import { query } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import type { Route } from "../types/models.js";
 import { num, str } from "../utils/coerce.js";
+import { validateRouteFields } from "../utils/masterValidation.js";
 
 function mapRoute(row: Record<string, unknown>): Route {
   return {
@@ -34,9 +35,8 @@ export const routesService = {
   },
 
   async upsertRoute(body: Partial<Route> & { routeName: string }) {
-    if (!body.routeName?.trim()) {
-      throw new AppError(400, "Route name is required.");
-    }
+    const errors = validateRouteFields(body);
+    if (errors.length) throw new AppError(400, errors[0].message);
 
     if (body.id) {
       await this.assertUniqueName(body.routeName, body.id);
@@ -86,8 +86,11 @@ export const routesService = {
   },
 
   async deleteRoute(id: number) {
-    const result = await query(`DELETE FROM routes WHERE id = $1 RETURNING id`, [id]);
+    const result = await query(
+      `UPDATE routes SET status='Inactive' WHERE id=$1 RETURNING *`,
+      [id]
+    );
     if (!result.rowCount) throw new AppError(404, "Route not found");
-    return { id, deleted: true };
+    return { id, deleted: true, deactivated: true };
   },
 };
