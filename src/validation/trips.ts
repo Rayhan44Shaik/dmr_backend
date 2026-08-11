@@ -3,39 +3,40 @@ import { AppError } from "../middleware/errorHandler.js";
 import type { TripWizardStep } from "../utils/tripResume.js";
 
 const boxDetailSchema = z.object({
-  boxNo: z.number().int().positive(),
-  birds: z.number().int().nonnegative().optional(),
-  weight: z.number().nonnegative().optional(),
+  boxNo: z.coerce.number().int().positive(),
+  birds: z.coerce.number().int().nonnegative().optional(),
+  weight: z.coerce.number().nonnegative().optional(),
 });
 
+// Used for autosave (very permissive)
 const deliverySchema = z.object({
-  id: z.number().int().optional(),
-  serialNo: z.number().int().nullable().optional(),
-  boxNo: z.number().int().nullable().optional(),
-  shopId: z.number().int().nullable().optional(),
+  id: z.coerce.number().int().optional(),
+  serialNo: z.coerce.number().int().nullable().optional(),
+  boxNo: z.coerce.number().int().nullable().optional(),
+  shopId: z.coerce.number().int().nullable().optional(),
   shopName: z.string().optional(),
-  birdTypeId: z.number().int().nullable().optional(),
+  birdTypeId: z.coerce.number().int().nullable().optional(),
   birdType: z.string().optional(),
-  birds: z.number().int().nonnegative().optional(),
-  weight: z.number().nonnegative().optional(),
-  mortality: z.number().int().nonnegative().optional(),
-  mortKg: z.number().nonnegative().nullable().optional(),
-  rate: z.number().nonnegative().nullable().optional(),
-  amount: z.number().nonnegative().optional(),
+  birds: z.coerce.number().int().nonnegative().optional(),
+  weight: z.coerce.number().nonnegative().optional(),
+  mortality: z.coerce.number().int().nonnegative().optional(),
+  mortKg: z.coerce.number().nonnegative().nullable().optional(),
+  rate: z.coerce.number().nonnegative().nullable().optional(),
+  amount: z.coerce.number().nonnegative().optional(),
   remarks: z.string().optional(),
   deliveryMode: z.enum(["box", "weight"]).optional(),
-  selectedBoxIds: z.array(z.number().int()).optional(),
-  farmBirds: z.number().int().nullable().optional(),
-  farmWeight: z.number().nullable().optional(),
+  selectedBoxIds: z.array(z.coerce.number().int()).optional(),
+  farmBirds: z.coerce.number().int().nullable().optional(),
+  farmWeight: z.coerce.number().nullable().optional(),
   perBoxData: z.array(boxDetailSchema).optional(),
   autoCaptureTime: z.string().nullable().optional(),
 });
 
 const dieselEntrySchema = z.object({
-  rowIndex: z.number().int().nonnegative(),
-  litres: z.number().nonnegative().nullable().optional(),
-  rate: z.number().nonnegative().nullable().optional(),
-  meter: z.number().nonnegative().nullable().optional(),
+  rowIndex: z.coerce.number().int().nonnegative(),
+  litres: z.coerce.number().nonnegative().nullable().optional(),
+  rate: z.coerce.number().nonnegative().nullable().optional(),
+  meter: z.coerce.number().nonnegative().nullable().optional(),
   bunkName: z.string().nullable().optional(),
   bunkGps: z.string().nullable().optional(),
   imageData: z.string().nullable().optional(),
@@ -47,13 +48,13 @@ export const tripAutosaveSchema = z
     tripDate: z.string().optional(),
     tripNo: z.string().optional(),
     status: z.enum(["Draft", "Pending", "Completed", "Deleted"]).optional(),
-    updatedAt: z.string().optional(),
-    expectedUpdatedAt: z.string().optional(),
-    vehicleId: z.number().int().nullable().optional(),
-    driverId: z.number().int().nullable().optional(),
-    supervisorId: z.number().int().nullable().optional(),
-    sourceFarmId: z.number().int().nullable().optional(),
-    farmBirdTypeId: z.number().int().nullable().optional(),
+    updatedAt: z.string().optional(), 
+    expectedUpdatedAt: z.string().optional(), 
+    vehicleId: z.coerce.number().int().nullable().optional(),
+    driverId: z.coerce.number().int().nullable().optional(),
+    supervisorId: z.coerce.number().int().nullable().optional(),
+    sourceFarmId: z.coerce.number().int().nullable().optional(),
+    farmBirdTypeId: z.coerce.number().int().nullable().optional(),
     helpers: z.array(z.string()).optional(),
     loaders: z.array(z.string()).optional(),
     boxDetails: z.array(boxDetailSchema).optional(),
@@ -62,50 +63,62 @@ export const tripAutosaveSchema = z
   })
   .passthrough();
 
+// Used for actual Step submission (Strict validation)
 const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
   start: z
     .object({
       tripDate: z.string().min(1),
-      vehicleId: z.number().int(),
-      driverId: z.number().int(),
-      supervisorId: z.number().int(),
-      openingMeter: z.number().nonnegative(),
-      advanceAmount: z.number().nonnegative().optional(),
+      // FIXED: Moved required_error inside z.coerce.number() instead of .int()
+      vehicleId: z.coerce.number({ required_error: "Vehicle is required" }).int(),
+      driverId: z.coerce.number({ required_error: "Driver is required" }).int(),
+      supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int(),
+      openingMeter: z.coerce.number({ required_error: "Opening meter is required" }).nonnegative(),
+      advanceAmount: z.coerce.number().nonnegative().optional(),
       startTime: z.string().optional(),
     })
     .passthrough(),
   farm: z
     .object({
-      sourceFarmId: z.number().int(),
-      destMeter: z.number().nonnegative(),
+      sourceFarmId: z.coerce.number().int(),
+      destMeter: z.coerce.number().nonnegative(),
       reachedTime: z.string().optional(),
-      pickupTolls: z.number().nonnegative().optional(),
-      farmBirdTypeId: z.number().int().optional(),
-      farmBirdCount: z.number().int().positive().optional(),
-      farmLoadWeight: z.number().positive().optional(),
-      farmRate: z.number().nonnegative().optional(),
+      pickupTolls: z.coerce.number().nonnegative().optional(),
+      farmBirdTypeId: z.coerce.number().int().optional(),
+      farmBirdCount: z.coerce.number().int().positive().optional(),
+      farmLoadWeight: z.coerce.number().positive().optional(),
+      farmRate: z.coerce.number().nonnegative().optional(),
     })
     .passthrough(),
   pickup: z
     .object({
-      dcWeight: z.number().positive(),
-      totalBirds: z.number().int().positive(),
-      boxes: z.number().int().positive(),
+      dcWeight: z.coerce.number().positive(),
+      totalBirds: z.coerce.number().int().positive(),
+      boxes: z.coerce.number().int().positive(),
       boxDetails: z.array(boxDetailSchema).min(1),
     })
     .passthrough(),
   deliveries: z
     .object({
-      deliveries: z.array(deliverySchema).min(1),
+      deliveries: z.array(
+        deliverySchema.extend({
+          // FIXED: Moved required_error inside z.coerce.number()
+          shopId: z.coerce.number({ required_error: "Shop is required for a delivery" }).int(),
+          amount: z.coerce.number({ required_error: "Amount is required" }).nonnegative(),
+        })
+      ).min(1, "At least one delivery is required"),
     })
     .passthrough(),
   expenses: z
     .object({
-      closingMeter: z.number().nonnegative().optional(),
-      endMeter: z.number().nonnegative().optional(),
-      endTime: z.string().optional(),
+      closingMeter: z.coerce.number().nonnegative().optional(),
+      endMeter: z.coerce.number().nonnegative().optional(),
+      endTime: z.string({ required_error: "End time is required" }), 
     })
-    .passthrough(),
+    .passthrough()
+    .refine((data) => data.closingMeter != null || data.endMeter != null, {
+      message: "Either closingMeter or endMeter must be provided to finish the trip",
+      path: ["closingMeter"],
+    }),
 };
 
 export function parseTripAutosave(body: unknown) {
@@ -125,7 +138,6 @@ export function validateStepSubmit(step: TripWizardStep, body: unknown) {
   return result.data as Record<string, unknown>;
 }
 
-/** Allowed trip status transitions for approval workflow */
 const TRIP_STATUS_TRANSITIONS: Record<string, string[]> = {
   Draft: ["Pending", "Deleted"],
   Pending: ["Completed", "Draft", "Deleted"],

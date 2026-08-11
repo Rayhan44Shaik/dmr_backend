@@ -1,0 +1,2 @@
+DMR backend listening on http://localhost:4000
+PostgreSQL: postgresql://dmr:***@localhost:5432/dmr_poultries

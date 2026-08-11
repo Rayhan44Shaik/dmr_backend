@@ -39,6 +39,8 @@ export interface Vehicle {
   purchaseDate?: string | null;
   purchaseAmount?: number | null;
   emiStartDate?: string | null;
+  emiDay?: number | null;
+  totalEMIs?: number | null;
   rcDate?: string | null;
   status: ActiveStatus;
 }
@@ -65,6 +67,7 @@ export interface Shop {
   village: string;
   address?: string | null;
   status: ActiveStatus;
+  openingBalance: number;
 }
 
 export interface Bank {
@@ -83,6 +86,15 @@ export interface BirdType {
   birdTypeNo: number;
   birdType: string;
   averageWeight: number;
+  description: string;
+  status: ActiveStatus;
+}
+
+export interface Route {
+  id: number;
+  routeNo: number;
+  routeName: string;
+  routeCode: string;
   description: string;
   status: ActiveStatus;
 }
