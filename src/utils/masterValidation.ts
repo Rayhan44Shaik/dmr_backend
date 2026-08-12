@@ -219,3 +219,64 @@ export function validateRouteFields(raw: Record<string, unknown>): FieldError[] 
   }
   return errors;
 }
+
+/** All rate columns on a market-rate record (Additional Metrics + Company Rates + Size Categories). */
+export const MARKET_RATE_NUMERIC_FIELDS = [
+  "vij",
+  "gun",
+  "rp",
+  "sneha",
+  "vencobRate",
+  "vencobVii",
+  "vencobGun",
+  "associationVii",
+  "c17",
+  "c15",
+  "c13",
+  "c12",
+  "c10",
+] as const;
+
+const MARKET_RATE_LABELS: Record<string, string> = {
+  vij: "Vij",
+  gun: "Gun",
+  rp: "R.P",
+  sneha: "Sneha",
+  vencobRate: "VenCob R.",
+  vencobVii: "VenCob V.",
+  vencobGun: "VenCob G.",
+  associationVii: "Assoc V.",
+  c17: "17",
+  c15: "15",
+  c13: "13",
+  c12: "12",
+  c10: "10",
+};
+
+export function validateMarketRateFields(raw: Record<string, unknown>): FieldError[] {
+  const errors: FieldError[] = [];
+  const businessDate = str(raw.businessDate ?? raw.business_date).trim();
+
+  if (isMissing(businessDate)) {
+    errors.push({ field: "businessDate", message: "Business Date is required." });
+  } else if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) {
+    errors.push({ field: "businessDate", message: "Business Date must be a valid date (YYYY-MM-DD)." });
+  } else {
+    const parsed = new Date(`${businessDate}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) {
+      errors.push({ field: "businessDate", message: "Business Date must be a valid date (YYYY-MM-DD)." });
+    }
+  }
+
+  for (const field of MARKET_RATE_NUMERIC_FIELDS) {
+    const value = raw[field];
+    if (isMissing(value)) continue;
+    const n = Number(value);
+    if (!Number.isFinite(n)) {
+      errors.push({ field, message: `${MARKET_RATE_LABELS[field]} must be a valid number.` });
+    } else if (n < 0) {
+      errors.push({ field, message: `${MARKET_RATE_LABELS[field]} must be a non-negative number.` });
+    }
+  }
+  return errors;
+}

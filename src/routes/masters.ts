@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { asyncHandler } from "../middleware/errorHandler.js";
 import { mastersService } from "../services/mastersService.js";
+import { marketRatesService } from "../services/marketRatesService.js";
 import { routesService } from "../services/routesService.js";
 
 export const mastersRouter = Router();
@@ -327,4 +328,18 @@ mastersRouter.patch("/routes/:id/status", asyncHandler(async (req, res) => {
 
 mastersRouter.delete("/routes/:id", asyncHandler(async (req, res) => {
   res.json(await routesService.deleteRoute(Number(req.params.id)));
+}));
+
+// ---------------------------------------------------------------------------
+// Market Rate master
+// ---------------------------------------------------------------------------
+
+mastersRouter.get("/market-rates", asyncHandler(async (req, res) => {
+  const fromDate = typeof req.query.fromDate === "string" ? req.query.fromDate : undefined;
+  const toDate = typeof req.query.toDate === "string" ? req.query.toDate : undefined;
+  res.json(await marketRatesService.listMarketRates(fromDate, toDate));
+}));
+
+mastersRouter.put("/market-rates/batch", asyncHandler(async (req, res) => {
+  res.json(await marketRatesService.upsertMarketRates(req.body));
 }));

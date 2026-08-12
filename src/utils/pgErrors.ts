@@ -19,11 +19,20 @@ export function mapPgError(err: unknown): AppError | null {
   if (!isPgError(err) || !err.code) return null;
 
   switch (err.code) {
-    case "23505":
-      return new AppError(409, "Duplicate record", {
+    case "23505": {
+      // Surface the real conflicted value/constraint instead of a generic
+      // "Duplicate record". PG detail looks like:
+      //   Key (trip_no)=(TR-20260812-001) already exists.
+      const detail = err.detail?.trim();
+      const message =
+        detail && /already exists/i.test(detail)
+          ? `Duplicate record: ${detail.replace(/^Key \(/, "(")}`
+          : "Duplicate record";
+      return new AppError(409, message, {
         constraint: err.constraint,
         detail: err.detail,
       });
+    }
     case "23503":
       return new AppError(422, "Referenced record does not exist", {
         constraint: err.constraint,

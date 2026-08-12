@@ -95,6 +95,7 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
       totalBirds: z.coerce.number().int().positive(),
       boxes: z.coerce.number().int().positive(),
       boxDetails: z.array(boxDetailSchema).min(1),
+      dcPhotoKey: z.string().min(1, "DC Photo is required."),
     })
     .passthrough(),
   deliveries: z
@@ -133,9 +134,33 @@ export function validateStepSubmit(step: TripWizardStep, body: unknown) {
   const schema = stepValidators[step];
   const result = schema.safeParse(body);
   if (!result.success) {
-    throw new AppError(422, `Step "${step}" validation failed`, result.error.flatten());
+    // Surface the first specific field error (e.g. "DC Photo is required.")
+    // so the client can show a useful message instead of a generic one.
+    const flattened = result.error.flatten();
+    const firstMessage = firstValidationMessage(result, step);
+    throw new AppError(
+      422,
+      firstMessage ?? `Step "${step}" validation failed`,
+      flattened
+    );
   }
   return result.data as Record<string, unknown>;
+}
+
+function firstValidationMessage(
+  result: z.SafeParseError<unknown>,
+  step: TripWizardStep
+): string | null {
+  for (const fieldErrors of Object.values(result.error.flatten().fieldErrors)) {
+    if (Array.isArray(fieldErrors) && fieldErrors.length > 0) {
+      return fieldErrors[0];
+    }
+  }
+  const firstIssue = result.error.issues[0];
+  if (firstIssue) {
+    return firstIssue.message;
+  }
+  return `Step "${step}" includes invalid data.`;
 }
 
 const TRIP_STATUS_TRANSITIONS: Record<string, string[]> = {

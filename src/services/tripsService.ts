@@ -7,6 +7,7 @@ import type {
   ShopDelivery,
   Trip,
   TripStatus,
+  TripStepStatuses,
   TripSummary,
 } from "../types/models.js";
 import { dateOnly, isoOrNull, num, numOrNull, str } from "../utils/coerce.js";
@@ -35,6 +36,7 @@ import {
   getWizardProgress,
   type TripWizardStep,
 } from "../utils/tripResume.js";
+import { assertTripResourcesAvailable } from "../validation/tripResourceValidation.js";
 import { assertTripStatus } from "../validation/operations.js";
 import {
   assertTripReadyForCompletion,
@@ -147,6 +149,149 @@ function mapTripBase(row: Record<string, unknown>): Omit<
   };
 }
 
+interface ChildCounts {
+  boxCount: number;
+  deliveryCount: number;
+  dieselCount: number;
+}
+
+function childCounts(row: Record<string, unknown>): ChildCounts {
+  return {
+    boxCount: num(row.box_count),
+    deliveryCount: num(row.delivery_count),
+    dieselCount: num(row.diesel_count),
+  };
+}
+
+function hasNumber(value: unknown): boolean {
+  return value != null && Number(value) > 0;
+}
+
+/**
+ * Derived per-step wizard state used by the UI:
+ *  - "completed"    → step was successfully submitted (server flag)
+ *  - "saved"        → partial data persisted but step not submitted
+ *  - "not_started"  → no meaningful data for the step
+ */
+function computeStepStatuses(
+  src: Pick<
+    Trip,
+    | "startStepSubmitted"
+    | "farmStepSubmitted"
+    | "pickupStepSubmitted"
+    | "deliveryStepSubmitted"
+    | "expensesStepSubmitted"
+    | "endStepSubmitted"
+    | "vehicleId"
+    | "driverId"
+    | "openingMeter"
+    | "advanceAmount"
+    | "startTime"
+    | "sourceFarmId"
+    | "destMeter"
+    | "reachedTime"
+    | "pickupTolls"
+    | "farmBirdTypeId"
+    | "farmBirdCount"
+    | "farmLoadWeight"
+    | "farmRate"
+    | "farmAddress"
+    | "avgBirdWeight"
+    | "dcWeight"
+    | "totalBirds"
+    | "boxes"
+    | "dcPhotoKey"
+    | "totalShops"
+    | "totalWeight"
+    | "totalBirdsDelivered"
+    | "closingMeter"
+    | "endMeter"
+    | "endTime"
+    | "deliveryTolls"
+    | "destinationTolls"
+    | "meals"
+    | "mealsTiffin"
+    | "loading"
+    | "vehicleMaintenance"
+    | "othersRC"
+    | "others1Amt"
+    | "others2Amt"
+    | "others3Amt"
+    | "others4Amt"
+    | "others5Amt"
+    | "driverBata"
+    | "helperBata"
+    | "remarks"
+  >,
+  counts: ChildCounts
+): TripStepStatuses {
+  const startSaved =
+    Boolean(src.vehicleId) ||
+    Boolean(src.driverId) ||
+    hasNumber(src.openingMeter) ||
+    hasNumber(src.advanceAmount) ||
+    Boolean(src.startTime);
+
+  const farmSaved =
+    Boolean(src.sourceFarmId) ||
+    hasNumber(src.destMeter) ||
+    Boolean(src.reachedTime) ||
+    hasNumber(src.pickupTolls) ||
+    Boolean(src.farmBirdTypeId) ||
+    hasNumber(src.farmBirdCount) ||
+    hasNumber(src.farmLoadWeight) ||
+    hasNumber(src.farmRate) ||
+    Boolean(src.farmAddress) ||
+    hasNumber(src.avgBirdWeight);
+
+  const pickupSaved =
+    hasNumber(src.dcWeight) ||
+    hasNumber(src.totalBirds) ||
+    hasNumber(src.boxes) ||
+    Boolean(src.dcPhotoKey) ||
+    counts.boxCount > 0;
+
+  const deliverySaved =
+    counts.deliveryCount > 0 ||
+    hasNumber(src.totalShops) ||
+    hasNumber(src.totalWeight) ||
+    hasNumber(src.totalBirdsDelivered);
+
+  const expenseSaved =
+    hasNumber(src.closingMeter) ||
+    hasNumber(src.endMeter) ||
+    Boolean(src.endTime) ||
+    hasNumber(src.deliveryTolls) ||
+    hasNumber(src.destinationTolls) ||
+    hasNumber(src.meals) ||
+    hasNumber(src.mealsTiffin) ||
+    hasNumber(src.loading) ||
+    hasNumber(src.vehicleMaintenance) ||
+    hasNumber(src.othersRC) ||
+    hasNumber(src.others1Amt) ||
+    hasNumber(src.others2Amt) ||
+    hasNumber(src.others3Amt) ||
+    hasNumber(src.others4Amt) ||
+    hasNumber(src.others5Amt) ||
+    hasNumber(src.driverBata) ||
+    hasNumber(src.helperBata) ||
+    counts.dieselCount > 0 ||
+    Boolean(src.remarks);
+
+  return {
+    start: src.startStepSubmitted ? "completed" : startSaved ? "saved" : "not_started",
+    farm: src.farmStepSubmitted ? "completed" : farmSaved ? "saved" : "not_started",
+    pickup: src.pickupStepSubmitted ? "completed" : pickupSaved ? "saved" : "not_started",
+    deliveries: src.deliveryStepSubmitted ? "completed" : deliverySaved ? "saved" : "not_started",
+    expenses:
+      src.expensesStepSubmitted || src.endStepSubmitted
+        ? "completed"
+        : expenseSaved
+          ? "saved"
+          : "not_started",
+  };
+}
+
 function toTripSummary(row: Record<string, unknown>): TripSummary {
   const base = mapTripBase(row);
   const flags = {
@@ -170,6 +315,7 @@ function toTripSummary(row: Record<string, unknown>): TripSummary {
     resumeStep: getResumeStep(flags),
     resumeStepLabel: getResumeLabel(flags),
     wizardProgress: getWizardProgress(flags),
+    stepStatuses: computeStepStatuses(base as unknown as Trip, childCounts(row)),
   };
 }
 
@@ -293,12 +439,14 @@ async function hydrateTrip(
 async function generateTripNo(client: Client, tripDate: string): Promise<string> {
   await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`trip_no_${tripDate}`]);
   const ymd = tripDate.replace(/-/g, "");
-  const result = await client.query<{ c: string }>(
-    `SELECT COUNT(*)::text AS c FROM trips WHERE trip_date = $1::date`,
+  const result = await client.query<{ m: string }>(
+    `SELECT COALESCE(MAX((substring(trip_no from '\\d{3}$'))::int), 0)::text AS m
+       FROM trips
+      WHERE trip_date = $1::date AND trip_no ~ '^TR-\\d{8}-\\d{3}$'`,
     [tripDate]
   );
-  const seq = String(Number(result.rows[0].c) + 1).padStart(3, "0");
-  return `TRP-${ymd}-${seq}`;
+  const seq = String(Number(result.rows[0].m) + 1).padStart(3, "0");
+  return `TR-${ymd}-${seq}`;
 }
 
 async function assertOptimisticLock(
@@ -366,7 +514,12 @@ async function replaceCrew(
 ) {
   await client.query(`DELETE FROM trip_crew WHERE trip_id = $1`, [tripId]);
 
-  const resolvedHelpers = await resolveEmployeeNames(client, helpers, "helper");
+  // De-duplicate dropped names so a helper/loader selected twice on the same
+  // submission can never trip the (trip_id, employee_name, role) unique index.
+  const uniqueNames = (names: string[]) =>
+    [...new Set(names.map((n) => (n ?? "").trim()).filter(Boolean))];
+
+  const resolvedHelpers = await resolveEmployeeNames(client, uniqueNames(helpers), "helper");
   for (const member of resolvedHelpers) {
     await client.query(
       `INSERT INTO trip_crew (trip_id, employee_id, employee_name, role)
@@ -375,7 +528,7 @@ async function replaceCrew(
     );
   }
 
-  const resolvedLoaders = await resolveEmployeeNames(client, loaders, "loader");
+  const resolvedLoaders = await resolveEmployeeNames(client, uniqueNames(loaders), "loader");
   for (const member of resolvedLoaders) {
     await client.query(
       `INSERT INTO trip_crew (trip_id, employee_id, employee_name, role)
@@ -647,7 +800,11 @@ export const tripsService = {
       const total = Number(countResult.rows[0]?.c ?? 0);
       const pagedParams = [...params, filters.pagination.limit, filters.pagination.offset];
       const result = await query(
-        `SELECT * FROM trips ${where}
+        `SELECT trips.*,
+                (SELECT COUNT(*) FROM trip_boxes b WHERE b.trip_id = trips.id) AS box_count,
+                (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id) AS delivery_count,
+                (SELECT COUNT(*) FROM trip_diesel_entries e WHERE e.trip_id = trips.id) AS diesel_count
+         FROM trips ${where}
          ORDER BY trip_date DESC, id DESC
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         pagedParams
@@ -657,7 +814,11 @@ export const tripsService = {
     }
 
     const result = await query(
-      `SELECT * FROM trips ${where} ORDER BY trip_date DESC, id DESC`,
+      `SELECT trips.*,
+              (SELECT COUNT(*) FROM trip_boxes b WHERE b.trip_id = trips.id) AS box_count,
+              (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id) AS delivery_count,
+              (SELECT COUNT(*) FROM trip_diesel_entries e WHERE e.trip_id = trips.id) AS diesel_count
+       FROM trips ${where} ORDER BY trip_date DESC, id DESC`,
       params
     );
 
@@ -666,7 +827,15 @@ export const tripsService = {
         const trips: Trip[] = [];
         for (const row of result.rows) {
           const trip = await hydrateTrip(client, row);
-          trips.push({ ...trip, ...flattenDiesel(trip.dieselEntries ?? []) });
+          trips.push({
+            ...trip,
+            ...flattenDiesel(trip.dieselEntries ?? []),
+            stepStatuses: computeStepStatuses(trip, {
+              boxCount: trip.boxDetails.length,
+              deliveryCount: trip.deliveries.length,
+              dieselCount: (trip.dieselEntries ?? []).length,
+            }),
+          });
         }
         return trips;
       });
@@ -697,6 +866,11 @@ export const tripsService = {
         resumeStep: getResumeStep(flags),
         resumeStepLabel: getResumeLabel(flags),
         wizardProgress: getWizardProgress(flags),
+        stepStatuses: computeStepStatuses(trip, {
+          boxCount: trip.boxDetails.length,
+          deliveryCount: trip.deliveries.length,
+          dieselCount: (trip.dieselEntries ?? []).length,
+        }),
       };
     });
   },
@@ -707,7 +881,8 @@ export const tripsService = {
         const tripDate =
           dateOnly(body.tripDate) ??
           new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-        const tripNo = body.tripNo || (await generateTripNo(client, tripDate));
+        // Server-only numbering on create (see save()).
+        const tripNo = await generateTripNo(client, tripDate);
 
         const inserted = await client.query(
           `INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,'Draft') RETURNING *`,
@@ -728,6 +903,11 @@ export const tripsService = {
           resumeStep: getResumeStep(flags) ?? "start",
           resumeStepLabel: getResumeLabel(flags) ?? "Step 1 — Trip Header",
           wizardProgress: getWizardProgress(flags),
+          stepStatuses: computeStepStatuses(trip, {
+            boxCount: trip.boxDetails.length,
+            deliveryCount: trip.deliveries.length,
+            dieselCount: (trip.dieselEntries ?? []).length,
+          }),
         };
       } catch (err) {
         rethrowIfAppError(err);
@@ -743,9 +923,13 @@ export const tripsService = {
     return withTransaction(async (client) => {
       try {
         let tripId = id;
+        let existing: {
+          rowCount: number | null;
+          rows: Array<Record<string, unknown>>;
+        } | null = null;
 
         if (tripId) {
-          const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+          existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
           if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
           if (existing.rows[0].deleted) {
             throw new AppError(422, "Cannot modify a deleted trip", { tripId });
@@ -757,14 +941,41 @@ export const tripsService = {
           );
         }
 
+        // Trip number is generated ONLY at creation, server-side, locked.
+        // Editing a trip never generates a new number (BUG 2: sequence is
+        // consumed per trip date and a deleted trip keeps its number).
         await validateTripForeignKeys(body, client);
         await enrichMasterDenorm(client, body);
+
+        // Resource availability is DB-backed and transaction-safe. A single
+        // trip occupies its resources while Step 1 is submitted through Step 5
+        // (status 'Draft'); Step 5 success flips status to 'Pending' and frees
+        // them. The current trip is excluded so an edit never conflicts with
+        // itself. Throws 409 with a clear message on conflict.
+        if (body.vehicleId != null || body.driverId != null || body.supervisorId != null ||
+            body.helpers?.length || body.loaders?.length) {
+          await assertTripResourcesAvailable(
+            {
+              tripId: tripId ?? 0,
+              vehicleId: body.vehicleId ?? null,
+              driverId: body.driverId ?? null,
+              supervisorId: body.supervisorId ?? null,
+              helpers: (body.helpers as string[] | undefined) ?? [],
+              loaders: (body.loaders as string[] | undefined) ?? [],
+            },
+            client
+          );
+        }
 
         if (!tripId) {
           const tripDate =
             dateOnly(body.tripDate) ??
             new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-          const tripNo = body.tripNo || (await generateTripNo(client, tripDate));
+          // A new trip is numbered ONLY by the server. Never trust a
+          // client-supplied tripNo here: a stale value forwarded by the UI
+          // collides with trips_trip_no_key (23505) and surfaces to the user
+          // as the Generic "Duplicate record" 409 — even for a different vehicle.
+          const tripNo = await generateTripNo(client, tripDate);
           const inserted = await client.query(
             `INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,$3) RETURNING id`,
             [tripNo, tripDate, body.status ?? "Draft"]
@@ -1088,6 +1299,11 @@ export const tripsService = {
           resumeStep: getResumeStep(flags),
           resumeStepLabel: getResumeLabel(flags),
           wizardProgress: getWizardProgress(flags),
+          stepStatuses: computeStepStatuses(trip, {
+            boxCount: trip.boxDetails.length,
+            deliveryCount: trip.deliveries.length,
+            dieselCount: (trip.dieselEntries ?? []).length,
+          }),
         };
       } catch (err) {
         rethrowIfAppError(err);
@@ -1101,7 +1317,11 @@ export const tripsService = {
     step: TripWizardStep,
     body: Partial<Trip> & Record<string, unknown>
   ) {
-    validateStepSubmit(step, body);
+    const isSaveMode = body.mode === "save";
+
+    if (!isSaveMode) {
+      validateStepSubmit(step, body);
+    }
 
     const existing = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
     if (!existing.rowCount) throw new AppError(404, `Trip ${id} not found`);
@@ -1117,6 +1337,20 @@ export const tripsService = {
       status: str(current.status),
       deleted: Boolean(current.deleted),
     };
+
+    // "Save Progress" is a permissive autosave: it must never run strict step
+    // validation, enforce step order, or lock/submit a step.
+    if (isSaveMode) {
+      const autosaveBody: Partial<Trip> & Record<string, unknown> = { ...body };
+      delete autosaveBody.mode;
+      delete autosaveBody.startStepSubmitted;
+      delete autosaveBody.farmStepSubmitted;
+      delete autosaveBody.pickupStepSubmitted;
+      delete autosaveBody.deliveryStepSubmitted;
+      delete autosaveBody.expensesStepSubmitted;
+      delete autosaveBody.endStepSubmitted;
+      return this.save(id, autosaveBody);
+    }
 
     assertStepOrder(step, flags);
 

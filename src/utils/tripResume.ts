@@ -93,7 +93,9 @@ export function assertStepOrder(
   const requestedIndex = TRIP_STEP_ORDER.indexOf(step);
   const resumeIndex = TRIP_STEP_ORDER.indexOf(resume);
 
-  if (requestedIndex > resumeIndex + 1) {
+  // A step may only be submitted once every earlier step is complete (or when
+  // re-submitting an already-completed step). Skipping ahead is blocked.
+  if (requestedIndex > resumeIndex) {
     throw new AppError(422, `Complete ${TRIP_STEP_LABELS[resume]} before ${TRIP_STEP_LABELS[step]}`, {
       resumeStep: resume,
       requestedStep: step,

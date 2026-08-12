@@ -99,6 +99,28 @@ export interface Route {
   status: ActiveStatus;
 }
 
+export interface MarketRate {
+  id: number;
+  businessDate: string;
+  vij: number;
+  gun: number;
+  rp: number;
+  sneha: number;
+  vencobRate: number;
+  vencobVii: number;
+  vencobGun: number;
+  associationVii: number;
+  c17: number;
+  c15: number;
+  c13: number;
+  c12: number;
+  c10: number;
+  createdBy?: string | null;
+  updatedBy?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
 export interface BoxDetail {
   boxNo: number;
   birds: number;
@@ -239,9 +261,20 @@ export interface Trip {
   rejectedReason?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
+  stepStatuses?: TripStepStatuses;
 }
 
 /** List-view DTO: scalar trip fields + resume metadata (no nested hydration). */
+export type TripStepStatus = "completed" | "saved" | "not_started";
+
+export interface TripStepStatuses {
+  start: TripStepStatus;
+  farm: TripStepStatus;
+  pickup: TripStepStatus;
+  deliveries: TripStepStatus;
+  expenses: TripStepStatus;
+}
+
 export interface TripSummary extends Trip {
   resumeStep: "start" | "farm" | "pickup" | "deliveries" | "expenses" | null;
   resumeStepLabel: string | null;
