@@ -1079,7 +1079,13 @@ export const tripsService = {
             fuel = COALESCE($46, fuel),
             expense = COALESCE($47, expense),
             remarks = COALESCE($48, remarks),
-            submitted_at = COALESCE($49, submitted_at),
+            -- Guarded like expenses_step_submitted_at below: a plain COALESCE($49, ...)
+            -- let two concurrent Step 5 submits race, since the "first submission" check
+            -- happened in JS before either transaction committed, so whichever request's
+            -- UPDATE landed last silently overwrote the other's timestamp.
+            submitted_at = CASE
+              WHEN COALESCE($51::boolean, FALSE) AND submitted_at IS NULL THEN COALESCE($49, NOW())
+              ELSE submitted_at END,
             end_step_submitted = COALESCE($50, end_step_submitted),
             expenses_step_submitted = COALESCE($51, expenses_step_submitted),
             total_km = COALESCE($52, total_km),
