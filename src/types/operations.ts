@@ -80,6 +80,50 @@ export interface ShopSale {
   updatedAt?: string | null;
 }
 
+export type RateEntryStatus = "Pending" | "Entered";
+
+/** A Rate Entry–eligible trip (status Pending/Completed, not deleted),
+ * optionally joined with its rate record if one has been entered. */
+export interface RateEntryTrip {
+  tripId: number;
+  tripNo: string;
+  tripDate: string;
+  tripStatus: string;
+  vehicleId: number | null;
+  vehicleNo: string | null;
+  driverId: number | null;
+  driverName: string | null;
+  supervisorId: number | null;
+  supervisorName: string | null;
+  sourceFarmId: number | null;
+  sourceFarm: string | null;
+  totalBirds: number;
+  totalWeight: number;
+  birdTypeId: number | null;
+  birdType: string | null;
+  rateStatus: RateEntryStatus;
+  rateEntryId: number | null;
+  rate: number | null;
+  remarks: string | null;
+  createdBy?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface RateEntry {
+  id: number;
+  tripId: number;
+  tripNo?: string;
+  birdTypeId: number | null;
+  birdType: string;
+  rate: number;
+  remarks: string;
+  createdBy?: string;
+  updatedBy?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
 export interface Collection {
   id: number;
   collectionNo: string;

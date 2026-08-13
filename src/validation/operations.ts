@@ -54,6 +54,23 @@ export const shopSaleBodySchema = z.object({
   createdBy: z.string().optional(),
 });
 
+export const rateEntryBodySchema = z.object({
+  tripId: z.number({ required_error: "tripId is required" }).int(),
+  rate: z.number({ required_error: "rate is required" }).nonnegative(),
+  birdTypeId: z.number().int().nullable().optional(),
+  birdType: z.string().optional(),
+  remarks: z.string().nullable().optional(),
+  createdBy: z.string().optional(),
+});
+
+export const rateEntryUpdateSchema = z.object({
+  rate: z.number().nonnegative().optional(),
+  birdTypeId: z.number().int().nullable().optional(),
+  birdType: z.string().optional(),
+  remarks: z.string().nullable().optional(),
+  updatedBy: z.string().optional(),
+});
+
 export const collectionBodySchema = z.object({
   collectionNo: z.string().optional(),
   collectionDate: z.string().min(1),

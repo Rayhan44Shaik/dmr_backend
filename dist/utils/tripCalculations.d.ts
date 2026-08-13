@@ -1,0 +1,52 @@
+import type { BoxDetail, ShopDelivery } from "../types/models.js";
+export declare function computeFarmAmount(farmLoadWeight: number | null | undefined, farmRate: number | null | undefined): number;
+export declare function computeTotalKm(openingMeter: number | null | undefined, closingMeter: number | null | undefined, endMeter?: number | null): number;
+export declare function computeDeliveryAmount(weight: number, rate: number | null | undefined): number;
+export declare function computeTripKpis(opts: {
+    boxes?: BoxDetail[];
+    deliveries?: ShopDelivery[];
+    farmBirdCount?: number | null;
+    farmLoadWeight?: number | null;
+    dcWeight?: number | null;
+    totalBirds?: number | null;
+}): {
+    totalWeight: number;
+    totalDeliveredWeight: number;
+    totalBirdsDelivered: number;
+    totalMortality: number;
+    totalMortalityCount: number;
+    totalMortalityWeight: number;
+    weightLoss: number;
+    survivalRate: number;
+    totalShops: number;
+    lastShop: string | null;
+    deliveries: {
+        amount: number;
+        id: number;
+        serialNo?: number | null;
+        boxNo?: number | null;
+        shopId: number | null;
+        shopName: string;
+        birdTypeId: number | null;
+        birdType: string;
+        birds: number;
+        weight: number;
+        mortality: number;
+        mortKg?: number | null;
+        rate: number | null;
+        remarks: string;
+        deliveryMode?: "box" | "weight";
+        selectedBoxIds?: number[];
+        farmBirds?: number | null;
+        farmWeight?: number | null;
+        perBoxData?: BoxDetail[];
+        autoCaptureTime?: string | null;
+    }[];
+    boxes: number;
+    totalBirds: number;
+    avgWeight: number;
+};
+export declare function sumDieselFuel(entries: Array<{
+    litres?: number | null;
+    rate?: number | null;
+}>): number;

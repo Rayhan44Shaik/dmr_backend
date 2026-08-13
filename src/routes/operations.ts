@@ -3,6 +3,7 @@ import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { collectionsService } from "../services/collectionsService.js";
 import { dashboardService } from "../services/dashboardService.js";
 import { fuelExpensesService } from "../services/fuelExpensesService.js";
+import { rateEntryService } from "../services/rateEntryService.js";
 import { shopRatesService } from "../services/shopRatesService.js";
 import { shopSalesService } from "../services/shopSalesService.js";
 import { tripsService } from "../services/tripsService.js";
@@ -105,6 +106,54 @@ operationsRouter.delete(
         typeof req.body?.reason === "string" ? req.body.reason : undefined
       )
     );
+  })
+);
+
+// ── Rate Entry ───────────────────────────────────────────────────
+// Trips that reached the existing Pending/Completed lifecycle (Step 5
+// done), each with its rate record if one has been entered.
+operationsRouter.get(
+  "/rate-entry",
+  asyncHandler(async (req, res) => {
+    res.json(
+      await rateEntryService.list({
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
+        rateStatus:
+          req.query.rateStatus === "Entered" || req.query.rateStatus === "Pending"
+            ? req.query.rateStatus
+            : undefined,
+      })
+    );
+  })
+);
+
+operationsRouter.get(
+  "/rate-entry/trip/:tripId",
+  asyncHandler(async (req, res) => {
+    const rate = await rateEntryService.getByTripId(Number(req.params.tripId));
+    if (!rate) throw new AppError(404, "No rate entered for this trip yet");
+    res.json(rate);
+  })
+);
+
+operationsRouter.get(
+  "/rate-entry/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await rateEntryService.getById(Number(req.params.id)));
+  })
+);
+
+operationsRouter.post(
+  "/rate-entry",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await rateEntryService.create(req.body));
+  })
+);
+
+operationsRouter.put(
+  "/rate-entry/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await rateEntryService.update(Number(req.params.id), req.body));
   })
 );
 

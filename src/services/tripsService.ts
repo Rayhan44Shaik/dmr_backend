@@ -693,7 +693,11 @@ function buildListWhere(filters: {
   const clauses: string[] = [];
   const params: unknown[] = [];
 
-  if (!filters.includeDeleted) {
+  // A caller explicitly filtering status=Deleted is asking for deleted trips
+  // by definition (soft-delete always sets status='Deleted'), so the default
+  // "hide deleted" clause must not be ANDed in — otherwise the two clauses
+  // contradict each other and the query always returns zero rows.
+  if (!filters.includeDeleted && filters.status !== "Deleted") {
     clauses.push(`deleted = FALSE`);
   }
   if (filters.fromDate) {

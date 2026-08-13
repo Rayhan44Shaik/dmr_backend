@@ -159,7 +159,17 @@ export const shopSalesService = {
 
         const birds = data.birds ?? 0;
         const weight = data.weight ?? 0;
-        const rate = data.rate ?? 0;
+        // Fall back to the persisted Rate Entry for this trip when the
+        // caller doesn't supply a rate explicitly, so a rate entered via
+        // Rate Entry is what Shop Sales actually uses.
+        let rate = data.rate;
+        if (rate == null) {
+          const rateRow = await client.query<{ rate: string }>(
+            `SELECT rate FROM rate_entry WHERE trip_id = $1`,
+            [data.tripId]
+          );
+          rate = rateRow.rowCount ? Number(rateRow.rows[0].rate) : 0;
+        }
         const amount = data.amount ?? Number((weight * rate).toFixed(2));
 
         const result = await client.query(

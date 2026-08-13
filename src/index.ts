@@ -34,6 +34,14 @@ app.get("/", (_req, res) => {
         collections: "GET|POST /api/operations/collections",
         fuelExpenses: "GET|POST /api/operations/fuel-expenses",
       },
+      fleet: {
+        maintenance: "GET|POST /api/fleet/maintenance  PUT /api/fleet/maintenance/:id",
+        approve: "POST /api/fleet/maintenance/:id/approve",
+        reject: "POST /api/fleet/maintenance/:id/reject",
+        delete: "DELETE /api/fleet/maintenance/:id",
+        documents: "GET /api/fleet/maintenance/:id/documents",
+        document: "GET|DELETE /api/fleet/maintenance/:id/documents/:documentId",
+      },
     },
   });
 });
