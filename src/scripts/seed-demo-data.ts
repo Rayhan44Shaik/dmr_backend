@@ -414,15 +414,11 @@ async function findOrCreateFuelExpense(opts: {
     amount: Math.round(opts.liters * opts.fuelRate),
     pumpName: opts.pumpName,
     remarks: null,
-    status: opts.status,
     createdBy: "seed:demo",
   });
 
   if (opts.status === "Approved") {
-    await fuelExpensesService.updateStatus(expense.id, {
-      status: "Approved",
-      approvedBy: "DMR Management",
-    });
+    await fuelExpensesService.approve(expense.id, { approvedBy: "DMR Management" });
   }
 
   console.log(`Created fuel   : ${opts.billNo} (id=${expense.id}, status=${opts.status})`);

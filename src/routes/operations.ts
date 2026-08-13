@@ -319,9 +319,12 @@ operationsRouter.get(
     res.json(
       await fuelExpensesService.list({
         vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
+        sourceType: typeof req.query.sourceType === "string" ? req.query.sourceType : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
         includeDeleted: req.query.includeDeleted === "true",
         pagination: opsListPagination(req),
       })
@@ -350,10 +353,17 @@ operationsRouter.put(
   })
 );
 
-operationsRouter.patch(
-  "/fuel-expenses/:id/status",
+operationsRouter.post(
+  "/fuel-expenses/:id/approve",
   asyncHandler(async (req, res) => {
-    res.json(await fuelExpensesService.updateStatus(req.params.id, req.body));
+    res.json(await fuelExpensesService.approve(req.params.id, req.body));
+  })
+);
+
+operationsRouter.post(
+  "/fuel-expenses/:id/reject",
+  asyncHandler(async (req, res) => {
+    res.json(await fuelExpensesService.reject(req.params.id, req.body));
   })
 );
 

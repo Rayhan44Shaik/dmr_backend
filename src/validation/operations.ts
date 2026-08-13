@@ -85,10 +85,21 @@ export const fuelExpenseBodySchema = z.object({
   liters: z.number().nonnegative().optional(),
   amount: z.number().nonnegative().optional(),
   pumpName: z.string().optional(),
+  bunkAddress: z.string().nullable().optional(),
   remarks: z.string().nullable().optional(),
-  status: opsStatusSchema.optional(),
   imageData: z.string().nullable().optional(),
+  imageName: z.string().nullable().optional(),
+  imageMime: z.string().nullable().optional(),
   createdBy: z.string().optional(),
+});
+
+export const fuelRejectSchema = z.object({
+  rejectedBy: z.string().optional(),
+  reason: z.string().min(1, "Rejection reason is required"),
+});
+
+export const fuelApproveSchema = z.object({
+  approvedBy: z.string().optional(),
 });
 
 export function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {

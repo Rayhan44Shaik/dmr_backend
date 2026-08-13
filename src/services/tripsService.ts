@@ -1462,7 +1462,8 @@ export const tripsService = {
           `UPDATE fuel_expenses
              SET status = 'Approved', approved_by = $2, approved_date = NOW(),
                  ops_status = 'Approved', updated_at = NOW()
-           WHERE trip_id = $1 AND status = 'Pending'`,
+           WHERE trip_id = $1 AND source_type = 'TRIP' AND status = 'Pending'
+             AND COALESCE(deleted, FALSE) = FALSE`,
           [id, body.approvedBy ?? "system"]
         );
       }

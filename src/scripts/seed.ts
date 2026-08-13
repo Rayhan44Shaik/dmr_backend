@@ -294,13 +294,9 @@ async function seed() {
     liters: 80,
     amount: 8200,
     pumpName: "HP Guntur",
-    status: "Approved",
     createdBy: "seed",
   });
-  await fuelExpensesService.updateStatus(fuel.id, {
-    status: "Approved",
-    approvedBy: "Seed Admin",
-  });
+  await fuelExpensesService.approve(fuel.id, { approvedBy: "Seed Admin" });
 
   console.log("Seed complete.");
   console.log({

@@ -108,10 +108,13 @@ export interface Collection {
   balance?: number;
 }
 
+export type FuelSourceType = "TRIP" | "MANUAL";
+
 export interface FuelExpense {
   id: string;
   billNo: string;
   billDate: string;
+  sourceType: FuelSourceType;
   vehicleId: number | null;
   vehicleNo: string | null;
   driverId: number | null;
@@ -119,14 +122,19 @@ export interface FuelExpense {
   supervisorId: number | null;
   supervisorName: string | null;
   tripId: number | null;
+  tripNo?: string | null;
+  tripFuelEntryIndex: number | null;
   currentMeter: number;
   fuelRate: number;
   liters: number;
   amount: number;
   pumpName: string;
+  bunkAddress?: string | null;
   remarks?: string | null;
   status: OpsRecordStatus;
   imageData?: string | null;
+  imageName?: string | null;
+  imageMime?: string | null;
   deleted: boolean;
   deletedReason?: string | null;
   approvedBy?: string | null;
