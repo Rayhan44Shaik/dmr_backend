@@ -21,7 +21,6 @@ export declare const fleetMaintenancePartSchema: z.ZodObject<{
     quantity?: number | undefined;
 }>;
 export declare const fleetMaintenanceBodySchema: z.ZodObject<{
-    billNo: z.ZodOptional<z.ZodString>;
     date: z.ZodEffects<z.ZodString, string, string>;
     vehicleId: z.ZodNumber;
     vehicleNo: z.ZodOptional<z.ZodNullable<z.ZodString>>;
@@ -65,7 +64,6 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     driverId?: number | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    billNo?: string | undefined;
     driverName?: string | null | undefined;
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
@@ -88,7 +86,6 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     driverId?: number | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    billNo?: string | undefined;
     driverName?: string | null | undefined;
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
@@ -105,7 +102,6 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
 /** Update body — everything optional; removeDocumentIds lets the caller
  * explicitly remove existing documents during an update (never silently). */
 export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
-    billNo: z.ZodOptional<z.ZodOptional<z.ZodString>>;
     date: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
     vehicleId: z.ZodOptional<z.ZodNumber>;
     vehicleNo: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
@@ -147,7 +143,6 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     driverId?: number | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    billNo?: string | undefined;
     driverName?: string | null | undefined;
     date?: string | undefined;
     currentKM?: number | undefined;
@@ -171,7 +166,6 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     driverId?: number | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    billNo?: string | undefined;
     driverName?: string | null | undefined;
     date?: string | undefined;
     currentKM?: number | undefined;

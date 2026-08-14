@@ -1,7 +1,7 @@
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import type { FuelExpense, FuelSourceType, OpsRecordStatus } from "../types/operations.js";
-import { dateOnly, num, str } from "../utils/coerce.js";
+import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
 import {
   assertEmployeeExists,
   assertTripExists,
@@ -14,6 +14,11 @@ import {
   type PaginationParams,
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
+import {
+  lockVehicleForMeterWrite,
+  preciseIsoOrUndefined,
+  validateVehicleMeter,
+} from "../utils/vehicleMeterLedger.js";
 import {
   fuelApproveSchema,
   fuelExpenseBodySchema,
@@ -91,6 +96,13 @@ function buildFuelWhere(filters: {
   if (!filters.includeDeleted) {
     clauses.push(`COALESCE(fe.deleted, FALSE) = FALSE`);
   }
+  // Trip-generated fuel (source_type = 'TRIP') is hidden until its related
+  // trip reaches the Completed status. Manual fuel keeps its own approval
+  // workflow and is unaffected. The trip status lives on `trips` (aliased `t`),
+  // which both the count and data queries below LEFT JOIN.
+  clauses.push(
+    `(fe.source_type <> 'TRIP' OR (t.status = 'Completed' AND COALESCE(t.deleted, FALSE) = FALSE))`
+  );
   if (filters.vehicleId) {
     params.push(filters.vehicleId);
     clauses.push(`fe.vehicle_id = $${params.length}`);
@@ -170,7 +182,10 @@ export const fuelExpensesService = {
 
   async getById(id: string) {
     const result = await query(
-      `${FUEL_SELECT} WHERE fe.id = $1 AND COALESCE(fe.deleted, FALSE) = FALSE`,
+      `${FUEL_SELECT}
+       WHERE fe.id = $1
+         AND COALESCE(fe.deleted, FALSE) = FALSE
+         AND (fe.source_type <> 'TRIP' OR (t.status = 'Completed' AND COALESCE(t.deleted, FALSE) = FALSE))`,
       [id]
     );
     if (!result.rowCount) throw new AppError(404, "Fuel expense not found");
@@ -188,6 +203,19 @@ export const fuelExpensesService = {
         await assertEmployeeExists(data.driverId, "Driver", client);
         await assertEmployeeExists(data.supervisorId, "Supervisor", client);
         await assertTripExists(data.tripId, client);
+
+        // Universal vehicle meter validation — manual fuel entry only (trip
+        // -generated fuel is validated as part of the Trip Step 5 submission
+        // in tripsService.ts, never edited directly here — see update() below).
+        if (data.vehicleId != null && data.currentMeter != null) {
+          await lockVehicleForMeterWrite(client, data.vehicleId);
+          await validateVehicleMeter(client, {
+            vehicleId: data.vehicleId,
+            newMeter: data.currentMeter,
+            eventDate: data.billDate,
+            context: "Fuel meter reading",
+          });
+        }
 
         const liters = data.liters ?? 0;
         const fuelRate = data.fuelRate ?? 0;
@@ -243,7 +271,8 @@ export const fuelExpensesService = {
     return withTransaction(async (client) => {
       try {
         const existing = await client.query(
-          `SELECT source_type, ops_status FROM fuel_expenses WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`,
+          `SELECT source_type, ops_status, vehicle_id, expense_date, created_at
+           FROM fuel_expenses WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`,
           [id]
         );
         if (!existing.rowCount) throw new AppError(404, "Fuel expense not found");
@@ -257,6 +286,27 @@ export const fuelExpensesService = {
         await assertVehicleExists(data.vehicleId, client);
         await assertEmployeeExists(data.driverId, "Driver", client);
         await assertTripExists(data.tripId, client);
+
+        // Universal vehicle meter validation, excluding this record's own
+        // previously-persisted reading so an edit never compares against itself.
+        if (data.currentMeter != null) {
+          const vehicleId = data.vehicleId ?? numOrNull(existing.rows[0].vehicle_id);
+          const eventDate = data.billDate ?? dateOnly(existing.rows[0].expense_date) ?? undefined;
+          if (vehicleId != null && eventDate) {
+            await lockVehicleForMeterWrite(client, vehicleId);
+            await validateVehicleMeter(client, {
+              vehicleId,
+              newMeter: data.currentMeter,
+              eventDate,
+              // Preserve the record's own original instant rather than
+              // defaulting to "now" (see fleetMaintenanceService.update() for
+              // the same fix and why it matters).
+              eventInstant: preciseIsoOrUndefined(existing.rows[0].created_at),
+              exclude: { sourceType: "FUEL", recordId: id },
+              context: "Fuel meter reading",
+            });
+          }
+        }
 
         const liters = data.liters;
         const fuelRate = data.fuelRate;

@@ -10,7 +10,6 @@ export const fleetMaintenancePartSchema = z.object({
     amount: z.number().nonnegative().optional(),
 });
 export const fleetMaintenanceBodySchema = z.object({
-    billNo: z.string().optional(),
     date: z
         .string()
         .min(1, "Date is required")

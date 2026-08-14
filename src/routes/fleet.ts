@@ -3,12 +3,19 @@ import type { NextFunction, Request, Response } from "express";
 import multer from "multer";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { fleetMaintenanceService } from "../services/fleetMaintenanceService.js";
+import { vehiclePermitService } from "../services/vehiclePermitService.js";
+import { vehicleEmiService } from "../services/vehicleEmiService.js";
+import { coercePermitMultipartBody } from "../validation/permits.js";
 import {
   coerceMultipartBody,
   MAINTENANCE_DOCUMENT_MAX_BYTES,
   MAINTENANCE_DOCUMENT_MAX_FILES,
 } from "../utils/fleetMultipart.js";
 import { parsePagination } from "../utils/pagination.js";
+import {
+  getLatestVehicleMeter,
+  listVehicleMeterHistory,
+} from "../utils/vehicleMeterLedger.js";
 
 export const fleetRouter = Router();
 
@@ -50,6 +57,24 @@ function bodyAndFiles(
   return { body, files };
 }
 
+// ── Universal vehicle meter — cross-module timeline / latest reading ──────
+// Backs the Vehicle History meter timeline and the "Latest Meter: X KM" hint
+// shown on Fuel Entry / Maintenance Entry vehicle selection. Read-only —
+// derived from trips + fuel_expenses + fleet_maintenance, never written to.
+fleetRouter.get(
+  "/vehicles/:vehicleId/meter-history",
+  asyncHandler(async (req, res) => {
+    res.json(await listVehicleMeterHistory(Number(req.params.vehicleId)));
+  })
+);
+
+fleetRouter.get(
+  "/vehicles/:vehicleId/latest-meter",
+  asyncHandler(async (req, res) => {
+    res.json(await getLatestVehicleMeter(null, Number(req.params.vehicleId)));
+  })
+);
+
 // ── Fleet → Entry / History (Vehicle Maintenance) ────────────────
 fleetRouter.get(
   "/maintenance",
@@ -64,6 +89,7 @@ fleetRouter.get(
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
         includeDeleted: req.query.includeDeleted === "true",
+        latestApproved: req.query.latestApproved === "true",
         pagination: enabled ? pagination : null,
       })
     );
@@ -157,5 +183,165 @@ fleetRouter.delete(
         Number(req.params.documentId)
       )
     );
+  })
+);
+
+// ── Fleet → Permits (Vehicle permit / document expiry) ─────────────
+/** Optional single scan per permit record; JSON bodies are left untouched. */
+function permitUpload(req: Request, res: Response, next: NextFunction) {
+  upload.single("document")(req, res, (err) => {
+    if (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return next(new AppError(400, "File size cannot exceed 10 MB."));
+        }
+        return next(new AppError(400, err.message));
+      }
+      return next(err);
+    }
+    return next();
+  });
+}
+
+/** Multipart permit bodies arrive as strings — coerce them; JSON passes through.
+ * Multipart is detected by content type, not by file presence, so a plain
+ * multipart upsert (dates only, no scan) is still coerced correctly. */
+function permitBodyAndFile(
+  req: Request
+): { body: Record<string, unknown>; file: Express.Multer.File | undefined } {
+  const file = req.file as Express.Multer.File | undefined;
+  const isMultipart = req.is("multipart/form-data");
+  const body = isMultipart
+    ? coercePermitMultipartBody(req.body as Record<string, unknown>)
+    : req.body;
+  return { body, file };
+}
+
+fleetRouter.get(
+  "/permits",
+  asyncHandler(async (_req, res) => {
+    res.json(await vehiclePermitService.list());
+  })
+);
+
+fleetRouter.get(
+  "/permits/summary",
+  asyncHandler(async (_req, res) => {
+    res.json(await vehiclePermitService.summary());
+  })
+);
+
+// Upsert the current record for (vehicle, doc_type). Multipart (optional scan)
+// and plain JSON are both supported.
+fleetRouter.put(
+  "/permits/:vehicleId/:docType",
+  permitUpload,
+  asyncHandler(async (req, res) => {
+    const { body, file } = permitBodyAndFile(req);
+    res.json(
+      await vehiclePermitService.upsert(
+        Number(req.params.vehicleId),
+        req.params.docType,
+        body,
+        file
+      )
+    );
+  })
+);
+
+fleetRouter.delete(
+  "/permits/:vehicleId/:docType",
+  asyncHandler(async (req, res) => {
+    res.json(
+      await vehiclePermitService.remove(
+        Number(req.params.vehicleId),
+        req.params.docType
+      )
+    );
+  })
+);
+
+fleetRouter.get(
+  "/permits/:vehicleId/:docType/document",
+  asyncHandler(async (req, res) => {
+    const doc = await vehiclePermitService.getDocumentBinary(
+      Number(req.params.vehicleId),
+      req.params.docType
+    );
+    res.setHeader("Content-Type", doc.mimeType);
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${doc.fileName.replace(/"/g, "")}"; filename*=UTF-8''${encodeURIComponent(doc.fileName)}`
+    );
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.send(doc.buffer);
+  })
+);
+
+// ── Fleet → EMI (Vehicle EMIs) ─────────────────────────────────────
+// Backs the EMI page. EMI records are per-vehicle summaries joined against
+// the Vehicle Master for the real registration number; the persisted schedule
+// (vehicle_emi_installments) is the single source of truth for paid/pending/
+// next/status. Payment advances the schedule transactionally.
+fleetRouter.get(
+  "/emis",
+  asyncHandler(async (req, res) => {
+    res.json(
+      await vehicleEmiService.list({
+        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        status: typeof req.query.status === "string" ? req.query.status : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
+      })
+    );
+  })
+);
+
+// NOTE: must be registered before /emis/:id so "vehicle" is not parsed as an id.
+fleetRouter.get(
+  "/emis/vehicle/:vehicleId",
+  asyncHandler(async (req, res) => {
+    res.json(await vehicleEmiService.getByVehicleId(Number(req.params.vehicleId)));
+  })
+);
+
+fleetRouter.get(
+  "/emis/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await vehicleEmiService.getById(Number(req.params.id)));
+  })
+);
+
+fleetRouter.get(
+  "/emis/:id/schedule",
+  asyncHandler(async (req, res) => {
+    res.json(await vehicleEmiService.listSchedule(Number(req.params.id)));
+  })
+);
+
+fleetRouter.post(
+  "/emis",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await vehicleEmiService.create(req.body));
+  })
+);
+
+fleetRouter.put(
+  "/emis/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await vehicleEmiService.update(Number(req.params.id), req.body));
+  })
+);
+
+fleetRouter.delete(
+  "/emis/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await vehicleEmiService.remove(Number(req.params.id)));
+  })
+);
+
+fleetRouter.post(
+  "/emis/:id/pay",
+  asyncHandler(async (req, res) => {
+    res.json(await vehicleEmiService.pay(Number(req.params.id), req.body));
   })
 );

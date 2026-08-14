@@ -99,7 +99,7 @@ try {
   if (a1.status === 201) {
     createdMaintIds.push(a1.data.id);
     check("A2 has positive id", a1.data.id > 0);
-    check("A3 server billNo generated", /^MNT-\d{8}-\d{3}$/.test(a1.data.billNo), `got ${a1.data.billNo}`);
+    check("A3 server billNo generated (vehicle format)", a1.data.billNo === `MNT-${vehNumber}-001`, `got ${a1.data.billNo}`);
     check("A4 status Pending Approval", a1.data.status === "Pending Approval", `got ${a1.data.status}`);
     check("A5 paymentStatus pending", a1.data.paymentStatus === "pending");
     // vehicle snapshot auto-resolved from Vehicle Master
@@ -198,30 +198,32 @@ try {
   const dCount = (await db(`SELECT COUNT(*)::int c FROM fleet_maintenance WHERE vehicle_id = $1 AND maintenance_date = $2`, [vehId, TEST_DATE])).rows[0].c;
   check("D5 rejected entries left no rows", dCount === 1, `got ${dCount} (expected 1 — only the valid A entry)`);
 
-  // ============ J. Failed transaction leaves no partial records ============
-  console.log("\n=== J. Failed transaction leaves no partial records ===");
-  const beforeJ = (await db(`SELECT COUNT(*)::int c FROM fleet_maintenance WHERE vehicle_id = $1 AND maintenance_date = $2`, [vehId, TEST_DATE])).rows[0].c;
-  // Insert fails at DB level (duplicate bill_no) inside the transaction → rollback.
-  const j1 = await postMaintenance({ ...baseEntry, billNo: a1.data?.billNo });
-  console.log(`  -> ${j1.status} ${JSON.stringify(j1.data?.error)}`);
-  check("J1 duplicate bill rejected 409", j1.status === 409, `got ${j1.status} ${JSON.stringify(j1.data)}`);
-  const afterJ = (await db(`SELECT COUNT(*)::int c FROM fleet_maintenance WHERE vehicle_id = $1 AND maintenance_date = $2`, [vehId, TEST_DATE])).rows[0].c;
-  check("J2 no partial row left behind", afterJ === beforeJ, `before=${beforeJ} after=${afterJ}`);
+  // ============ J. bill_no uniqueness enforced at the database level ============
+  console.log("\n=== J. bill_no unique constraint enforced at the database level ===");
   const jErrCount = (await db(`SELECT COUNT(*)::int c FROM fleet_maintenance WHERE bill_no = $1`, [a1.data?.billNo])).rows[0].c;
-  check("J3 still exactly one row for that bill", jErrCount === 1, `got ${jErrCount}`);
+  check("J1 exactly one row for that bill", jErrCount === 1, `got ${jErrCount}`);
+  let jDupCode = null;
+  try {
+    await db(`INSERT INTO fleet_maintenance (bill_no, maintenance_date, vehicle_id) VALUES ($1, $2, $3)`,
+      [a1.data?.billNo, TEST_DATE, vehId]);
+  } catch (e) {
+    jDupCode = e.code;
+  }
+  check("J2 manual duplicate bill_no rejected (23505)", jDupCode === "23505", `got ${jDupCode}`);
+  const afterJ = (await db(`SELECT COUNT(*)::int c FROM fleet_maintenance WHERE bill_no = $1`, [a1.data?.billNo])).rows[0].c;
+  check("J3 no duplicate row persisted", afterJ === 1, `got ${afterJ}`);
 
-  // ============ L. No duplicate records from repeated submission ============
-  console.log("\n=== L. No duplicate records from repeated submission ===");
-  const lBody = { ...baseEntry, billNo: `FLTB-${stamp}` };
-  const l1 = await postMaintenance(lBody);
-  console.log(`  -> first ${l1.status}`);
+  // ============ L. Repeated identical submission → distinct auto numbers ============
+  console.log("\n=== L. Repeated identical submission gets distinct auto numbers ===");
+  const l1 = await postMaintenance(baseEntry);
   check("L1 first submit 201", l1.status === 201, `got ${l1.status}`);
   if (l1.status === 201) createdMaintIds.push(l1.data.id);
-  const l2 = await postMaintenance(lBody);
-  console.log(`  -> second ${l2.status} ${JSON.stringify(l2.data?.error)}`);
-  check("L2 duplicate submit rejected 409", l2.status === 409, `got ${l2.status} ${JSON.stringify(l2.data)}`);
-  const lCount = (await db(`SELECT COUNT(*)::int c FROM fleet_maintenance WHERE bill_no = $1`, [lBody.billNo])).rows[0].c;
-  check("L3 only one row persisted", lCount === 1, `got ${lCount}`);
+  const l2 = await postMaintenance(baseEntry);
+  check("L2 second identical submit 201", l2.status === 201, `got ${l2.status}`);
+  if (l2.status === 201) createdMaintIds.push(l2.data.id);
+  check("L3 distinct server-generated MNT numbers", l1.data?.billNo !== l2.data?.billNo && /^MNT-/.test(l1.data?.billNo ?? "") && /^MNT-/.test(l2.data?.billNo ?? ""), `${l1.data?.billNo} vs ${l2.data?.billNo}`);
+  const lCount = (await db(`SELECT COUNT(*)::int c FROM fleet_maintenance WHERE id = ANY($1::int[])`, [[l1.data?.id, l2.data?.id]])).rows[0].c;
+  check("L4 two rows persisted", lCount === 2, `got ${lCount}`);
 
   // ============ Approval workflow ============
   console.log("\n=== Approval workflow (approve / reject / delete) ===");

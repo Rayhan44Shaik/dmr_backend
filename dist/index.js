@@ -36,6 +36,13 @@ app.get("/", (_req, res) => {
                 delete: "DELETE /api/fleet/maintenance/:id",
                 documents: "GET /api/fleet/maintenance/:id/documents",
                 document: "GET|DELETE /api/fleet/maintenance/:id/documents/:documentId",
+                permits: "GET /api/fleet/permits  GET /api/fleet/permits/summary",
+                permitUpsert: "PUT /api/fleet/permits/:vehicleId/:docType",
+                permitDelete: "DELETE /api/fleet/permits/:vehicleId/:docType",
+                permitDocument: "GET /api/fleet/permits/:vehicleId/:docType/document",
+                emis: "GET|POST /api/fleet/emis  PUT|DELETE /api/fleet/emis/:id",
+                emiSchedule: "GET /api/fleet/emis/:id/schedule",
+                emiPay: "POST /api/fleet/emis/:id/pay",
             },
         },
     });

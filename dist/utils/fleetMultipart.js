@@ -82,8 +82,6 @@ export function coerceMultipartBody(raw) {
     };
     if ("date" in raw)
         out.date = first(raw.date);
-    if ("billNo" in raw)
-        out.billNo = first(raw.billNo);
     if ("vehicleId" in raw)
         out.vehicleId = toNum(first(raw.vehicleId));
     if ("vehicleNo" in raw)

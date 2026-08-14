@@ -59,7 +59,7 @@ export declare const shopRateBodySchema: z.ZodObject<{
 }>;
 export declare const shopSaleBodySchema: z.ZodObject<{
     saleNo: z.ZodOptional<z.ZodString>;
-    saleDate: z.ZodString;
+    saleDate: z.ZodOptional<z.ZodString>;
     shopId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     shopName: z.ZodOptional<z.ZodString>;
     birdTypeId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
@@ -74,11 +74,11 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     status: z.ZodOptional<z.ZodEnum<["Draft", "Pending Approval", "Approved", "Rejected", "Deleted"]>>;
     createdBy: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
-    saleDate: string;
     weight?: number | undefined;
     shopName?: string | undefined;
     status?: "Draft" | "Deleted" | "Approved" | "Rejected" | "Pending Approval" | undefined;
     birdType?: string | undefined;
+    birds?: number | undefined;
     tripId?: number | null | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
@@ -86,15 +86,15 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     remarks?: string | undefined;
     createdBy?: string | undefined;
     saleNo?: string | undefined;
-    birds?: number | undefined;
+    saleDate?: string | undefined;
     amount?: number | undefined;
     mortality?: number | undefined;
 }, {
-    saleDate: string;
     weight?: number | undefined;
     shopName?: string | undefined;
     status?: "Draft" | "Deleted" | "Approved" | "Rejected" | "Pending Approval" | undefined;
     birdType?: string | undefined;
+    birds?: number | undefined;
     tripId?: number | null | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
@@ -102,9 +102,50 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     remarks?: string | undefined;
     createdBy?: string | undefined;
     saleNo?: string | undefined;
-    birds?: number | undefined;
+    saleDate?: string | undefined;
     amount?: number | undefined;
     mortality?: number | undefined;
+}>;
+export declare const rateEntryBodySchema: z.ZodObject<{
+    tripId: z.ZodNumber;
+    rate: z.ZodNumber;
+    birdTypeId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    birdType: z.ZodOptional<z.ZodString>;
+    remarks: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    createdBy: z.ZodOptional<z.ZodString>;
+}, "strip", z.ZodTypeAny, {
+    tripId: number;
+    rate: number;
+    birdType?: string | undefined;
+    birdTypeId?: number | null | undefined;
+    remarks?: string | null | undefined;
+    createdBy?: string | undefined;
+}, {
+    tripId: number;
+    rate: number;
+    birdType?: string | undefined;
+    birdTypeId?: number | null | undefined;
+    remarks?: string | null | undefined;
+    createdBy?: string | undefined;
+}>;
+export declare const rateEntryUpdateSchema: z.ZodObject<{
+    rate: z.ZodOptional<z.ZodNumber>;
+    birdTypeId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    birdType: z.ZodOptional<z.ZodString>;
+    remarks: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    updatedBy: z.ZodOptional<z.ZodString>;
+}, "strip", z.ZodTypeAny, {
+    birdType?: string | undefined;
+    birdTypeId?: number | null | undefined;
+    rate?: number | undefined;
+    remarks?: string | null | undefined;
+    updatedBy?: string | undefined;
+}, {
+    birdType?: string | undefined;
+    birdTypeId?: number | null | undefined;
+    rate?: number | undefined;
+    remarks?: string | null | undefined;
+    updatedBy?: string | undefined;
 }>;
 export declare const collectionBodySchema: z.ZodObject<{
     collectionNo: z.ZodOptional<z.ZodString>;

@@ -3,9 +3,10 @@ import { AppError } from "../middleware/errorHandler.js";
 import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
 import { assertEmployeeExists, assertVehicleExists, } from "../utils/fkValidation.js";
 import { detectFileMimeType, MAINTENANCE_DOCUMENT_MAX_BYTES, MAINTENANCE_DOCUMENT_MAX_FILES, sanitizeFileName, } from "../utils/fleetMultipart.js";
-import { nextDocNo } from "../utils/operationsHelpers.js";
 import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
+import { assertMaintenanceDateEditable } from "../utils/fleetMaintenanceLock.js";
+import { lockVehicleForMeterWrite, preciseIsoOrUndefined, validateVehicleMeter, } from "../utils/vehicleMeterLedger.js";
 import { fleetMaintenanceApproveSchema, fleetMaintenanceBodySchema, fleetMaintenanceRejectSchema, fleetMaintenanceUpdateSchema, parseBody, } from "../validation/fleet.js";
 function mapDocumentMeta(row) {
     return {
@@ -70,9 +71,9 @@ function mapMaintenance(row) {
         documents: mapDocuments(row.documents_json),
     };
 }
-const MAINT_SELECT = `
-  SELECT fm.*, v.vehicle_number AS v_current_vehicle_number,
-    COALESCE(
+/** Shared documents JSON subquery — always evaluated per fleet_maintenance row
+ * (fm) so it composes cleanly inside DISTINCT ON queries too. */
+const DOCS_JSON_SUBQUERY = `COALESCE(
       (SELECT json_agg(
          json_build_object(
            'id', d.id,
@@ -85,10 +86,48 @@ const MAINT_SELECT = `
        FROM fleet_maintenance_documents d
        WHERE d.maintenance_id = fm.id),
       '[]'::json
-    ) AS documents_json
+    )`;
+const MAINT_SELECT = `
+  SELECT fm.*, v.vehicle_number AS v_current_vehicle_number,
+    ${DOCS_JSON_SUBQUERY} AS documents_json
   FROM fleet_maintenance fm
   LEFT JOIN vehicles v ON v.id = fm.vehicle_id
 `;
+/**
+ * Generate the next maintenance number for a vehicle: MNT-<VEHICLE-NO>-###.
+ *
+ * The vehicle number is resolved from the Vehicle Master — never supplied by
+ * the caller and never synthesized (no MNT-UNKNOWN-* / MNT-null-*).
+ *
+ * Concurrency: the per-vehicle sequence lives in
+ * fleet_maintenance_number_counters. The atomic upsert below takes the row
+ * lock for (vehicle_id), so concurrent creates for the SAME vehicle serialize
+ * and each gets a distinct increment; creates for different vehicles do not
+ * contend. The counter never decreases, so soft-deleted / rejected / historical
+ * numbers stay permanently consumed and are never re-issued.
+ *
+ * The fleet_maintenance.bill_no unique index is the final guard; any residual
+ * collision surfaces as 23505 (409) and the whole transaction rolls back.
+ */
+async function generateMaintenanceNo(client, vehicleId) {
+    const veh = await client.query(`SELECT vehicle_number FROM vehicles WHERE id = $1 LIMIT 1`, [vehicleId]);
+    if (!veh.rowCount) {
+        throw new AppError(422, "Vehicle not found", { vehicleId });
+    }
+    const vehicleNo = str(veh.rows[0].vehicle_number).trim();
+    if (!vehicleNo) {
+        throw new AppError(422, "Vehicle does not have a vehicle number assigned", {
+            vehicleId,
+        });
+    }
+    const counter = await client.query(`INSERT INTO fleet_maintenance_number_counters (vehicle_id, last_sequence)
+     VALUES ($1, 1)
+     ON CONFLICT (vehicle_id)
+     DO UPDATE SET last_sequence = fleet_maintenance_number_counters.last_sequence + 1
+     RETURNING last_sequence`, [vehicleId]);
+    const seq = Number(counter.rows[0].last_sequence);
+    return `MNT-${vehicleNo}-${String(seq).padStart(3, "0")}`;
+}
 function buildWhere(filters) {
     const clauses = [];
     const params = [];
@@ -126,6 +165,35 @@ function buildWhere(filters) {
         where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "",
         params,
     };
+}
+/**
+ * Approved tab — returns ONLY the latest approved maintenance record per
+ * vehicle (one row per vehicle_id). Uses DISTINCT ON so the aggregation happens
+ * at the database level, never by over-fetching every approved record.
+ *
+ * "Latest" is determined by approved_at (falls back to updated_at / created_at,
+ * then id) — never by maintenance_date alone, which can produce wrong results.
+ * Soft-deleted records are excluded. Search / pagination continue to work.
+ */
+async function listLatestApproved(where, params, pagination) {
+    const select = `
+    SELECT DISTINCT ON (fm.vehicle_id) fm.*, v.vehicle_number AS v_current_vehicle_number,
+      ${DOCS_JSON_SUBQUERY} AS documents_json
+    FROM fleet_maintenance fm
+    LEFT JOIN vehicles v ON v.id = fm.vehicle_id
+    ${where}
+    ORDER BY fm.vehicle_id, COALESCE(fm.approved_at, fm.updated_at, fm.created_at) DESC, fm.id DESC`;
+    if (pagination) {
+        const countResult = await query(`SELECT COUNT(*)::text AS c FROM ( ${select} ) sub`, params);
+        const total = Number(countResult.rows[0]?.c ?? 0);
+        const pagedParams = [...params, pagination.limit, pagination.offset];
+        const result = await query(`SELECT * FROM ( ${select} ) sub
+       ORDER BY COALESCE(sub.approved_at, sub.updated_at, sub.created_at) DESC, sub.id DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, pagedParams);
+        return paginatedResult(result.rows.map(mapMaintenance), total, pagination);
+    }
+    const result = await query(select, params);
+    return result.rows.map(mapMaintenance);
 }
 function normalizeMaintenanceType(value) {
     if (Array.isArray(value)) {
@@ -219,6 +287,10 @@ async function insertDocuments(client, maintenanceId, documents) {
 export const fleetMaintenanceService = {
     async list(filters = {}) {
         const { where, params } = buildWhere(filters);
+        // Approved tab: latest approved maintenance per vehicle (backend-level).
+        if (filters.latestApproved) {
+            return listLatestApproved(where, params, filters.pagination);
+        }
         if (filters.pagination) {
             const countResult = await query(`SELECT COUNT(*)::text AS c FROM fleet_maintenance fm ${where}`, params);
             const total = Number(countResult.rows[0]?.c ?? 0);
@@ -245,14 +317,25 @@ export const fleetMaintenanceService = {
             try {
                 await assertVehicleExists(data.vehicleId, client);
                 await assertEmployeeExists(data.driverId, "Driver", client);
+                // 10-day lock: cannot backdate-create a maintenance record for a date
+                // more than EDIT_WINDOW_DAYS in the past (mirrors Shop Sales' window).
+                assertMaintenanceDateEditable(data.date);
                 const maintenanceType = normalizeMaintenanceType(data.maintenanceType);
                 if (!maintenanceType) {
                     throw new AppError(400, "Maintenance type is required.");
                 }
+                // Universal vehicle meter validation.
+                await lockVehicleForMeterWrite(client, data.vehicleId);
+                await validateVehicleMeter(client, {
+                    vehicleId: data.vehicleId,
+                    newMeter: num(data.currentKM),
+                    eventDate: data.date,
+                    context: "Maintenance meter reading",
+                });
                 const parts = normalizeParts(data.parts ?? []);
                 const totalCost = computeTotalCost(parts);
                 const { vehicleNo, driverName } = await resolveSnapshots(client, data);
-                const billNo = data.billNo || (await nextDocNo(client, "MNT", "fleet_maintenance", "bill_no"));
+                const billNo = await generateMaintenanceNo(client, data.vehicleId);
                 const result = await client.query(`INSERT INTO fleet_maintenance (
              bill_no, maintenance_date, vehicle_id, vehicle_no, driver_id, driver_name,
              current_km, next_service_km, maintenance_type, service_type, garage, mechanic,
@@ -296,11 +379,43 @@ export const fleetMaintenanceService = {
         const removeIds = data.removeDocumentIds ?? [];
         return withTransaction(async (client) => {
             try {
-                const existing = await client.query(`SELECT id FROM fleet_maintenance WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`, [id]);
+                const existing = await client.query(`SELECT id, vehicle_id, current_km, maintenance_date, bill_no, created_at
+           FROM fleet_maintenance WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`, [id]);
                 if (!existing.rowCount)
                     throw new AppError(404, "Maintenance record not found");
+                const existingRow = existing.rows[0];
                 await assertVehicleExists(data.vehicleId, client);
                 await assertEmployeeExists(data.driverId, "Driver", client);
+                // 10-day lock: the existing record's date must still be within the
+                // edit window, and (if being changed) the new date must be too.
+                const originalDate = dateOnly(existingRow.maintenance_date) ?? "";
+                const effectiveDate = data.date ?? originalDate;
+                assertMaintenanceDateEditable(originalDate, str(existingRow.bill_no));
+                if (effectiveDate !== originalDate) {
+                    assertMaintenanceDateEditable(effectiveDate, str(existingRow.bill_no));
+                }
+                // Universal vehicle meter validation, excluding this record's own
+                // previously-persisted reading so an edit never compares against itself.
+                if (data.currentKM != null || data.vehicleId != null) {
+                    const vehicleId = data.vehicleId ?? numOrNull(existingRow.vehicle_id);
+                    const newMeter = data.currentKM ?? num(existingRow.current_km);
+                    if (vehicleId != null) {
+                        await lockVehicleForMeterWrite(client, vehicleId);
+                        await validateVehicleMeter(client, {
+                            vehicleId,
+                            newMeter,
+                            eventDate: effectiveDate,
+                            // Preserve the record's own original instant (matches the
+                            // view's created_at fallback for MAINTENANCE) rather than
+                            // defaulting to "now" — otherwise re-validating an edit would
+                            // make the record look like it happened after every same-day
+                            // record created since, comparing it against the wrong neighbors.
+                            eventInstant: preciseIsoOrUndefined(existingRow.created_at),
+                            exclude: { sourceType: "MAINTENANCE", recordId: id },
+                            context: "Maintenance meter reading",
+                        });
+                    }
+                }
                 // Remove explicitly requested documents (never silently).
                 if (removeIds.length > 0) {
                     const docRows = await client.query(`SELECT COUNT(*)::int AS c FROM fleet_maintenance_documents
@@ -384,8 +499,13 @@ export const fleetMaintenanceService = {
            rejected_reason = NULL,
            updated_at = NOW()
          WHERE id = $1
-         RETURNING *`, [id, data.approvedBy ?? "system"]);
-            return mapMaintenance(result.rows[0]);
+         RETURNING id`, [id, data.approvedBy ?? "system"]);
+            if (!result.rowCount)
+                throw new AppError(404, "Maintenance record not found");
+            // Return the full record (with documents metadata) — approval must never
+            // detach the attached documents.
+            const full = await client.query(`${MAINT_SELECT} WHERE fm.id = $1`, [id]);
+            return mapMaintenance(full.rows[0]);
         });
     },
     async reject(id, body) {
@@ -405,12 +525,20 @@ export const fleetMaintenanceService = {
            rejected_reason = $3,
            updated_at = NOW()
          WHERE id = $1
-         RETURNING *`, [id, data.rejectedBy ?? "system", data.reason]);
-            return mapMaintenance(result.rows[0]);
+         RETURNING id`, [id, data.rejectedBy ?? "system", data.reason]);
+            if (!result.rowCount)
+                throw new AppError(404, "Maintenance record not found");
+            const full = await client.query(`${MAINT_SELECT} WHERE fm.id = $1`, [id]);
+            return mapMaintenance(full.rows[0]);
         });
     },
     async softDelete(id, reason) {
         return withTransaction(async (client) => {
+            const existing = await client.query(`SELECT maintenance_date, bill_no FROM fleet_maintenance
+         WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`, [id]);
+            if (!existing.rowCount)
+                throw new AppError(404, "Maintenance record not found");
+            assertMaintenanceDateEditable(dateOnly(existing.rows[0].maintenance_date) ?? "", str(existing.rows[0].bill_no));
             const result = await client.query(`UPDATE fleet_maintenance SET
            deleted = TRUE,
            deleted_reason = $2,
@@ -420,10 +548,11 @@ export const fleetMaintenanceService = {
            rejected_reason = NULL,
            updated_at = NOW()
          WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE
-         RETURNING *`, [id, reason ?? null]);
+         RETURNING id`, [id, reason ?? null]);
             if (!result.rowCount)
                 throw new AppError(404, "Maintenance record not found");
-            return mapMaintenance(result.rows[0]);
+            const full = await client.query(`${MAINT_SELECT} WHERE fm.id = $1`, [id]);
+            return mapMaintenance(full.rows[0]);
         });
     },
     async listDocuments(maintenanceId) {

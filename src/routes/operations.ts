@@ -110,8 +110,8 @@ operationsRouter.delete(
 );
 
 // ── Rate Entry ───────────────────────────────────────────────────
-// Trips that reached the existing Pending/Completed lifecycle (Step 5
-// done), each with its rate record if one has been entered.
+// Finalized (status = Completed, not deleted) trips only, each with its
+// rate record if one has been entered.
 operationsRouter.get(
   "/rate-entry",
   asyncHandler(async (req, res) => {
@@ -122,6 +122,12 @@ operationsRouter.get(
           req.query.rateStatus === "Entered" || req.query.rateStatus === "Pending"
             ? req.query.rateStatus
             : undefined,
+        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        vehicleNo: typeof req.query.vehicleNo === "string" ? req.query.vehicleNo : undefined,
+        supervisorName:
+          typeof req.query.supervisorName === "string" ? req.query.supervisorName : undefined,
+        pagination: opsListPagination(req),
       })
     );
   })

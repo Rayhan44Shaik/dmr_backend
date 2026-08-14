@@ -4,6 +4,11 @@ import { AppError } from "../middleware/errorHandler.js";
 import type { RateEntry, RateEntryTrip } from "../types/operations.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
 import { assertBirdTypeExists, assertTripExists } from "../utils/fkValidation.js";
+import {
+  paginatedResult,
+  type PaginatedResult,
+  type PaginationParams,
+} from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import {
   parseBody,
@@ -15,20 +20,23 @@ type Client = pg.PoolClient;
 
 /**
  * Rejects trips that cannot receive a rate: unknown/deleted trips (via
- * assertTripExists, which already excludes deleted rows) and trips still in
- * Draft — i.e. that have not yet reached the existing Pending/Completed
- * lifecycle produced by a successful Step 5 submission. No new trip status
- * is introduced; this only reads the existing `status` column.
+ * assertTripExists, which already excludes deleted rows) and any trip that
+ * hasn't reached the existing finalized "Completed" status yet. Step 5
+ * submission only moves a trip to Pending — Pending is not yet finalized,
+ * so it is not eligible until the trip is separately approved/completed
+ * through the existing status-transition API. No new trip status is
+ * introduced; this only reads the existing `status` column.
  */
 async function assertTripEligibleForRate(tripId: number, client: Client | null = null) {
   await assertTripExists(tripId, client);
   const sql = `SELECT status FROM trips WHERE id = $1`;
   const result = client ? await client.query(sql, [tripId]) : await query(sql, [tripId]);
   const status = str(result.rows[0]?.status);
-  if (status === "Draft") {
+  if (status !== "Completed") {
     throw new AppError(
       409,
-      `Trip ${tripId} has not completed Step 5 yet (status: Draft) — rate cannot be entered until the trip reaches Pending.`
+      `Trip ${tripId} is not eligible for Rate Entry yet (status: ${status}). ` +
+        `Rate can only be entered once the trip is approved/completed.`
     );
   }
 }
@@ -66,6 +74,7 @@ function mapRateEntryTrip(row: Record<string, unknown>): RateEntryTrip {
     sourceFarm: row.source_farm == null ? null : str(row.source_farm),
     totalBirds: num(row.total_birds),
     totalWeight: num(row.total_weight),
+    totalShops: num(row.total_shops),
     birdTypeId: hasRate
       ? row.re_bird_type_id == null ? null : num(row.re_bird_type_id)
       : row.farm_bird_type_id == null ? null : num(row.farm_bird_type_id),
@@ -86,20 +95,34 @@ const ELIGIBLE_TRIPS_SELECT = `
     t.vehicle_id, t.vehicle_no, t.driver_id, t.driver_name,
     t.supervisor_id, t.supervisor_name,
     t.source_farm_id, t.source_farm,
-    t.total_birds, t.total_weight,
+    t.total_birds, t.total_weight, t.total_shops,
     t.farm_bird_type_id, t.farm_bird_type,
     r.id AS rate_entry_id, r.bird_type_id AS re_bird_type_id, r.bird_type AS re_bird_type,
     r.rate, r.remarks AS re_remarks,
     r.created_by AS re_created_by, r.created_at AS re_created_at, r.updated_at AS re_updated_at
   FROM trips t
   LEFT JOIN rate_entry r ON r.trip_id = t.id
-  WHERE t.deleted = FALSE AND t.status IN ('Pending', 'Completed')
+  WHERE t.deleted = FALSE AND t.status = 'Completed' AND r.id IS NULL
 `;
 
 export const rateEntryService = {
-  /** Trips eligible for Rate Entry — Pending/Completed, not Draft, not
-   * deleted — each optionally joined with its existing rate record. */
-  async list(filters: { search?: string; rateStatus?: "Pending" | "Entered" } = {}) {
+  /** Trips still waiting for their FIRST rate entry — finalized
+   * (status = Completed), not deleted, AND with no rate_entry row yet.
+   * Rate Entry is not an editable history page: once a trip has a
+   * rate_entry row it is permanently excluded from this list (the row
+   * itself is never deleted — Shop Sales/accounting still read it via
+   * trip_id — only this listing stops surfacing it). */
+  async list(
+    filters: {
+      search?: string;
+      rateStatus?: "Pending" | "Entered";
+      fromDate?: string;
+      toDate?: string;
+      vehicleNo?: string;
+      supervisorName?: string;
+      pagination?: PaginationParams | null;
+    } = {}
+  ): Promise<RateEntryTrip[] | PaginatedResult<RateEntryTrip>> {
     const clauses: string[] = [];
     const params: unknown[] = [];
 
@@ -107,8 +130,25 @@ export const rateEntryService = {
       params.push(`%${filters.search}%`);
       const p = params.length;
       clauses.push(
-        `(t.trip_no ILIKE $${p} OR t.vehicle_no ILIKE $${p} OR t.driver_name ILIKE $${p} OR t.source_farm ILIKE $${p})`
+        `(t.trip_no ILIKE $${p} OR t.vehicle_no ILIKE $${p} OR t.driver_name ILIKE $${p} OR t.supervisor_name ILIKE $${p} OR t.source_farm ILIKE $${p})`
       );
+    }
+    // Business date filter — trip_date, not any created_at/rate_entry timestamp.
+    if (filters.fromDate) {
+      params.push(filters.fromDate);
+      clauses.push(`t.trip_date >= $${params.length}`);
+    }
+    if (filters.toDate) {
+      params.push(filters.toDate);
+      clauses.push(`t.trip_date <= $${params.length}`);
+    }
+    if (filters.vehicleNo) {
+      params.push(filters.vehicleNo);
+      clauses.push(`t.vehicle_no = $${params.length}`);
+    }
+    if (filters.supervisorName) {
+      params.push(filters.supervisorName);
+      clauses.push(`t.supervisor_name = $${params.length}`);
     }
     if (filters.rateStatus === "Entered") {
       clauses.push(`r.id IS NOT NULL`);
@@ -117,6 +157,25 @@ export const rateEntryService = {
     }
 
     const extraWhere = clauses.length ? `AND ${clauses.join(" AND ")}` : "";
+
+    if (filters.pagination) {
+      const countResult = await query<{ c: string }>(
+        `SELECT COUNT(*)::text AS c
+         FROM trips t LEFT JOIN rate_entry r ON r.trip_id = t.id
+         WHERE t.deleted = FALSE AND t.status = 'Completed' ${extraWhere}`,
+        params
+      );
+      const total = Number(countResult.rows[0]?.c ?? 0);
+      const pagedParams = [...params, filters.pagination.limit, filters.pagination.offset];
+      const result = await query(
+        `${ELIGIBLE_TRIPS_SELECT} ${extraWhere}
+         ORDER BY t.trip_date DESC, t.id DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        pagedParams
+      );
+      return paginatedResult(result.rows.map(mapRateEntryTrip), total, filters.pagination);
+    }
+
     const result = await query(
       `${ELIGIBLE_TRIPS_SELECT} ${extraWhere} ORDER BY t.trip_date DESC, t.id DESC`,
       params

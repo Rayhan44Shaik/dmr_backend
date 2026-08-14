@@ -64,11 +64,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         shopName?: string | undefined;
         birdType?: string | undefined;
         id?: number | undefined;
+        birds?: number | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
         remarks?: string | undefined;
-        birds?: number | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -89,11 +89,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         shopName?: string | undefined;
         birdType?: string | undefined;
         id?: number | undefined;
+        birds?: number | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
         remarks?: string | undefined;
-        birds?: number | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -121,20 +121,20 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         imageName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     }, "strip", z.ZodTypeAny, {
         rowIndex: number;
+        meter?: number | null | undefined;
         rate?: number | null | undefined;
         imageData?: string | null | undefined;
         imageName?: string | null | undefined;
         litres?: number | null | undefined;
-        meter?: number | null | undefined;
         bunkName?: string | null | undefined;
         bunkGps?: string | null | undefined;
     }, {
         rowIndex: number;
+        meter?: number | null | undefined;
         rate?: number | null | undefined;
         imageData?: string | null | undefined;
         imageName?: string | null | undefined;
         litres?: number | null | undefined;
-        meter?: number | null | undefined;
         bunkName?: string | null | undefined;
         bunkGps?: string | null | undefined;
     }>, "many">>;
@@ -202,11 +202,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         shopName?: string | undefined;
         birdType?: string | undefined;
         id?: number | undefined;
+        birds?: number | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
         remarks?: string | undefined;
-        birds?: number | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -227,11 +227,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         shopName?: string | undefined;
         birdType?: string | undefined;
         id?: number | undefined;
+        birds?: number | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
         remarks?: string | undefined;
-        birds?: number | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -259,20 +259,20 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         imageName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     }, "strip", z.ZodTypeAny, {
         rowIndex: number;
+        meter?: number | null | undefined;
         rate?: number | null | undefined;
         imageData?: string | null | undefined;
         imageName?: string | null | undefined;
         litres?: number | null | undefined;
-        meter?: number | null | undefined;
         bunkName?: string | null | undefined;
         bunkGps?: string | null | undefined;
     }, {
         rowIndex: number;
+        meter?: number | null | undefined;
         rate?: number | null | undefined;
         imageData?: string | null | undefined;
         imageName?: string | null | undefined;
         litres?: number | null | undefined;
-        meter?: number | null | undefined;
         bunkName?: string | null | undefined;
         bunkGps?: string | null | undefined;
     }>, "many">>;
@@ -340,11 +340,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         shopName?: string | undefined;
         birdType?: string | undefined;
         id?: number | undefined;
+        birds?: number | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
         remarks?: string | undefined;
-        birds?: number | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -365,11 +365,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         shopName?: string | undefined;
         birdType?: string | undefined;
         id?: number | undefined;
+        birds?: number | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
         remarks?: string | undefined;
-        birds?: number | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -397,20 +397,20 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         imageName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     }, "strip", z.ZodTypeAny, {
         rowIndex: number;
+        meter?: number | null | undefined;
         rate?: number | null | undefined;
         imageData?: string | null | undefined;
         imageName?: string | null | undefined;
         litres?: number | null | undefined;
-        meter?: number | null | undefined;
         bunkName?: string | null | undefined;
         bunkGps?: string | null | undefined;
     }, {
         rowIndex: number;
+        meter?: number | null | undefined;
         rate?: number | null | undefined;
         imageData?: string | null | undefined;
         imageName?: string | null | undefined;
         litres?: number | null | undefined;
-        meter?: number | null | undefined;
         bunkName?: string | null | undefined;
         bunkGps?: string | null | undefined;
     }>, "many">>;
@@ -479,11 +479,11 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         shopName?: string | undefined;
         birdType?: string | undefined;
         id?: number | undefined;
+        birds?: number | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
         remarks?: string | undefined;
-        birds?: number | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -504,11 +504,11 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         shopName?: string | undefined;
         birdType?: string | undefined;
         id?: number | undefined;
+        birds?: number | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
         remarks?: string | undefined;
-        birds?: number | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -536,20 +536,20 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         imageName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     }, "strip", z.ZodTypeAny, {
         rowIndex: number;
+        meter?: number | null | undefined;
         rate?: number | null | undefined;
         imageData?: string | null | undefined;
         imageName?: string | null | undefined;
         litres?: number | null | undefined;
-        meter?: number | null | undefined;
         bunkName?: string | null | undefined;
         bunkGps?: string | null | undefined;
     }, {
         rowIndex: number;
+        meter?: number | null | undefined;
         rate?: number | null | undefined;
         imageData?: string | null | undefined;
         imageName?: string | null | undefined;
         litres?: number | null | undefined;
-        meter?: number | null | undefined;
         bunkName?: string | null | undefined;
         bunkGps?: string | null | undefined;
     }>, "many">>;

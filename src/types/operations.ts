@@ -61,6 +61,9 @@ export interface ShopSale {
   birdTypeId: number | null;
   birdType: string;
   tripId: number | null;
+  tripNo: string;
+  vehicleNo: string | null;
+  farmName: string | null;
   birds: number;
   weight: number;
   rate: number;
@@ -70,6 +73,16 @@ export interface ShopSale {
   status: OpsRecordStatus;
   deleted: boolean;
   deletedReason?: string | null;
+  /** True when the parent trip is soft-deleted — the sale itself is NOT
+   * deleted and remains a permanent historical accounting record. */
+  tripDeleted: boolean;
+  /** Whether this sale can currently be edited/deleted (Completed trip
+   * within the 10-day window, or not yet Completed). Backend is still the
+   * authority — this only lets the UI reflect state without recomputing it. */
+  editable: boolean;
+  /** ISO date the 10-day edit window closes (only meaningful once the trip
+   * is Completed). */
+  windowExpiresAt: string | null;
   approvedBy?: string | null;
   approvedAt?: string | null;
   rejectedBy?: string | null;
@@ -82,7 +95,7 @@ export interface ShopSale {
 
 export type RateEntryStatus = "Pending" | "Entered";
 
-/** A Rate Entry–eligible trip (status Pending/Completed, not deleted),
+/** A Rate Entry–eligible trip (status = Completed, not deleted),
  * optionally joined with its rate record if one has been entered. */
 export interface RateEntryTrip {
   tripId: number;
@@ -99,6 +112,7 @@ export interface RateEntryTrip {
   sourceFarm: string | null;
   totalBirds: number;
   totalWeight: number;
+  totalShops: number;
   birdTypeId: number | null;
   birdType: string | null;
   rateStatus: RateEntryStatus;

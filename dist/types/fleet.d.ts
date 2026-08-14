@@ -10,6 +10,54 @@ export interface FleetMaintenancePart {
 }
 /** Frontend-compatible payment status derived from the ops status. */
 export type MaintenancePaymentStatus = "pending" | "approved";
+/** The five document types tracked by Fleet → Permits. */
+export declare const PERMIT_DOC_TYPES: readonly ["insurance", "fitness", "permit", "puc", "rc"];
+export type PermitDocType = (typeof PERMIT_DOC_TYPES)[number];
+/**
+ * A vehicle EMI record (Fleet → EMI). One current record per vehicle — the
+ * EMI page is a per-vehicle summary table that joins the Vehicle Master for
+ * the registration number. vehicleId references vehicles.id; the vehicle
+ * number shown in the EMI table is always resolved from the master.
+ *
+ * The schedule lives in vehicle_emi_installments and is the single source of
+ * truth for paid/pending/next/status. loanAmount + totalEMIs + startDate are
+ * the authoritative inputs; the frontend sees exactly the same derived fields
+ * (emiAmount / endDate / paidEMIs / pendingEMIs / nextEMIDate / status) it
+ * already displays, so no client-side recalculation is needed.
+ */
+export type EMIStatus = "active" | "paid" | "overdue";
+export interface VehicleEMI {
+    id: number;
+    vehicleId: number;
+    /** Registration number resolved from the Vehicle Master (e.g. "AP 39 AB 1234"). */
+    vehicleNo: string;
+    financeCompany: string;
+    loanAmount: number;
+    emiAmount: number;
+    startDate: string;
+    endDate: string;
+    nextEMIDate: string | null;
+    status: EMIStatus;
+    /** Number of installments marked paid. */
+    paidEMIs: number;
+    /** totalEMIs - paidEMIs, provided so the EMI table's "Pending EMIs" column
+     * never reimplements the derivation. */
+    pendingEMIs: number;
+    totalEMIs: number;
+    createdBy: string;
+    createdAt: string | null;
+    updatedAt: string | null;
+}
+/** One persisted installment of a vehicle EMI schedule. */
+export interface VehicleEMIInstallment {
+    id: number;
+    vehicleEmiId: number;
+    installmentNo: number;
+    dueDate: string;
+    amount: number;
+    status: "pending" | "paid";
+    paidAt: string | null;
+}
 /** Lightweight metadata for a bill / spare-part document on a maintenance entry.
  * Binary contents are never returned by the history list — only this metadata. */
 export interface FleetMaintenanceDocument {
@@ -58,4 +106,28 @@ export interface FleetMaintenance {
     updatedAt?: string | null;
     /** Bill / spare-part documents attached to the maintenance entry (metadata only). */
     documents?: FleetMaintenanceDocument[];
+}
+/**
+ * A vehicle permit / document expiry record (Fleet → Permits). One current row
+ * per (vehicle_id, doc_type). The optional scan is stored as BYTEA on the
+ * backend — this DTO only carries metadata; hasDocument + fileName tell the UI
+ * whether a scan exists and how to fetch it.
+ */
+export interface VehiclePermitDocument {
+    id: number;
+    vehicleId: number;
+    /** Snapshot of the registered vehicle number, resolved from the Vehicle Master. */
+    vehicleNo: string;
+    docType: PermitDocType;
+    documentNumber: string;
+    validFrom: string | null;
+    expiryDate: string;
+    remarks: string | null;
+    hasDocument: boolean;
+    fileName: string | null;
+    mimeType: string | null;
+    fileSize: number | null;
+    createdBy: string;
+    createdAt: string | null;
+    updatedAt: string | null;
 }

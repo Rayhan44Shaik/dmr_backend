@@ -29,6 +29,13 @@ import {
   sumDieselFuel,
 } from "../utils/tripCalculations.js";
 import { loadDcPhoto, syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
+import { generateSaleNo } from "../utils/tripDeliverySync.js";
+import {
+  getLatestVehicleMeter,
+  lockVehicleForMeterWrite,
+  preciseIsoOrUndefined,
+  validateVehicleMeter,
+} from "../utils/vehicleMeterLedger.js";
 import {
   assertStepOrder,
   getResumeLabel,
@@ -165,6 +172,53 @@ function childCounts(row: Record<string, unknown>): ChildCounts {
 
 function hasNumber(value: unknown): boolean {
   return value != null && Number(value) > 0;
+}
+
+function normalizeTripTimestamp(value: unknown): string | null {
+  if (value == null || value === "") return null;
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+
+  const raw = String(value).trim();
+
+  // Already ISO-compatible.
+  if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+
+  // Handles localized values such as:
+  // "8/13/2026, 8:39:06 PM"
+  const match = raw.match(
+    /^(\d{1,2})\/(\d{1,2})\/(\d{4}),?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i
+  );
+
+  if (match) {
+    const [, month, day, year, hour, minute, second = "0", meridiem] = match;
+
+    let h = Number(hour);
+
+    if (meridiem.toUpperCase() === "PM" && h !== 12) {
+      h += 12;
+    }
+
+    if (meridiem.toUpperCase() === "AM" && h === 12) {
+      h = 0;
+    }
+
+    const normalized =
+      `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}` +
+      `T${String(h).padStart(2, "0")}:${minute}:${second.padStart(2, "0")}`;
+
+    const parsed = new Date(normalized);
+
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
 /**
@@ -554,6 +608,21 @@ async function replaceDeliveries(
   deliveries: ShopDelivery[] = []
 ) {
   await client.query(`DELETE FROM trip_deliveries WHERE trip_id = $1`, [tripId]);
+  if (deliveries.length === 0) return;
+
+  // trip_deliveries.sale_no is NOT NULL (023_shop_sales_hardening.sql) in the
+  // existing "<tripNo>-S<seq>" format also used by shopSalesService.ts for
+  // post-completion Shop Sales edits. This wizard path (Step 4, Draft/Pending
+  // trips) never populated it, which is exactly why new inserts here started
+  // violating the constraint — reuse the same generateSaleNo() rather than
+  // inventing a second numbering scheme. Full delete+reinsert (existing
+  // behavior above) means the per-trip sequence restarts each save; that is
+  // unchanged from how serial_no/id already behave for this same function.
+  const tripRow = await client.query<{ trip_no: string }>(
+    `SELECT trip_no FROM trips WHERE id = $1`,
+    [tripId]
+  );
+  const tripNo = tripRow.rows[0]?.trip_no ?? `TR-${tripId}`;
 
   for (const [index, d] of deliveries.entries()) {
     const amount =
@@ -561,15 +630,18 @@ async function replaceDeliveries(
         ? d.amount
         : Number((Number(d.weight ?? 0) * Number(d.rate ?? 0)).toFixed(2));
 
+    const saleNo = await generateSaleNo(client, tripId, tripNo);
+
     const inserted = await client.query(
       `INSERT INTO trip_deliveries (
-         trip_id, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
+         trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
          birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
          farm_birds, farm_weight, auto_capture_time
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
        RETURNING id`,
       [
         tripId,
+        saleNo,
         d.serialNo ?? index + 1,
         d.boxNo ?? null,
         d.shopId ?? null,
@@ -586,7 +658,7 @@ async function replaceDeliveries(
         d.deliveryMode ?? "box",
         d.farmBirds ?? null,
         d.farmWeight ?? null,
-        d.autoCaptureTime || null,
+        normalizeTripTimestamp(d.autoCaptureTime),
       ]
     );
     const deliveryId = num(inserted.rows[0].id);
@@ -991,6 +1063,126 @@ export const tripsService = {
         const boxDetails = (body.boxDetails as BoxDetail[]) ?? [];
         const deliveries = (body.deliveries as ShopDelivery[]) ?? [];
 
+        // ---- Universal vehicle meter validation ----
+        // Only runs on a real step submission (start/expenses), never on
+        // "Save Progress" autosave (submitStep already strips these flags for
+        // autosave bodies before calling save() — see submitStep below), so
+        // partial in-progress drafts are never blocked mid-entry.
+        if (body.startStepSubmitted === true || body.expensesStepSubmitted === true) {
+          const vehicleIdForMeter =
+            numOrNull(body.vehicleId) ?? (existing ? numOrNull(existing.rows[0].vehicle_id) : null);
+          if (vehicleIdForMeter == null) {
+            throw new AppError(422, "A vehicle must be selected before submitting this step.");
+          }
+          // The trip's business date — primary chronological key (see the
+          // vehicle_meter_events view's comment for why date, not timestamp,
+          // is primary: it keeps same-day cross-module comparisons fair).
+          const tripBusinessDate =
+            dateOnly(body.tripDate) ?? (existing ? dateOnly(existing.rows[0].trip_date) : null);
+          if (!tripBusinessDate) {
+            throw new AppError(422, "Trip date is required before submitting this step.");
+          }
+          // Row lock makes "read latest -> validate -> write" atomic for this
+          // vehicle: a concurrent request for the same vehicle blocks here
+          // until this transaction commits or rolls back.
+          await lockVehicleForMeterWrite(client, vehicleIdForMeter);
+
+          if (body.startStepSubmitted === true) {
+            const effectiveOpening =
+              numOrNull(body.openingMeter) ??
+              (existing ? numOrNull(existing.rows[0].opening_meter) : null);
+            if (effectiveOpening != null) {
+              // On a re-submit/edit, prefer the trip's own already-persisted
+              // instant over "now" — matches the view's own COALESCE so a
+              // re-validated edit is compared against the SAME neighbors it
+              // originally had, not shoved past every same-day record created
+              // since (see fleetMaintenanceService.update() for the same fix).
+              const openingInstant =
+                normalizeTripTimestamp(body.startTime) ??
+                (existing
+                  ? (preciseIsoOrUndefined(existing.rows[0].start_step_submitted_at) ??
+                     preciseIsoOrUndefined(existing.rows[0].start_time) ??
+                     preciseIsoOrUndefined(existing.rows[0].created_at))
+                  : undefined);
+              await validateVehicleMeter(client, {
+                vehicleId: vehicleIdForMeter,
+                newMeter: effectiveOpening,
+                eventDate: tripBusinessDate,
+                eventInstant: openingInstant,
+                exclude: { sourceType: ["TRIP_START", "TRIP_END"], recordId: tripId },
+                context: "Trip start meter",
+              });
+            }
+          }
+
+          if (body.expensesStepSubmitted === true) {
+            const effectiveOpening =
+              numOrNull(body.openingMeter) ??
+              (existing ? numOrNull(existing.rows[0].opening_meter) : null);
+            const effectiveClosing =
+              numOrNull(body.closingMeter) ??
+              numOrNull(body.endMeter) ??
+              (existing
+                ? (numOrNull(existing.rows[0].closing_meter) ??
+                   numOrNull(existing.rows[0].end_meter))
+                : null);
+            // Same "preserve the original instant on an edit" reasoning as
+            // the opening-meter block above.
+            const closingEventInstant =
+              normalizeTripTimestamp(body.endTime) ??
+              (existing
+                ? (preciseIsoOrUndefined(existing.rows[0].expenses_step_submitted_at) ??
+                   preciseIsoOrUndefined(existing.rows[0].end_time) ??
+                   preciseIsoOrUndefined(existing.rows[0].created_at))
+                : undefined);
+
+            if (effectiveClosing != null) {
+              if (effectiveOpening != null && effectiveClosing < effectiveOpening) {
+                throw new AppError(
+                  422,
+                  `Trip closing meter (${effectiveClosing} KM) cannot be less than the trip's own opening meter (${effectiveOpening} KM).`
+                );
+              }
+              await validateVehicleMeter(client, {
+                vehicleId: vehicleIdForMeter,
+                newMeter: effectiveClosing,
+                eventDate: tripBusinessDate,
+                eventInstant: closingEventInstant,
+                exclude: { sourceType: ["TRIP_START", "TRIP_END"], recordId: tripId },
+                context: "Trip closing meter",
+              });
+            }
+
+            // Trip-generated diesel/fuel entries follow the same universal
+            // rule where a meter reading is actually persisted. Self-excluded
+            // via the diesel row's own already-synced fuel_expenses record
+            // (identity: trip_id + trip_fuel_entry_index, source_type='TRIP'
+            // — see tripFuelSync.ts) so re-submitting the same value never
+            // compares a reading against itself.
+            for (const entry of dieselEntries) {
+              const meter = numOrNull(entry.meter);
+              if (meter == null || meter <= 0) continue;
+              const existingSynced = await client.query<{ id: string }>(
+                `SELECT id FROM fuel_expenses
+                 WHERE trip_id = $1 AND trip_fuel_entry_index = $2
+                   AND source_type = 'TRIP' AND deleted = FALSE`,
+                [tripId, entry.rowIndex]
+              );
+              await validateVehicleMeter(client, {
+                vehicleId: vehicleIdForMeter,
+                newMeter: meter,
+                eventDate: tripBusinessDate,
+                eventInstant: closingEventInstant,
+                exclude: existingSynced.rowCount
+                  ? { sourceType: "FUEL", recordId: existingSynced.rows[0].id }
+                  : undefined,
+                context: `Diesel entry #${entry.rowIndex} meter reading`,
+              });
+            }
+          }
+        }
+        // ---- end universal vehicle meter validation ----
+
         if (boxDetails.length || deliveries.length) {
           applyComputedFields(body, boxDetails, deliveries);
         } else if (body.openingMeter != null && (body.closingMeter != null || body.endMeter != null)) {
@@ -1112,7 +1304,7 @@ export const tripsService = {
             tripId,
             dateOnly(body.tripDate),
             body.status ?? null,
-            body.startTime || null,
+            normalizeTripTimestamp(body.startTime),
             body.vehicleId ?? null,
             body.vehicleNo ?? null,
             body.driverId ?? null,
@@ -1124,7 +1316,7 @@ export const tripsService = {
             body.startStepSubmitted ?? null,
             body.sourceFarmId ?? null,
             body.sourceFarm ?? null,
-            body.reachedTime || null,
+            normalizeTripTimestamp(body.reachedTime),
             body.destMeter ?? null,
             body.pickupTolls ?? null,
             body.farmAddress ?? null,
@@ -1135,13 +1327,13 @@ export const tripsService = {
             body.totalBirds ?? null,
             body.boxes ?? null,
             body.avgWeight ?? null,
-            body.pickupLoadTime || null,
+            normalizeTripTimestamp(body.pickupLoadTime),
             body.dcPhotoKey ?? null,
             body.pickupStepSubmitted ?? null,
             body.deliveryStepSubmitted ?? null,
             body.closingMeter ?? body.endMeter ?? null,
             body.endMeter ?? body.closingMeter ?? null,
-            body.endTime || null,
+            normalizeTripTimestamp(body.endTime),
             body.deliveryTolls ?? body.destinationTolls ?? null,
             body.destinationTolls ?? body.deliveryTolls ?? null,
             body.meals ?? null,
@@ -1157,7 +1349,7 @@ export const tripsService = {
             body.fuel ?? null,
             body.expense ?? null,
             body.remarks ?? null,
-            body.submittedAt || null,
+            normalizeTripTimestamp(body.submittedAt),
             body.endStepSubmitted ?? null,
             body.expensesStepSubmitted ?? null,
             body.totalKm ?? null,
@@ -1477,22 +1669,20 @@ export const tripsService = {
     });
   },
 
+  /** Backs GET /trips/vehicle/:vehicleId/last-meter — the Trip Step 1 opening
+   * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
+   * maintenance), not just trip closing meters, while keeping the same
+   * response shape the frontend already consumes. */
   async lastClosingMeter(vehicleId: number) {
     await validateTripForeignKeys({ vehicleId });
-    const result = await query(
-      `SELECT closing_meter, end_meter, trip_no, trip_date
-       FROM trips
-       WHERE vehicle_id = $1 AND deleted = FALSE AND closing_meter IS NOT NULL
-       ORDER BY trip_date DESC, id DESC
-       LIMIT 1`,
-      [vehicleId]
-    );
-    if (!result.rowCount) return null;
-    const row = result.rows[0];
+    const latest = await getLatestVehicleMeter(null, vehicleId);
+    if (!latest) return null;
     return {
-      closingMeter: num(row.closing_meter ?? row.end_meter),
-      tripNo: str(row.trip_no),
-      tripDate: dateOnly(row.trip_date),
+      closingMeter: latest.meter,
+      source: latest.sourceType,
+      ref: latest.ref,
+      tripNo: latest.sourceType === "TRIP_END" || latest.sourceType === "TRIP_START" ? latest.ref : null,
+      tripDate: latest.eventDate,
     };
   },
 };

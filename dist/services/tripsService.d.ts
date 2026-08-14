@@ -521,9 +521,15 @@ export declare const tripsService: {
         dcPhotoData?: string | null;
         dcPhotoMime?: string | null;
     }>;
+    /** Backs GET /trips/vehicle/:vehicleId/last-meter — the Trip Step 1 opening
+     * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
+     * maintenance), not just trip closing meters, while keeping the same
+     * response shape the frontend already consumes. */
     lastClosingMeter(vehicleId: number): Promise<{
         closingMeter: number;
-        tripNo: string;
-        tripDate: string | null;
+        source: import("../utils/vehicleMeterLedger.js").MeterSourceType;
+        ref: string;
+        tripNo: string | null;
+        tripDate: string;
     } | null>;
 };

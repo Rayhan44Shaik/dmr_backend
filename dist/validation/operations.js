@@ -32,20 +32,39 @@ export const shopRateBodySchema = z.object({
 });
 export const shopSaleBodySchema = z.object({
     saleNo: z.string().optional(),
-    saleDate: z.string().min(1),
-    shopId: z.number().int().nullable().optional(),
+    // Derived from the trip (trips.trip_date) — never read from the client.
+    saleDate: z.string().optional(),
+    shopId: z.number().int().positive().nullable().optional(),
     shopName: z.string().optional(),
-    birdTypeId: z.number().int().nullable().optional(),
+    birdTypeId: z.number().int().positive().nullable().optional(),
     birdType: z.string().optional(),
-    tripId: z.number().int().nullable().optional(),
+    tripId: z.number().int().positive().nullable().optional(),
     birds: z.number().int().nonnegative().optional(),
     weight: z.number().nonnegative().optional(),
     rate: z.number().nonnegative().optional(),
+    // amount is never read by the service (always server-computed from
+    // weight × rate) — kept optional here only so a client that still sends
+    // it doesn't fail validation; the value itself is always ignored.
     amount: z.number().nonnegative().optional(),
     mortality: z.number().int().nonnegative().optional(),
     remarks: z.string().optional(),
     status: opsStatusSchema.optional(),
     createdBy: z.string().optional(),
+});
+export const rateEntryBodySchema = z.object({
+    tripId: z.number({ required_error: "tripId is required" }).int(),
+    rate: z.number({ required_error: "rate is required" }).nonnegative(),
+    birdTypeId: z.number().int().nullable().optional(),
+    birdType: z.string().optional(),
+    remarks: z.string().nullable().optional(),
+    createdBy: z.string().optional(),
+});
+export const rateEntryUpdateSchema = z.object({
+    rate: z.number().nonnegative().optional(),
+    birdTypeId: z.number().int().nullable().optional(),
+    birdType: z.string().optional(),
+    remarks: z.string().nullable().optional(),
+    updatedBy: z.string().optional(),
 });
 export const collectionBodySchema = z.object({
     collectionNo: z.string().optional(),

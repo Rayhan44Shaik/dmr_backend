@@ -15,6 +15,7 @@ export declare const fleetMaintenanceService: {
         status?: string;
         search?: string;
         includeDeleted?: boolean;
+        latestApproved?: boolean;
         pagination?: PaginationParams | null;
     }): Promise<FleetMaintenance[] | PaginatedResult<FleetMaintenance>>;
     getById(id: number): Promise<FleetMaintenance>;
