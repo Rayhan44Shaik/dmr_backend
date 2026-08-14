@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { asyncHandler } from "../middleware/errorHandler.js";
 import { staffService } from "../services/staffService.js";
+import { dutyPlannerService } from "../services/dutyPlannerService.js";
 
 export const staffRouter = Router();
 
@@ -134,5 +135,101 @@ staffRouter.post(
   "/attendance",
   asyncHandler(async (req, res) => {
     res.status(201).json(await staffService.upsertAttendance(req.body));
+  })
+);
+
+// ============ DUTY PLANNER (PostgreSQL-backed) ============
+// GET /api/staff/duty-planner?weekStart=YYYY-MM-DD
+staffRouter.get(
+  "/duty-planner",
+  asyncHandler(async (req, res) => {
+    const weekStart =
+      typeof req.query.weekStart === "string" ? req.query.weekStart : undefined;
+    res.json(await dutyPlannerService.getDutyWeek(weekStart ?? new Date().toISOString().slice(0, 10)));
+  })
+);
+
+// GET /api/staff/duty-planner/week/:weekStart  (status + week)
+staffRouter.get(
+  "/duty-planner/week/:weekStart",
+  asyncHandler(async (req, res) => {
+    res.json(await dutyPlannerService.getWeekStatus(req.params.weekStart));
+  })
+);
+
+// POST /api/staff/duty-planner/auto-assign/preview
+staffRouter.post(
+  "/duty-planner/auto-assign/preview",
+  asyncHandler(async (req, res) => {
+    const weekStart =
+      typeof req.body?.weekStart === "string" ? req.body.weekStart : new Date().toISOString().slice(0, 10);
+    res.json(await dutyPlannerService.autoAssignPreview(weekStart));
+  })
+);
+
+// POST /api/staff/duty-planner/auto-assign/apply
+staffRouter.post(
+  "/duty-planner/auto-assign/apply",
+  asyncHandler(async (req, res) => {
+    const weekStart =
+      typeof req.body?.weekStart === "string" ? req.body.weekStart : new Date().toISOString().slice(0, 10);
+    const plan = req.body?.plan ?? undefined;
+    const changedBy = typeof req.body?.changedBy === "string" ? req.body.changedBy : "user";
+    res.json(await dutyPlannerService.autoAssignApply(weekStart, plan, changedBy));
+  })
+);
+
+// POST /api/staff/duty-planner/assign  (manual; server-validated)
+staffRouter.post(
+  "/duty-planner/assign",
+  asyncHandler(async (req, res) => {
+    const changedBy = typeof req.body?.changedBy === "string" ? req.body.changedBy : "user";
+    res.status(201).json(await dutyPlannerService.upsertDuty(req.body ?? {}, changedBy));
+  })
+);
+
+// PUT /api/staff/duty-planner/:id  (manual edit; server-validated)
+staffRouter.put(
+  "/duty-planner/:id",
+  asyncHandler(async (req, res) => {
+    const changedBy = typeof req.body?.changedBy === "string" ? req.body.changedBy : "user";
+    res.json(await dutyPlannerService.upsertDuty({ ...(req.body ?? {}), id: req.params.id }, changedBy));
+  })
+);
+
+// DELETE /api/staff/duty-planner/:id
+staffRouter.delete(
+  "/duty-planner/:id",
+  asyncHandler(async (req, res) => {
+    const changedBy = typeof req.body?.changedBy === "string" ? req.body.changedBy : "user";
+    res.json(await dutyPlannerService.deleteDuty(req.params.id, changedBy));
+  })
+);
+
+// POST /api/staff/duty-planner/submit  { weekStart, submittedBy }
+staffRouter.post(
+  "/duty-planner/submit",
+  asyncHandler(async (req, res) => {
+    const weekStart =
+      typeof req.body?.weekStart === "string" ? req.body.weekStart : new Date().toISOString().slice(0, 10);
+    const submittedBy = typeof req.body?.submittedBy === "string" ? req.body.submittedBy : "user";
+    res.json(await dutyPlannerService.submitWeek(weekStart, submittedBy));
+  })
+);
+
+// GET /api/staff/attendance/summary?month=YYYY-MM
+staffRouter.get(
+  "/attendance/summary",
+  asyncHandler(async (req, res) => {
+    const month = typeof req.query.month === "string" ? req.query.month : new Date().toISOString().slice(0, 7);
+    res.json(await dutyPlannerService.getAttendanceSummary(month));
+  })
+);
+
+// GET /api/staff/employee/:id/history
+staffRouter.get(
+  "/employee/:id/history",
+  asyncHandler(async (req, res) => {
+    res.json(await dutyPlannerService.getEmployeeHistory(Number(req.params.id)));
   })
 );

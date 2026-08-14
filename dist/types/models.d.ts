@@ -272,7 +272,7 @@ export interface DutyAssignment {
     employeeName: string;
     department: string;
     role: string;
-    dutyType: "Driver" | "Delivery" | "Rest" | "Repair" | "Office" | "WeeklyOff";
+    dutyType: "Driver" | "Delivery" | "Rest" | "Repair" | "Office" | "OfficeDuty" | "Collection" | "WeeklyOff";
     date: string;
     vehicleId?: number | null;
     vehicleNo?: string | null;
