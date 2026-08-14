@@ -2,6 +2,8 @@ import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
 import multer from "multer";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
+import { analyticsService } from "../services/analyticsService.js";
+import { parseAnalyticsQuery } from "../validation/analytics.js";
 import { fleetMaintenanceService } from "../services/fleetMaintenanceService.js";
 import { vehiclePermitService } from "../services/vehiclePermitService.js";
 import { vehicleEmiService } from "../services/vehicleEmiService.js";
@@ -343,5 +345,16 @@ fleetRouter.post(
   "/emis/:id/pay",
   asyncHandler(async (req, res) => {
     res.json(await vehicleEmiService.pay(Number(req.params.id), req.body));
+  })
+);
+
+// ── Fleet → Vehicle Analytics ─────────────────────────────────────
+// Read-only aggregation over the authoritative Fleet sources
+// (trips / fuel_expenses / fleet_maintenance / vehicles). Accepts the same
+// fromDate / toDate / vehicleId filter the Analytics page sends.
+fleetRouter.get(
+  "/analytics",
+  asyncHandler(async (req, res) => {
+    res.json(await analyticsService.get(parseAnalyticsQuery(req.query as Record<string, unknown>)));
   })
 );

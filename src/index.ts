@@ -49,6 +49,9 @@ app.get("/", (_req, res) => {
         emiSchedule: "GET /api/fleet/emis/:id/schedule",
         emiPay: "POST /api/fleet/emis/:id/pay",
       },
+      accounts: {
+        payments: "GET|POST /api/accounts/payments  PUT|DELETE /api/accounts/payments/:id",
+      },
     },
   });
 });
