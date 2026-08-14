@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { asyncHandler } from "../middleware/errorHandler.js";
+import { mastersBulkService } from "../services/mastersBulkService.js";
 import { mastersService } from "../services/mastersService.js";
 
 export const mastersRouter = Router();
@@ -9,6 +10,13 @@ mastersRouter.get(
   asyncHandler(async (req, res) => {
     const department = typeof req.query.department === "string" ? req.query.department : undefined;
     res.json(await mastersService.listEmployees(department));
+  })
+);
+
+mastersRouter.post(
+  "/employees/bulk",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await mastersBulkService.importEmployees(req.body));
   })
 );
 
@@ -46,6 +54,13 @@ mastersRouter.get(
 );
 
 mastersRouter.post(
+  "/vehicles/bulk",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await mastersBulkService.importVehicles(req.body));
+  })
+);
+
+mastersRouter.post(
   "/vehicles",
   asyncHandler(async (req, res) => {
     res.status(201).json(await mastersService.upsertVehicle(req.body));
@@ -79,6 +94,13 @@ mastersRouter.get(
 );
 
 mastersRouter.post(
+  "/farms/bulk",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await mastersBulkService.importFarms(req.body));
+  })
+);
+
+mastersRouter.post(
   "/farms",
   asyncHandler(async (req, res) => {
     res.status(201).json(await mastersService.upsertFarm(req.body));
@@ -108,6 +130,13 @@ mastersRouter.get(
   "/shops",
   asyncHandler(async (_req, res) => {
     res.json(await mastersService.listShops());
+  })
+);
+
+mastersRouter.post(
+  "/shops/bulk",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await mastersBulkService.importShops(req.body));
   })
 );
 
@@ -174,6 +203,13 @@ mastersRouter.get(
   "/bird-types",
   asyncHandler(async (_req, res) => {
     res.json(await mastersService.listBirdTypes());
+  })
+);
+
+mastersRouter.post(
+  "/bird-types/bulk",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await mastersBulkService.importBirdTypes(req.body));
   })
 );
 

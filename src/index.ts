@@ -1,11 +1,12 @@
 import cors from "cors";
 import express from "express";
+import { pathToFileURL } from "node:url";
 import { env } from "./config/env.js";
 import { pool } from "./config/db.js";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
 
-const app = express();
+export const app = express();
 
 app.use(
   cors({
@@ -50,7 +51,15 @@ async function start() {
   });
 }
 
-start().catch((err) => {
-  console.error("Failed to start backend:", err);
-  process.exit(1);
-});
+// Auto-start only when this file is the process entry point (keeps the app
+// importable by tests without binding a port or touching the pool).
+const isEntryPoint =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntryPoint) {
+  start().catch((err) => {
+    console.error("Failed to start backend:", err);
+    process.exit(1);
+  });
+}

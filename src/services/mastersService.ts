@@ -10,7 +10,7 @@ import type {
 } from "../types/models.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
 
-function mapEmployee(row: Record<string, unknown>): Employee {
+export function mapEmployee(row: Record<string, unknown>): Employee {
   return {
     id: num(row.id),
     employeeNo: num(row.employee_no),
@@ -29,7 +29,7 @@ function mapEmployee(row: Record<string, unknown>): Employee {
   };
 }
 
-function mapVehicle(row: Record<string, unknown>): Vehicle {
+export function mapVehicle(row: Record<string, unknown>): Vehicle {
   return {
     id: num(row.id),
     vehicleNo: num(row.vehicle_no),
@@ -53,7 +53,7 @@ function mapVehicle(row: Record<string, unknown>): Vehicle {
   };
 }
 
-function mapFarm(row: Record<string, unknown>): Farm {
+export function mapFarm(row: Record<string, unknown>): Farm {
   return {
     id: num(row.id),
     farmNo: num(row.farm_no),
@@ -68,7 +68,7 @@ function mapFarm(row: Record<string, unknown>): Farm {
   };
 }
 
-function mapShop(row: Record<string, unknown>): Shop {
+export function mapShop(row: Record<string, unknown>): Shop {
   return {
     id: num(row.id),
     shopNo: num(row.shop_no),
@@ -94,7 +94,7 @@ function mapBank(row: Record<string, unknown>): Bank {
   };
 }
 
-function mapBirdType(row: Record<string, unknown>): BirdType {
+export function mapBirdType(row: Record<string, unknown>): BirdType {
   return {
     id: num(row.id),
     birdTypeNo: num(row.bird_type_no),
