@@ -3,6 +3,7 @@ import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { staffService } from "../services/staffService.js";
 import { dutyPlannerService } from "../services/dutyPlannerService.js";
 import { parseBody, salaryGenerateSchema, salaryListQuerySchema, salaryStatusPatchSchema, salarySubmitSchema, } from "../validation/salary.js";
+import { leaveCreateSchema, leaveListQuerySchema, leaveReportQuerySchema, leaveStatusSchema, } from "../validation/leave.js";
 export const staffRouter = Router();
 // Duty Planner
 staffRouter.get("/duties", asyncHandler(async (req, res) => {
@@ -18,17 +19,27 @@ staffRouter.delete("/duties/:id", asyncHandler(async (req, res) => {
     res.json(await staffService.deleteDuty(req.params.id));
 }));
 // Leave
+staffRouter.get("/leaves/report", asyncHandler(async (req, res) => {
+    const query = parseBody(leaveReportQuerySchema, req.query);
+    res.json(await staffService.getLeaveReport(query));
+}));
 staffRouter.get("/leaves", asyncHandler(async (req, res) => {
-    res.json(await staffService.listLeaves(typeof req.query.status === "string" ? req.query.status : undefined));
+    const query = parseBody(leaveListQuerySchema, req.query);
+    res.json(await staffService.listLeaves(query));
 }));
 staffRouter.post("/leaves", asyncHandler(async (req, res) => {
-    res.status(201).json(await staffService.createLeave(req.body));
+    const body = parseBody(leaveCreateSchema, req.body);
+    res.status(201).json(await staffService.createLeave(body));
 }));
 staffRouter.patch("/leaves/:id/status", asyncHandler(async (req, res) => {
-    res.json(await staffService.updateLeaveStatus(req.params.id, req.body.status, {
-        approvedBy: req.body.approvedBy,
-        rejectionReason: req.body.rejectionReason,
+    const body = parseBody(leaveStatusSchema, req.body);
+    res.json(await staffService.updateLeaveStatus(req.params.id, body.status, {
+        approvedBy: body.approvedBy,
+        rejectionReason: body.rejectionReason,
     }));
+}));
+staffRouter.delete("/leaves/:id", asyncHandler(async (req, res) => {
+    res.json(await staffService.deleteLeave(req.params.id));
 }));
 // Salary
 staffRouter.get("/salaries", asyncHandler(async (req, res) => {

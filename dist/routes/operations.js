@@ -64,20 +64,38 @@ operationsRouter.delete("/trips/:id", asyncHandler(async (req, res) => {
     res.json(await tripsService.softDelete(Number(req.params.id), typeof req.body?.reason === "string" ? req.body.reason : undefined));
 }));
 // ── Rate Entry ───────────────────────────────────────────────────
-// Finalized (status = Completed, not deleted) trips only, each with its
-// rate record if one has been entered.
+// Work queue for finalizing shop-wise rates on Completed trips.
+//
+//   GET    /rate-entry                 → eligible trips (Completed, not deleted, not locked)
+//   GET    /rate-entry/:tripId         → trip + shop-wise deliveries + market-rate reference
+//   PUT    /rate-entry/:tripId         → save (draft) rates; does not lock
+//   POST   /rate-entry/:tripId/lock    → save & lock — rates become immutable
+//
+// Eligibility is enforced server-side. Locked trips still appear in Trip List
+// (read-only historical view) and Shop Sales (which uses the finalized rates).
 operationsRouter.get("/rate-entry", asyncHandler(async (req, res) => {
+    const { params: pagination, enabled } = parsePagination(req.query);
     res.json(await rateEntryService.list({
-        search: typeof req.query.search === "string" ? req.query.search : undefined,
-        rateStatus: req.query.rateStatus === "Entered" || req.query.rateStatus === "Pending"
-            ? req.query.rateStatus
-            : undefined,
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
-        vehicleNo: typeof req.query.vehicleNo === "string" ? req.query.vehicleNo : undefined,
-        supervisorName: typeof req.query.supervisorName === "string" ? req.query.supervisorName : undefined,
-        pagination: opsListPagination(req),
+        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        supervisorId: req.query.supervisorId
+            ? Number(req.query.supervisorId)
+            : undefined,
+        driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
+        farmId: req.query.farmId ? Number(req.query.farmId) : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
+        pagination: enabled ? pagination : null,
     }));
+}));
+operationsRouter.get("/rate-entry/:tripId", asyncHandler(async (req, res) => {
+    res.json(await rateEntryService.getById(Number(req.params.tripId)));
+}));
+operationsRouter.put("/rate-entry/:tripId", asyncHandler(async (req, res) => {
+    res.json(await rateEntryService.save(Number(req.params.tripId), req.body));
+}));
+operationsRouter.post("/rate-entry/:tripId/lock", asyncHandler(async (req, res) => {
+    res.json(await rateEntryService.lock(Number(req.params.tripId), req.body));
 }));
 // ── Trip List (read-only, completed/approved-only historical view) ──
 // The eligibility rule (status='Completed' AND deleted=FALSE) is enforced in
@@ -100,28 +118,6 @@ operationsRouter.get("/trip-list", asyncHandler(async (req, res) => {
 }));
 operationsRouter.get("/trip-list/:id", asyncHandler(async (req, res) => {
     res.json(await tripsService.getCompletedById(Number(req.params.id)));
-}));
-operationsRouter.get("/rate-entry/trip/:tripId", asyncHandler(async (req, res) => {
-    const rate = await rateEntryService.getByTripId(Number(req.params.tripId));
-    if (!rate)
-        throw new AppError(404, "No rate entered for this trip yet");
-    res.json(rate);
-}));
-operationsRouter.get("/rate-entry/:id", asyncHandler(async (req, res) => {
-    res.json(await rateEntryService.getById(Number(req.params.id)));
-}));
-operationsRouter.post("/rate-entry", asyncHandler(async (req, res) => {
-    res.status(201).json(await rateEntryService.create(req.body));
-}));
-operationsRouter.put("/rate-entry/:id", asyncHandler(async (req, res) => {
-    res.json(await rateEntryService.update(Number(req.params.id), req.body));
-}));
-// Explicit lock — the only way a trip's rate becomes immutable and eligible
-// for Shop Sales. Separate from save/update so "rates saved" and "rates
-// locked" are distinguishable states, per the Rate Entry -> Shop Sales
-// business workflow.
-operationsRouter.post("/rate-entry/trip/:tripId/lock", asyncHandler(async (req, res) => {
-    res.json(await rateEntryService.lock(Number(req.params.tripId), req.body));
 }));
 // ── Shop Rates ───────────────────────────────────────────────────
 operationsRouter.get("/shop-rates", asyncHandler(async (req, res) => {

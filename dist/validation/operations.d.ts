@@ -1,6 +1,6 @@
 import { z } from "zod";
 export declare const OPS_STATUSES: readonly ["Draft", "Pending Approval", "Approved", "Rejected", "Deleted"];
-/** PostgreSQL trip_status enum — source of truth */
+/** PostgreSQL trip_status enum â€” source of truth */
 export declare const TRIP_STATUSES: readonly ["Draft", "Pending", "Completed", "Deleted"];
 export declare const opsStatusSchema: z.ZodEnum<["Draft", "Pending Approval", "Approved", "Rejected", "Deleted"]>;
 export declare const tripStatusSchema: z.ZodEnum<["Draft", "Pending", "Completed", "Deleted"]>;
@@ -59,10 +59,10 @@ export declare const shopRateBodySchema: z.ZodObject<{
 }>;
 /**
  * Shop Sales rate-edit range. Rate Entry's own "Save & Lock" flow gets a
- * trip into Shop Sales, but locking is NOT rate immutability — within the
+ * trip into Shop Sales, but locking is NOT rate immutability â€” within the
  * 10-day Shop Sales edit window (tripDeliverySync.ts assertTripEditable),
  * the shop-wise rate may still be corrected, subject to this same
- * ₹50–₹300 range the Rate Entry UI has always used. After the window
+ * â‚¹50â€“â‚¹300 range the Rate Entry UI has always used. After the window
  * closes, assertTripEditable already rejects every field, rate included.
  */
 export declare const MIN_SHOP_SALE_RATE = 50;
@@ -220,6 +220,45 @@ export declare const rateEntryLockSchema: z.ZodObject<{
     lockedBy?: string | undefined;
 }, {
     lockedBy?: string | undefined;
+}>;
+/**
+ * Rate Entry payload.
+ *
+ * Each row targets an existing `trip_deliveries.id`. Only `rate` is accepted —
+ * amount is ALWAYS derived server-side as ROUND(weight * rate, 2).
+ */
+export declare const rateEntryItemSchema: z.ZodObject<{
+    deliveryId: z.ZodNumber;
+    rate: z.ZodNumber;
+}, "strip", z.ZodTypeAny, {
+    rate: number;
+    deliveryId: number;
+}, {
+    rate: number;
+    deliveryId: number;
+}>;
+export declare const rateEntrySaveSchema: z.ZodObject<{
+    /** Partial list — only deliveries included are updated. */
+    rates: z.ZodArray<z.ZodObject<{
+        deliveryId: z.ZodNumber;
+        rate: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        rate: number;
+        deliveryId: number;
+    }, {
+        rate: number;
+        deliveryId: number;
+    }>, "many">;
+}, "strip", z.ZodTypeAny, {
+    rates: {
+        rate: number;
+        deliveryId: number;
+    }[];
+}, {
+    rates: {
+        rate: number;
+        deliveryId: number;
+    }[];
 }>;
 export declare const collectionBodySchema: z.ZodObject<{
     collectionNo: z.ZodOptional<z.ZodString>;

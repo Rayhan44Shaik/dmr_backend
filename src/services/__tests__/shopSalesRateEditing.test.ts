@@ -69,7 +69,7 @@ async function makeRateEditableTrip(
   );
   const deliveryId = d.rows[0].id;
   const rate = opts.initialRate ?? 90;
-  await rateEntryService.create({ tripId, rate, deliveries: [{ id: deliveryId, rate }] });
+  await rateEntryService.save(tripId, { rates: [{ deliveryId, rate }] });
   await rateEntryService.lock(tripId, { lockedBy: "rate-edit-tester" });
   return { tripId, shopId, deliveryId };
 }

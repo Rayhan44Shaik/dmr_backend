@@ -1,4 +1,4 @@
-import { after, describe, test } from "node:test";
+﻿import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { pool } from "../../config/db.js";
 import { rateEntryService } from "../rateEntryService.js";
@@ -6,11 +6,11 @@ import { collectionsService } from "../collectionsService.js";
 import { dashboardService } from "../dashboardService.js";
 
 /**
- * Phase B — cross-module consistency: rate_entry.locked is now the single
+ * Phase B â€” cross-module consistency: rate_entry.locked is now the single
  * authoritative "is this trip's rate finished" signal. This file verifies
  * Collections and the Dashboard both agree with Rate Entry/Shop Sales about
  * that state, at every point along Trip -> Rate Entry Save -> Rate Entry
- * Lock -> Shop Sales -> Dashboard/Collections. No mocking — real Postgres,
+ * Lock -> Shop Sales -> Dashboard/Collections. No mocking â€” real Postgres,
  * same integration-test pattern as the other __tests__ files.
  */
 
@@ -69,7 +69,7 @@ async function makeCompletedTripWithDelivery(
 }
 
 describe("Collections/Dashboard consistency with rate_entry.locked", () => {
-  test("Collection for a trip is 'Pending Approval' before lock, 'Approved' after lock — matches Rate Entry exactly", async (t) => {
+  test("Collection for a trip is 'Pending Approval' before lock, 'Approved' after lock â€” matches Rate Entry exactly", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
 
@@ -87,7 +87,7 @@ describe("Collections/Dashboard consistency with rate_entry.locked", () => {
     assert.equal(collection.status, "Pending Approval");
     assert.equal(collection.amountCollected, 0);
 
-    await rateEntryService.create({ tripId, rate: 60, deliveries: [{ id: deliveryId, rate: 60 }] });
+    await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 60 }] });
 
     // Saved but not yet locked: still pending, still not collected.
     collection = await collectionsService.getById(deliveryId);
@@ -96,7 +96,7 @@ describe("Collections/Dashboard consistency with rate_entry.locked", () => {
 
     await rateEntryService.lock(tripId, { lockedBy: "tester" });
 
-    // Locked: Collections must now agree it's Approved/collected — no lag,
+    // Locked: Collections must now agree it's Approved/collected â€” no lag,
     // no separate flag to flip, same transaction's rate_entry.locked drives it.
     collection = await collectionsService.getById(deliveryId);
     assert.equal(collection.status, "Approved");
@@ -124,21 +124,13 @@ describe("Collections/Dashboard consistency with rate_entry.locked", () => {
       birds: 50,
       weight: 100,
     });
-    // pending() requires a real amount due (COALESCE(d.amount,0) > 0) — a
+    // pending() requires a real amount due (COALESCE(d.amount,0) > 0) â€” a
     // delivery that never received a rate has nothing due yet, so it
     // legitimately saves a rate here too (without locking) to model
     // "priced but not yet finalized", the actual state pending() is meant
     // to surface.
-    await rateEntryService.create({
-      tripId: unlockedTrip.tripId,
-      rate: 35,
-      deliveries: [{ id: unlockedTrip.deliveryId, rate: 35 }],
-    });
-    await rateEntryService.create({
-      tripId: lockedTrip.tripId,
-      rate: 40,
-      deliveries: [{ id: lockedTrip.deliveryId, rate: 40 }],
-    });
+    await rateEntryService.save(unlockedTrip.tripId, { rates: [{ deliveryId: unlockedTrip.deliveryId, rate: 35 }] });
+    await rateEntryService.save(lockedTrip.tripId, { rates: [{ deliveryId: lockedTrip.deliveryId, rate: 40 }] });
     await rateEntryService.lock(lockedTrip.tripId, { lockedBy: "tester" });
 
     const pending = await collectionsService.pending(shop.id);
@@ -175,11 +167,7 @@ describe("Collections/Dashboard consistency with rate_entry.locked", () => {
       birds: 10,
       weight: 30,
     });
-    await rateEntryService.create({
-      tripId: lockedTrip.tripId,
-      rate: 25,
-      deliveries: [{ id: lockedTrip.deliveryId, rate: 25 }],
-    });
+    await rateEntryService.save(lockedTrip.tripId, { rates: [{ deliveryId: lockedTrip.deliveryId, rate: 25 }] });
     await rateEntryService.lock(lockedTrip.tripId, { lockedBy: "tester" });
 
     const balances = await collectionsService.runningBalance(shop.id);
@@ -208,7 +196,7 @@ describe("Collections/Dashboard consistency with rate_entry.locked", () => {
 
     const before = await dashboardService.getSummary();
 
-    await rateEntryService.create({ tripId, rate: 33, deliveries: [{ id: deliveryId, rate: 33 }] });
+    await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 33 }] });
     const midway = await dashboardService.getSummary();
     // Saved-but-unlocked must not move the Dashboard's collected figure at all.
     assert.equal(midway.totalCollections, before.totalCollections);
@@ -223,7 +211,7 @@ describe("Collections/Dashboard consistency with rate_entry.locked", () => {
       "Dashboard total_collections must increase by exactly the newly-locked amount"
     );
     // The amount only starts counting as "pending" once it's priced (at
-    // save time, midway) — it wasn't pending before that (amount was 0).
+    // save time, midway) â€” it wasn't pending before that (amount was 0).
     // Locking then moves that same amount from pending to collected, so
     // pending should be right back where it started relative to `before`.
     assert.equal(
@@ -259,7 +247,7 @@ describe("Collections/Dashboard consistency with rate_entry.locked", () => {
     let row = await pool.query<{ rate_completed: boolean }>(`SELECT rate_completed FROM trips WHERE id = $1`, [tripId]);
     assert.equal(row.rows[0].rate_completed, false);
 
-    await rateEntryService.create({ tripId, rate: 20, deliveries: [{ id: deliveryId, rate: 20 }] });
+    await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 20 }] });
     row = await pool.query<{ rate_completed: boolean }>(`SELECT rate_completed FROM trips WHERE id = $1`, [tripId]);
     assert.equal(row.rows[0].rate_completed, false, "saving alone must not flip the cache");
 
@@ -282,15 +270,15 @@ describe("Collections/Dashboard consistency with rate_entry.locked", () => {
     });
 
     // Simulate the old bypass directly against the same UPDATE tripsService.save()
-    // used to run with an attacker-supplied rateCompleted value — the fix
+    // used to run with an attacker-supplied rateCompleted value â€” the fix
     // means the application code path (tripsService.save) never forwards
     // this field to SQL at all (see tripsService.ts). This test documents
     // the guarantee at the data level: no rate_entry row exists, so nothing
     // in the real workflow could have legitimately set it true.
     const row = await pool.query<{ rate_completed: boolean }>(`SELECT rate_completed FROM trips WHERE id = $1`, [tripId]);
     assert.equal(row.rows[0].rate_completed, false);
-    const re = await rateEntryService.getByTripId(tripId);
-    assert.equal(re, null, "no Rate Entry exists — rate_completed must not be true for this trip");
+    const re = await pool.query<{ rate_completed: boolean }>(`SELECT COALESCE(rate_completed, FALSE) AS rate_completed FROM trips WHERE id = $1`, [tripId]);
+    assert.equal(re, null, "no Rate Entry exists â€” rate_completed must not be true for this trip");
   });
 });
 

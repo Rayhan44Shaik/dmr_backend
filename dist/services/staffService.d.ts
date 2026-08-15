@@ -8,14 +8,69 @@ export declare const staffService: {
         id: string;
         deleted: boolean;
     }>;
-    listLeaves(status?: string): Promise<LeaveRequest[]>;
-    createLeave(body: Omit<LeaveRequest, "id" | "createdAt" | "status"> & {
-        status?: LeaveRequest["status"];
+    /** Inclusive calendar-day count for a [from, to] date range (from <= to). */
+    inclusiveDays(from: string, to: string): number;
+    /** Last day of a YYYY-MM month as a YYYY-MM-DD string. */
+    lastDayOfMonth(month: string): string;
+    listLeaves(filters?: {
+        status?: string;
+        month?: string;
+        employeeId?: number;
+        department?: string;
+        leaveType?: string;
+        fromDate?: string;
+        toDate?: string;
+        search?: string;
+        page?: number;
+        limit?: number;
+    }): Promise<{
+        items: LeaveRequest[];
+        total: number;
+        page: number;
+        limit: number;
+        totalPages: number;
+    }>;
+    createLeave(body: {
+        employeeId: number;
+        employeeName?: string;
+        type: LeaveRequest["type"];
+        fromDate: string;
+        toDate: string;
+        days?: number;
+        reason?: string | null;
     }): Promise<LeaveRequest>;
+    getLeaveById(id: string): Promise<LeaveRequest>;
     updateLeaveStatus(id: string, status: LeaveRequest["status"], opts?: {
         approvedBy?: string;
         rejectionReason?: string;
     }): Promise<LeaveRequest>;
+    deleteLeave(id: string): Promise<{
+        id: string;
+        deleted: boolean;
+    }>;
+    /** Authoritative employee-level leave report for a month.
+     *  approvedLeaveDays counts DISTINCT approved calendar dates within the month
+     *  (inclusive from_date..to_date), cross-month leave split per month — exactly
+     *  the same calendar-day rule getAttendanceSummary uses, so the Leave Report
+     *  can never disagree with Salary leaveDays. */
+    getLeaveReport(filters: {
+        month: string;
+        department?: string;
+        employeeId?: number;
+    }): Promise<{
+        month: string;
+        items: {
+            employeeId: number;
+            employeeNo: number;
+            employeeName: string;
+            department: string;
+            approvedLeaveDays: number;
+            pendingLeaveDays: number;
+            rejectedLeaveDays: number;
+            leaveDates: string[];
+            leaveTypes: string[];
+        }[];
+    }>;
     /** Enrich salary rows with attendance figures derived from the authoritative
      *  Duty Planner data (duty_assignments + approved leave) at read time. These
      *  figures are never stored on the salary row — no duty data is duplicated. */

@@ -1,279 +1,282 @@
-import type pg from "pg";
+﻿import type pg from "pg";
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
-import type { RateEntry, RateEntryTrip } from "../types/operations.js";
-import { dateOnly, num, str } from "../utils/coerce.js";
-import { assertBirdTypeExists, assertTripExists } from "../utils/fkValidation.js";
+import type {
+  RateEntryDelivery,
+  RateEntryMarketRate,
+  RateEntryTrip,
+} from "../types/operations.js";
+import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
 import {
   paginatedResult,
   type PaginatedResult,
   type PaginationParams,
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
-import { RATE_ENTRY_ELIGIBLE_STATUSES } from "../utils/tripDeliverySync.js";
 import {
-  assertShopSaleRateInRange,
   parseBody,
-  rateEntryBodySchema,
   rateEntryLockSchema,
-  rateEntryUpdateSchema,
+  rateEntrySaveSchema,
 } from "../validation/operations.js";
 
 type Client = pg.PoolClient;
 
-interface TripLockRow {
+const ELIGIBLE_WHERE = `
+  WHERE t.status = 'Completed'
+    AND COALESCE(t.deleted, FALSE) = FALSE
+    AND COALESCE(t.rate_completed, FALSE) = FALSE
+`;
+
+const ELIGIBLE_BY_ID = `
+  SELECT t.*
+  FROM trips t
+  WHERE t.id = $1
+    AND t.status = 'Completed'
+    AND COALESCE(t.deleted, FALSE) = FALSE
+    AND COALESCE(t.rate_completed, FALSE) = FALSE
+`;
+
+interface DeliveryRow extends Record<string, unknown> {
   id: number;
-  tripNo: string;
-  status: string;
-  deleted: boolean;
+  serial_no: number | null;
+  box_no: number | null;
+  shop_id: number | null;
+  shop_name: string;
+  bird_type_id: number | null;
+  bird_type: string;
+  birds: number;
+  weight: number;
+  mortality: number;
+  mort_kg: number | null;
+  rate: number | null;
+  amount: number;
+  remarks: string;
+  delivery_mode: "box" | "weight";
 }
 
-/**
- * Rejects trips that cannot receive a rate: unknown/deleted trips (via
- * assertTripExists, which already excludes deleted rows) and any trip that
- * hasn't reached a finalized status yet ('Approved' or 'Completed'). Step 5
- * submission only moves a trip to Pending — Pending is not yet finalized,
- * so it is not eligible until the trip is separately approved/completed
- * through the existing status-transition API.
- */
-async function assertTripEligibleForRate(tripId: number, client: Client | null = null) {
-  await assertTripExists(tripId, client);
-  const sql = `SELECT status FROM trips WHERE id = $1`;
-  const result = client ? await client.query(sql, [tripId]) : await query(sql, [tripId]);
-  const status = str(result.rows[0]?.status);
-  if (!RATE_ENTRY_ELIGIBLE_STATUSES.includes(status as (typeof RATE_ENTRY_ELIGIBLE_STATUSES)[number])) {
-    throw new AppError(
-      409,
-      `Trip ${tripId} is not eligible for Rate Entry yet (status: ${status}). ` +
-        `Rate can only be entered once the trip is approved/completed.`
-    );
-  }
+interface MarketRateRow {
+  shop_id: number | null;
+  bird_type_id: number | null;
+  master_rate: number | null;
+  last_trip_rate: number | null;
+  last_trip_date: string | null;
+  last_trip_no: string | null;
+  avg_trip_rate: number | null;
+  samples: number;
 }
 
-/** Loads + row-locks the trip for the duration of the transaction, so two
- * concurrent Save/Lock requests for the same trip serialize instead of
- * racing. */
-async function lockTripRow(client: Client, tripId: number): Promise<TripLockRow> {
-  const result = await client.query(
-    `SELECT id, trip_no, status, deleted FROM trips WHERE id = $1 FOR UPDATE`,
-    [tripId]
+function marketKey(shopId: number | null, birdTypeId: number | null) {
+  return `${shopId ?? "null"}::${birdTypeId ?? "null"}`;
+}
+
+async function loadMarketRates(
+  client: Client,
+  pairs: Array<{ shopId: number | null; birdTypeId: number | null }>
+): Promise<Map<string, RateEntryMarketRate>> {
+  const out = new Map<string, RateEntryMarketRate>();
+  if (!pairs.length) return out;
+
+  const pairSet = new Map<string, { shopId: number | null; birdTypeId: number | null }>();
+  for (const p of pairs) pairSet.set(marketKey(p.shopId, p.birdTypeId), p);
+
+  const masterResult = await client.query<{
+    shop_id: number | null;
+    bird_type_id: number | null;
+    shop_name: string;
+    bird_type: string;
+    rate: number;
+  }>(
+    `SELECT DISTINCT ON (r.shop_id, r.bird_type_id)
+       r.shop_id, r.bird_type_id, r.shop_name, r.bird_type, r.rate
+     FROM shop_rates r
+     INNER JOIN UNNEST($1::int[], $2::int[])
+       AS pair(shop_id, bird_type_id)
+       ON pair.shop_id IS NOT DISTINCT FROM r.shop_id
+      AND pair.bird_type_id IS NOT DISTINCT FROM r.bird_type_id
+     WHERE COALESCE(r.deleted, FALSE) = FALSE
+     ORDER BY r.shop_id, r.bird_type_id, r.effective_from DESC, r.id DESC`,
+    [
+      pairs.map((p) => p.shopId),
+      pairs.map((p) => p.birdTypeId),
+    ]
   );
-  if (!result.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
-  const row = result.rows[0];
-  return {
-    id: num(row.id),
-    tripNo: str(row.trip_no),
-    status: str(row.status),
-    deleted: Boolean(row.deleted),
-  };
-}
 
-function assertTripUsableForRate(trip: TripLockRow) {
-  if (trip.deleted) throw new AppError(409, `Trip ${trip.tripNo} has been deleted`);
-  if (!RATE_ENTRY_ELIGIBLE_STATUSES.includes(trip.status as (typeof RATE_ENTRY_ELIGIBLE_STATUSES)[number])) {
-    throw new AppError(
-      409,
-      `Trip ${trip.tripNo} is not eligible for Rate Entry yet (status: ${trip.status}). ` +
-        `Rate can only be entered once the trip is approved/completed.`
-    );
+  for (const row of masterResult.rows) {
+    const key = marketKey(row.shop_id, row.bird_type_id);
+    out.set(key, {
+      shopId: numOrNull(row.shop_id),
+      shopName: str(row.shop_name),
+      birdTypeId: numOrNull(row.bird_type_id),
+      birdType: str(row.bird_type),
+      masterRate: numOrNull(row.rate),
+      lastTripRate: null,
+      lastTripDate: null,
+      lastTripNo: null,
+      avgTripRate: null,
+      tripRateSamples: 0,
+    });
   }
+
+  const lastResult = await client.query<MarketRateRow>(
+    `
+    WITH target AS (
+      SELECT shop_id, bird_type_id
+      FROM UNNEST($1::int[], $2::int[]) AS pair(shop_id, bird_type_id)
+    ),
+    matched AS (
+      SELECT d.shop_id, d.bird_type_id, d.rate, t.trip_date, t.trip_no, d.id AS delivery_id
+      FROM trip_deliveries d
+      INNER JOIN trips t ON t.id = d.trip_id
+      INNER JOIN target p
+        ON p.shop_id IS NOT DISTINCT FROM d.shop_id
+       AND p.bird_type_id IS NOT DISTINCT FROM d.bird_type_id
+      WHERE t.status = 'Completed'
+        AND COALESCE(t.deleted, FALSE) = FALSE
+        AND t.rate_completed = TRUE
+        AND d.rate IS NOT NULL
+    ),
+    latest AS (
+      SELECT DISTINCT ON (shop_id, bird_type_id)
+             shop_id, bird_type_id, rate, trip_date, trip_no
+      FROM matched
+      ORDER BY shop_id, bird_type_id, trip_date DESC, delivery_id DESC
+    ),
+    avg AS (
+      SELECT shop_id, bird_type_id,
+             AVG(rate)::numeric(12,2) AS avg_rate,
+             COUNT(*)::int AS samples
+      FROM matched
+      GROUP BY shop_id, bird_type_id
+    )
+    SELECT l.shop_id, l.bird_type_id,
+           l.rate AS last_trip_rate, l.trip_date AS last_trip_date,
+           l.trip_no AS last_trip_no,
+           a.avg_rate AS avg_trip_rate, a.samples
+    FROM latest l
+    LEFT JOIN avg a
+      ON a.shop_id IS NOT DISTINCT FROM l.shop_id
+     AND a.bird_type_id IS NOT DISTINCT FROM l.bird_type_id
+    `,
+    [
+      pairs.map((p) => p.shopId),
+      pairs.map((p) => p.birdTypeId),
+    ]
+  );
+
+  for (const row of lastResult.rows) {
+    const key = marketKey(row.shop_id, row.bird_type_id);
+    const existing = out.get(key) ?? {
+      shopId: numOrNull(row.shop_id),
+      shopName: "",
+      birdTypeId: numOrNull(row.bird_type_id),
+      birdType: "",
+      masterRate: null,
+      lastTripRate: null,
+      lastTripDate: null,
+      lastTripNo: null,
+      avgTripRate: null,
+      tripRateSamples: 0,
+    };
+    existing.lastTripRate = numOrNull(row.last_trip_rate);
+    existing.lastTripDate = dateOnly(row.last_trip_date);
+    existing.lastTripNo = row.last_trip_no == null ? null : str(row.last_trip_no);
+    existing.avgTripRate = numOrNull(row.avg_trip_rate);
+    existing.tripRateSamples = Number(row.samples ?? 0);
+    out.set(key, existing);
+  }
+
+  return out;
 }
 
-/** Locks/reads the existing rate_entry row for a trip within the current
- * transaction (FOR UPDATE), so concurrent Save/Lock calls serialize on it. */
-async function lockRateEntryRow(
+async function loadDeliveries(
   client: Client,
   tripId: number
-): Promise<{ id: number; locked: boolean } | null> {
-  const result = await client.query(
-    `SELECT id, locked FROM rate_entry WHERE trip_id = $1 FOR UPDATE`,
+): Promise<RateEntryDelivery[]> {
+  const result = await client.query<DeliveryRow>(
+    `SELECT id, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
+            birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode
+     FROM trip_deliveries
+     WHERE trip_id = $1
+     ORDER BY serial_no NULLS LAST, id`,
     [tripId]
   );
-  if (!result.rowCount) return null;
-  return { id: num(result.rows[0].id), locked: Boolean(result.rows[0].locked) };
+
+  const pairs = result.rows.map((r) => ({
+    shopId: numOrNull(r.shop_id),
+    birdTypeId: numOrNull(r.bird_type_id),
+  }));
+  const market = await loadMarketRates(client, pairs);
+
+  return result.rows.map((r) => {
+    const key = marketKey(numOrNull(r.shop_id), numOrNull(r.bird_type_id));
+    const rate = numOrNull(r.rate);
+    return {
+      id: num(r.id),
+      serialNo: numOrNull(r.serial_no),
+      boxNo: numOrNull(r.box_no),
+      shopId: numOrNull(r.shop_id),
+      shopName: str(r.shop_name),
+      birdTypeId: numOrNull(r.bird_type_id),
+      birdType: str(r.bird_type),
+      birds: num(r.birds),
+      weight: num(r.weight),
+      mortality: num(r.mortality),
+      mortKg: numOrNull(r.mort_kg),
+      rate,
+      amount: num(r.amount),
+      remarks: str(r.remarks),
+      deliveryMode: (str(r.delivery_mode) as "box" | "weight") || "box",
+      marketRate: market.get(key) ?? null,
+    };
+  });
 }
 
-function assertNotLocked(existing: { locked: boolean } | null, tripNo: string) {
-  if (existing?.locked) {
-    throw new AppError(
-      409,
-      `Trip ${tripNo}'s rates are locked and cannot be modified. ` +
-        `Locked rates are immutable — use a controlled unlock/reopen workflow if a correction is required.`
-    );
-  }
-}
+function mapTrip(
+  row: Record<string, unknown>,
+  deliveries: RateEntryDelivery[]
+): RateEntryTrip {
+  const totalAmount = deliveries
+    .filter((d) => d.rate != null)
+    .reduce((sum, d) => sum + d.amount, 0);
 
-interface DeliveryRateLine {
-  id: number;
-  rate: number;
-}
-
-/** Validates every delivery line belongs to this trip and is active, then
- * writes its rate (and server-computed amount) to trip_deliveries. */
-async function applyDeliveryRates(
-  client: Client,
-  tripId: number,
-  lines: DeliveryRateLine[] | undefined
-): Promise<void> {
-  if (!lines || !lines.length) return;
-
-  const ids = lines.map((l) => l.id);
-  const existing = await client.query<{ id: number; weight: string; deleted: boolean }>(
-    `SELECT id, weight, deleted FROM trip_deliveries WHERE id = ANY($1::int[]) AND trip_id = $2`,
-    [ids, tripId]
-  );
-  const byId = new Map(existing.rows.map((r) => [num(r.id), r]));
-
-  for (const line of lines) {
-    const row = byId.get(line.id);
-    if (!row) {
-      throw new AppError(422, `Delivery ${line.id} does not belong to trip ${tripId}`, {
-        deliveryId: line.id,
-      });
-    }
-    if (row.deleted) {
-      throw new AppError(409, `Delivery ${line.id} has been deleted and cannot receive a rate`, {
-        deliveryId: line.id,
-      });
-    }
-    if (!(line.rate > 0)) {
-      throw new AppError(400, `Rate for delivery ${line.id} must be greater than 0`, {
-        deliveryId: line.id,
-      });
-    }
-    assertShopSaleRateInRange(line.rate);
-    const weight = num(row.weight);
-    const amount = Number((weight * line.rate).toFixed(2));
-    await client.query(
-      `UPDATE trip_deliveries SET rate = $2, amount = $3 WHERE id = $1`,
-      [line.id, line.rate, amount]
-    );
-  }
-}
-
-/** Every active (non-deleted) delivery on the trip must carry a positive
- * rate before the trip's rates can be locked. */
-async function assertRatesComplete(client: Client, tripId: number, tripNo: string): Promise<void> {
-  const result = await client.query<{ total: string; missing: string }>(
-    `SELECT COUNT(*)::text AS total,
-            COUNT(*) FILTER (WHERE rate IS NULL OR rate <= 0)::text AS missing
-       FROM trip_deliveries
-      WHERE trip_id = $1 AND deleted = FALSE`,
-    [tripId]
-  );
-  const total = Number(result.rows[0]?.total ?? 0);
-  const missing = Number(result.rows[0]?.missing ?? 0);
-  if (total === 0) {
-    throw new AppError(409, `Trip ${tripNo} has no shop deliveries to rate`);
-  }
-  if (missing > 0) {
-    throw new AppError(
-      409,
-      `Trip ${tripNo} has ${missing} of ${total} shop${total === 1 ? "" : "s"} still missing a rate. ` +
-        `All shops must have a rate before locking.`
-    );
-  }
-}
-
-function mapRateEntry(row: Record<string, unknown>): RateEntry {
   return {
     id: num(row.id),
-    tripId: num(row.trip_id),
-    tripNo: row.trip_no == null ? undefined : str(row.trip_no),
-    birdTypeId: row.bird_type_id == null ? null : num(row.bird_type_id),
-    birdType: str(row.bird_type),
-    rate: num(row.rate),
-    remarks: str(row.remarks),
-    locked: Boolean(row.locked),
-    lockedBy: row.locked_by == null ? null : str(row.locked_by),
-    lockedAt: row.locked_at == null ? null : str(row.locked_at),
-    createdBy: row.created_by == null ? undefined : str(row.created_by),
-    updatedBy: row.updated_by == null ? null : str(row.updated_by),
-    createdAt: row.created_at == null ? null : str(row.created_at),
-    updatedAt: row.updated_at == null ? null : str(row.updated_at),
-  };
-}
-
-function mapRateEntryTrip(row: Record<string, unknown>): RateEntryTrip {
-  const hasRate = row.rate_entry_id != null;
-  return {
-    tripId: num(row.id),
     tripNo: str(row.trip_no),
     tripDate: dateOnly(row.trip_date) ?? "",
-    tripStatus: str(row.status),
-    vehicleId: row.vehicle_id == null ? null : num(row.vehicle_id),
+    status: str(row.status) as RateEntryTrip["status"],
     vehicleNo: row.vehicle_no == null ? null : str(row.vehicle_no),
-    driverId: row.driver_id == null ? null : num(row.driver_id),
     driverName: row.driver_name == null ? null : str(row.driver_name),
-    supervisorId: row.supervisor_id == null ? null : num(row.supervisor_id),
     supervisorName: row.supervisor_name == null ? null : str(row.supervisor_name),
-    sourceFarmId: row.source_farm_id == null ? null : num(row.source_farm_id),
     sourceFarm: row.source_farm == null ? null : str(row.source_farm),
     totalBirds: num(row.total_birds),
     totalWeight: num(row.total_weight),
     totalShops: num(row.total_shops),
-    birdTypeId: hasRate
-      ? row.re_bird_type_id == null ? null : num(row.re_bird_type_id)
-      : row.farm_bird_type_id == null ? null : num(row.farm_bird_type_id),
-    birdType: hasRate ? str(row.re_bird_type) : row.farm_bird_type == null ? null : str(row.farm_bird_type),
-    rateStatus: hasRate ? "Entered" : "Pending",
-    rateEntryId: hasRate ? num(row.rate_entry_id) : null,
-    rate: hasRate ? num(row.rate) : null,
-    remarks: hasRate ? str(row.re_remarks) : null,
-    // A locked trip never reaches this row (excluded by the list query) —
-    // false here reflects that invariant rather than re-deriving it.
-    locked: false,
-    createdBy: hasRate ? (row.re_created_by == null ? null : str(row.re_created_by)) : null,
-    createdAt: hasRate ? (row.re_created_at == null ? null : str(row.re_created_at)) : null,
-    updatedAt: hasRate ? (row.re_updated_at == null ? null : str(row.re_updated_at)) : null,
+    rateLocked: Boolean(row.rate_completed),
+    rateLockedAt: row.rate_locked_at == null ? null : new Date(str(row.rate_locked_at)).toISOString(),
+    rateLockedBy: row.rate_locked_by == null ? null : str(row.rate_locked_by),
+    ratesEntered: deliveries.filter((d) => d.rate != null).length,
+    deliveriesCount: deliveries.length,
+    totalAmount: Number(totalAmount.toFixed(2)),
+    deliveries,
   };
 }
 
-const ELIGIBLE_TRIPS_SELECT = `
-  SELECT
-    t.id, t.trip_no, t.trip_date, t.status,
-    t.vehicle_id, t.vehicle_no, t.driver_id, t.driver_name,
-    t.supervisor_id, t.supervisor_name,
-    t.source_farm_id, t.source_farm,
-    t.total_birds, t.total_weight, t.total_shops,
-    t.farm_bird_type_id, t.farm_bird_type,
-    r.id AS rate_entry_id, r.bird_type_id AS re_bird_type_id, r.bird_type AS re_bird_type,
-    r.rate, r.remarks AS re_remarks,
-    r.created_by AS re_created_by, r.created_at AS re_created_at, r.updated_at AS re_updated_at
-  FROM trips t
-  LEFT JOIN rate_entry r ON r.trip_id = t.id
-  WHERE t.deleted = FALSE
-    AND t.status IN ('Approved', 'Completed')
-    AND (r.id IS NULL OR r.locked = FALSE)
-`;
-
 export const rateEntryService = {
-  /** Trips eligible for Rate Entry: finalized (Approved/Completed), not
-   * deleted, and not yet rate-locked. A trip with a saved-but-unlocked rate
-   * still appears here (rateStatus = "Entered") — Rate Entry is only ever
-   * permanently excluded once its rate is explicitly LOCKED via lock(). */
   async list(
     filters: {
-      search?: string;
-      rateStatus?: "Pending" | "Entered";
       fromDate?: string;
       toDate?: string;
-      vehicleNo?: string;
-      supervisorName?: string;
+      vehicleId?: number;
+      supervisorId?: number;
+      driverId?: number;
+      farmId?: number;
+      search?: string;
       pagination?: PaginationParams | null;
     } = {}
   ): Promise<RateEntryTrip[] | PaginatedResult<RateEntryTrip>> {
     const clauses: string[] = [];
     const params: unknown[] = [];
 
-    if (filters.search) {
-      params.push(`%${filters.search}%`);
-      const p = params.length;
-      clauses.push(
-        `(t.trip_no ILIKE $${p} OR t.vehicle_no ILIKE $${p} OR t.driver_name ILIKE $${p} OR t.supervisor_name ILIKE $${p} OR t.source_farm ILIKE $${p})`
-      );
-    }
-    // Business date filter — trip_date, not any created_at/rate_entry timestamp.
     if (filters.fromDate) {
       params.push(filters.fromDate);
       clauses.push(`t.trip_date >= $${params.length}`);
@@ -282,191 +285,161 @@ export const rateEntryService = {
       params.push(filters.toDate);
       clauses.push(`t.trip_date <= $${params.length}`);
     }
-    if (filters.vehicleNo) {
-      params.push(filters.vehicleNo);
-      clauses.push(`t.vehicle_no = $${params.length}`);
+    if (filters.vehicleId) {
+      params.push(filters.vehicleId);
+      clauses.push(`t.vehicle_id = $${params.length}`);
     }
-    if (filters.supervisorName) {
-      params.push(filters.supervisorName);
-      clauses.push(`t.supervisor_name = $${params.length}`);
+    if (filters.supervisorId) {
+      params.push(filters.supervisorId);
+      clauses.push(`t.supervisor_id = $${params.length}`);
     }
-    if (filters.rateStatus === "Entered") {
-      clauses.push(`r.id IS NOT NULL`);
-    } else if (filters.rateStatus === "Pending") {
-      clauses.push(`r.id IS NULL`);
+    if (filters.driverId) {
+      params.push(filters.driverId);
+      clauses.push(`t.driver_id = $${params.length}`);
+    }
+    if (filters.farmId) {
+      params.push(filters.farmId);
+      clauses.push(`t.source_farm_id = $${params.length}`);
+    }
+    if (filters.search) {
+      params.push(`%${filters.search}%`);
+      clauses.push(
+        `(t.trip_no ILIKE $${params.length}
+          OR t.vehicle_no ILIKE $${params.length}
+          OR t.driver_name ILIKE $${params.length}
+          OR t.supervisor_name ILIKE $${params.length}
+          OR t.source_farm ILIKE $${params.length})`
+      );
     }
 
     const extraWhere = clauses.length ? `AND ${clauses.join(" AND ")}` : "";
+    const baseWhere = ELIGIBLE_WHERE.trimEnd() + "\n  " + extraWhere;
 
-    if (filters.pagination) {
-      const countResult = await query<{ c: string }>(
-        `SELECT COUNT(*)::text AS c
-         FROM trips t LEFT JOIN rate_entry r ON r.trip_id = t.id
-         WHERE t.deleted = FALSE AND t.status IN ('Approved', 'Completed')
-           AND (r.id IS NULL OR r.locked = FALSE) ${extraWhere}`,
+    return withTransaction(async (client) => {
+      if (filters.pagination) {
+        const countResult = await client.query<{ c: string }>(
+          `SELECT COUNT(*)::text AS c FROM trips t ${baseWhere}`,
+          params
+        );
+        const total = Number(countResult.rows[0]?.c ?? 0);
+        const pagedParams = [
+          ...params,
+          filters.pagination.limit,
+          filters.pagination.offset,
+        ];
+        const result = await client.query(
+          `SELECT t.* FROM trips t ${baseWhere}
+           ORDER BY t.trip_date DESC, t.id DESC
+           LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+          pagedParams
+        );
+
+        const items: RateEntryTrip[] = [];
+        for (const row of result.rows) {
+          const deliveries = await loadDeliveries(client, num(row.id));
+          items.push(mapTrip(row, deliveries));
+        }
+        return paginatedResult(items, total, filters.pagination);
+      }
+
+      const result = await client.query(
+        `SELECT t.* FROM trips t ${baseWhere}
+         ORDER BY t.trip_date DESC, t.id DESC`,
         params
       );
-      const total = Number(countResult.rows[0]?.c ?? 0);
-      const pagedParams = [...params, filters.pagination.limit, filters.pagination.offset];
-      const result = await query(
-        `${ELIGIBLE_TRIPS_SELECT} ${extraWhere}
-         ORDER BY t.trip_date DESC, t.id DESC
-         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-        pagedParams
+      const items: RateEntryTrip[] = [];
+      for (const row of result.rows) {
+        const deliveries = await loadDeliveries(client, num(row.id));
+        items.push(mapTrip(row, deliveries));
+      }
+      return items;
+    });
+  },
+
+  async getById(id: number): Promise<RateEntryTrip> {
+    return withTransaction(async (client) => {
+      const result = await client.query(
+        `SELECT t.* FROM trips t
+         WHERE t.id = $1
+           AND t.status = 'Completed'
+           AND COALESCE(t.deleted, FALSE) = FALSE`,
+        [id]
       );
-      return paginatedResult(result.rows.map(mapRateEntryTrip), total, filters.pagination);
-    }
-
-    const result = await query(
-      `${ELIGIBLE_TRIPS_SELECT} ${extraWhere} ORDER BY t.trip_date DESC, t.id DESC`,
-      params
-    );
-    return result.rows.map(mapRateEntryTrip);
-  },
-
-  async getByTripId(tripId: number, client: Client | null = null) {
-    const sql = `SELECT r.*, t.trip_no FROM rate_entry r JOIN trips t ON t.id = r.trip_id WHERE r.trip_id = $1`;
-    const result = client ? await client.query(sql, [tripId]) : await query(sql, [tripId]);
-    if (!result.rowCount) return null;
-    return mapRateEntry(result.rows[0]);
-  },
-
-  async getById(id: number) {
-    const result = await query(
-      `SELECT r.*, t.trip_no FROM rate_entry r JOIN trips t ON t.id = r.trip_id WHERE r.id = $1`,
-      [id]
-    );
-    if (!result.rowCount) throw new AppError(404, "Rate entry not found");
-    return mapRateEntry(result.rows[0]);
-  },
-
-  /**
-   * Save (upsert) a trip's rate entry — the header record plus, optionally,
-   * shop-wise rates on the trip's deliveries. Safe to call repeatedly while
-   * unlocked (each call overwrites the same row). Rejected once the trip's
-   * rate has been locked. Fully transactional: on any validation failure
-   * the transaction rolls back and nothing is partially saved.
-   */
-  async create(body: unknown) {
-    const data = parseBody(rateEntryBodySchema, body);
-    assertShopSaleRateInRange(data.rate);
-
-    return withTransaction(async (client) => {
-      try {
-        const trip = await lockTripRow(client, data.tripId);
-        assertTripUsableForRate(trip);
-
-        const existing = await lockRateEntryRow(client, data.tripId);
-        assertNotLocked(existing, trip.tripNo);
-
-        if (data.birdTypeId != null) await assertBirdTypeExists(data.birdTypeId, client);
-
-        await applyDeliveryRates(client, data.tripId, data.deliveries);
-
-        // Default bird type from the trip's own farm bird type when the
-        // caller doesn't specify one — avoids asking the user to re-enter
-        // information the trip already carries.
-        let birdTypeId = data.birdTypeId ?? null;
-        let birdType = data.birdType ?? null;
-        if (birdTypeId == null && birdType == null) {
-          const tripRow = await client.query(
-            `SELECT farm_bird_type_id, farm_bird_type FROM trips WHERE id = $1`,
-            [data.tripId]
-          );
-          birdTypeId = tripRow.rows[0]?.farm_bird_type_id ?? null;
-          birdType = tripRow.rows[0]?.farm_bird_type ?? null;
-        }
-
-        let id: number;
-        if (existing) {
-          id = existing.id;
-          await client.query(
-            `UPDATE rate_entry SET
-               rate = $2,
-               bird_type_id = COALESCE($3, bird_type_id),
-               bird_type = COALESCE($4, bird_type),
-               remarks = COALESCE($5, remarks),
-               updated_by = COALESCE($6, updated_by),
-               updated_at = NOW()
-             WHERE id = $1`,
-            [id, data.rate, birdTypeId, birdType, data.remarks ?? null, data.updatedBy ?? data.createdBy ?? null]
-          );
-        } else {
-          const result = await client.query(
-            `INSERT INTO rate_entry (trip_id, bird_type_id, bird_type, rate, remarks, created_by, locked)
-             VALUES ($1,$2,$3,$4,$5,$6,FALSE)
-             RETURNING id`,
-            [data.tripId, birdTypeId, birdType ?? "", data.rate, data.remarks ?? "", data.createdBy ?? ""]
-          );
-          id = num(result.rows[0].id);
-        }
-
-        const row = await client.query(
-          `SELECT r.*, t.trip_no FROM rate_entry r JOIN trips t ON t.id = r.trip_id WHERE r.id = $1`,
-          [id]
-        );
-        return mapRateEntry(row.rows[0]);
-      } catch (err) {
-        rethrowIfAppError(err);
-        throw err;
+      if (!result.rowCount) {
+        throw new AppError(404, `Trip ${id} is not available for Rate Entry`);
       }
+      const deliveries = await loadDeliveries(client, id);
+      return mapTrip(result.rows[0], deliveries);
     });
   },
 
-  /** Edits the same rate record — never creates a second row for the trip.
-   * Rejected once the rate has been locked (409). */
-  async update(id: number, body: unknown) {
-    const data = parseBody(rateEntryUpdateSchema, body);
-    if (data.rate != null) assertShopSaleRateInRange(data.rate);
+  async save(tripId: number, body: unknown): Promise<RateEntryTrip> {
+    const data = parseBody(rateEntrySaveSchema, body);
 
     return withTransaction(async (client) => {
       try {
-        const current = await client.query<{ trip_id: number; locked: boolean }>(
-          `SELECT trip_id, locked FROM rate_entry WHERE id = $1 FOR UPDATE`,
-          [id]
-        );
-        if (!current.rowCount) throw new AppError(404, "Rate entry not found");
-        const tripId = num(current.rows[0].trip_id);
-        if (current.rows[0].locked) {
+        const eligible = await client.query(ELIGIBLE_BY_ID, [tripId]);
+        if (!eligible.rowCount) {
+          const current = await client.query<{
+            status: string;
+            deleted: boolean;
+            rate_completed: boolean;
+          }>(
+            `SELECT status, COALESCE(deleted,FALSE) AS deleted,
+                    COALESCE(rate_completed,FALSE) AS rate_completed
+             FROM trips WHERE id = $1`,
+            [tripId]
+          );
+          if (!current.rowCount) {
+            throw new AppError(404, `Trip ${tripId} not found`);
+          }
+          const c = current.rows[0];
+          if (c.rate_completed) {
+            throw new AppError(409, `Trip ${tripId} is already rate-locked`);
+          }
           throw new AppError(
-            409,
-            `This rate entry is locked and cannot be modified. ` +
-              `Locked rates are immutable — use a controlled unlock/reopen workflow if a correction is required.`
+            422,
+            `Trip ${tripId} is not eligible for Rate Entry (must be Completed and not deleted)`
           );
         }
 
-        const trip = await lockTripRow(client, tripId);
-        assertTripUsableForRate(trip);
-
-        if (data.birdTypeId != null) await assertBirdTypeExists(data.birdTypeId, client);
-
-        await applyDeliveryRates(client, tripId, data.deliveries);
-
-        const result = await client.query(
-          `UPDATE rate_entry SET
-             rate = COALESCE($2, rate),
-             bird_type_id = COALESCE($3, bird_type_id),
-             bird_type = COALESCE($4, bird_type),
-             remarks = COALESCE($5, remarks),
-             updated_by = COALESCE($6, updated_by),
-             updated_at = NOW()
-           WHERE id = $1
-           RETURNING id`,
-          [
-            id,
-            data.rate ?? null,
-            data.birdTypeId ?? null,
-            data.birdType ?? null,
-            data.remarks ?? null,
-            data.updatedBy ?? null,
-          ]
+        const deliveryIds = data.rates.map((r) => r.deliveryId);
+        const existing = await client.query<{
+          id: number;
+          weight: number;
+        }>(
+          `SELECT id, weight FROM trip_deliveries
+           WHERE trip_id = $1 AND id = ANY($2::int[])`,
+          [tripId, deliveryIds]
         );
-        if (!result.rowCount) throw new AppError(404, "Rate entry not found");
-        const row = await client.query(
-          `SELECT r.*, t.trip_no FROM rate_entry r JOIN trips t ON t.id = r.trip_id WHERE r.id = $1`,
-          [id]
-        );
-        return mapRateEntry(row.rows[0]);
+        const found = new Set(existing.rows.map((r) => num(r.id)));
+        const missing = deliveryIds.filter((id) => !found.has(id));
+        if (missing.length) {
+          throw new AppError(422, "Some deliveries do not belong to this trip", {
+            tripId,
+            missingDeliveryIds: missing,
+          });
+        }
+
+        const weightById = new Map<number, number>();
+        for (const r of existing.rows) weightById.set(num(r.id), num(r.weight));
+
+        for (const item of data.rates) {
+          const weight = weightById.get(item.deliveryId) ?? 0;
+          const amount = Number((weight * item.rate).toFixed(2));
+          await client.query(
+            `UPDATE trip_deliveries
+               SET rate = $2, amount = $3, updated_at = NOW()
+             WHERE id = $1 AND trip_id = $4`,
+            [item.deliveryId, item.rate, amount, tripId]
+          );
+        }
+
+        const trip = await client.query(`SELECT * FROM trips WHERE id = $1`, [
+          tripId,
+        ]);
+        const deliveries = await loadDeliveries(client, tripId);
+        return mapTrip(trip.rows[0], deliveries);
       } catch (err) {
         rethrowIfAppError(err);
         throw err;
@@ -474,75 +447,74 @@ export const rateEntryService = {
     });
   },
 
-  /**
-   * Explicit lock — the only backend-controlled way a trip's rate becomes
-   * immutable and eligible for Shop Sales. After a successful commit the
-   * trip no longer satisfies the Rate Entry eligibility query.
-   *
-   * Concurrency: both the trip row and (if present) the rate_entry row are
-   * SELECT ... FOR UPDATE inside this transaction, so two simultaneous lock
-   * (or lock + save) requests for the same trip serialize — the second to
-   * reach the row sees the first's committed state (already locked, or the
-   * up-to-date rate) rather than racing.
-   */
-  async lock(tripId: number, body: unknown) {
+  async lock(tripId: number, body: unknown): Promise<RateEntryTrip> {
     const data = parseBody(rateEntryLockSchema, body);
 
     return withTransaction(async (client) => {
       try {
-        const trip = await lockTripRow(client, tripId);
-        assertTripUsableForRate(trip);
-
-        const existing = await lockRateEntryRow(client, tripId);
-        if (!existing) {
+        const eligible = await client.query(
+          `SELECT * FROM trips
+           WHERE id = $1
+             AND status = 'Completed'
+             AND COALESCE(deleted, FALSE) = FALSE
+             AND COALESCE(rate_completed, FALSE) = FALSE
+           FOR UPDATE`,
+          [tripId]
+        );
+        if (!eligible.rowCount) {
+          const current = await client.query<{
+            status: string;
+            deleted: boolean;
+            rate_completed: boolean;
+          }>(
+            `SELECT status, COALESCE(deleted,FALSE) AS deleted,
+                    COALESCE(rate_completed,FALSE) AS rate_completed
+             FROM trips WHERE id = $1`,
+            [tripId]
+          );
+          if (!current.rowCount) {
+            throw new AppError(404, `Trip ${tripId} not found`);
+          }
+          const c = current.rows[0];
+          if (c.rate_completed) {
+            throw new AppError(409, `Trip ${tripId} is already rate-locked`);
+          }
           throw new AppError(
-            409,
-            `Trip ${trip.tripNo} has no saved rates yet — save rates before locking.`
+            422,
+            `Trip ${tripId} is not eligible for Rate Entry (must be Completed and not deleted)`
           );
         }
-        if (existing.locked) {
-          throw new AppError(409, `Trip ${trip.tripNo}'s rates are already locked.`);
+
+        const missing = await client.query<{ id: number; shop_name: string }>(
+          `SELECT id, shop_name FROM trip_deliveries
+           WHERE trip_id = $1 AND rate IS NULL
+           ORDER BY serial_no NULLS LAST, id`,
+          [tripId]
+        );
+        if (missing.rowCount) {
+          throw new AppError(422, "Every shop delivery must have a rate before locking", {
+            tripId,
+            missingDeliveries: missing.rows.map((r) => ({
+              deliveryId: num(r.id),
+              shopName: str(r.shop_name),
+            })),
+          });
         }
 
-        await assertRatesComplete(client, tripId, trip.tripNo);
-
-        await client.query(
-          `UPDATE rate_entry SET
-             locked = TRUE,
-             locked_by = $2,
-             locked_at = NOW(),
-             updated_by = COALESCE($2, updated_by),
-             updated_at = NOW()
-           WHERE id = $1`,
-          [existing.id, data.lockedBy ?? "system"]
-        );
-
-        // Keep the legacy trips.rate_completed / rate_locked_at / rate_locked_by
-        // cache columns in sync, in the same transaction, so they never drift
-        // from the one authoritative signal (rate_entry.locked/.lockedAt).
-        // This is the ONLY place that writes rate_completed = TRUE — no other
-        // module may set it independently (see collectionsService.ts and
-        // tripsService.save(), which no longer accept/apply it). rate_locked_at
-        // is the real anchor for the 10-day Shop Sales correction window
-        // (tripDeliverySync.ts editWindowAnchor prefers it over approved_at) —
-        // stamping it here, at the moment Shop Sales actually becomes
-        // available, matches the business rule literally: LOCK -> Shop Sales
-        // available -> 10-day window starts now, not back when the trip was
-        // merely approved/completed.
         await client.query(
           `UPDATE trips
              SET rate_completed = TRUE,
                  rate_locked_at = NOW(),
-                 rate_locked_by = $2
+                 rate_locked_by = COALESCE($2, rate_locked_by, 'system')
            WHERE id = $1`,
-          [tripId, data.lockedBy ?? "system"]
+          [tripId, data.lockedBy ?? null]
         );
 
-        const row = await client.query(
-          `SELECT r.*, t.trip_no FROM rate_entry r JOIN trips t ON t.id = r.trip_id WHERE r.id = $1`,
-          [existing.id]
-        );
-        return mapRateEntry(row.rows[0]);
+        const trip = await client.query(`SELECT * FROM trips WHERE id = $1`, [
+          tripId,
+        ]);
+        const deliveries = await loadDeliveries(client, tripId);
+        return mapTrip(trip.rows[0], deliveries);
       } catch (err) {
         rethrowIfAppError(err);
         throw err;
@@ -550,3 +522,10 @@ export const rateEntryService = {
     });
   },
 };
+
+export async function countEligible(): Promise<number> {
+  const r = await query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM trips t ${ELIGIBLE_WHERE}`
+  );
+  return Number(r.rows[0]?.c ?? 0);
+}

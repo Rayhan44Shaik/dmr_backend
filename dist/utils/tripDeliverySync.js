@@ -6,11 +6,15 @@ const EDIT_WINDOW_DAYS = 10;
  * never drift apart, since a trip that can be rate-locked but can't reach
  * Shop Sales afterwards would be a dead end. */
 export const RATE_ENTRY_ELIGIBLE_STATUSES = ["Approved", "Completed"];
-/** Anchor date for the 10-day edit window: when the trip was completed
- * (approved_at), falling back to the trip date for older/legacy rows that
- * predate approved_at being populated. */
+/** Anchor date for the 10-day Shop Sales correction window. Prefers
+ * `rateLockedAt` — the moment Rate Entry actually locked the trip and Shop
+ * Sales became available, which is what "10-day editing window" means per
+ * the business rule (Trip -> Rate Entry -> LOCK -> Shop Sales -> 10 days).
+ * Falls back to `approvedAt` (trip completion) for any trip locked before
+ * rate_locked_at existed/was populated, and finally to tripDate for very old
+ * legacy rows that predate approved_at too. */
 function editWindowAnchor(trip) {
-    const anchor = trip.approvedAt ?? trip.tripDate;
+    const anchor = trip.rateLockedAt ?? trip.approvedAt ?? trip.tripDate;
     return new Date(anchor);
 }
 export function editWindowExpiresAt(trip) {
@@ -21,8 +25,9 @@ export function editWindowExpiresAt(trip) {
 }
 /** A trip (and therefore its Shop Sales) is editable only while it has not
  * yet reached the finalized "Completed" state (still mid-workflow, handled
- * elsewhere), or — once Completed — only within EDIT_WINDOW_DAYS of
- * completion. Deleted trips are never editable. */
+ * elsewhere), or — once Completed — only within EDIT_WINDOW_DAYS of the
+ * rate-lock (or completion, for legacy rows). Deleted trips are never
+ * editable. */
 export function isTripEditable(trip) {
     if (trip.deleted)
         return false;

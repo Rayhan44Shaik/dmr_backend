@@ -64,13 +64,11 @@ async function makeCapacityTrip(f, opts) {
     const shop1DeliveryId = await addRow(shop1Id, "qty-shop1", opts.shop1Birds, opts.shop1Weight, 0, 0);
     const shop2DeliveryId = await addRow(shop2Id, "qty-shop2", opts.shop2Birds, opts.shop2Weight, 0, 0);
     const mortalityRowId = await addRow(null, "mortality", 0, 0, opts.mortalityBirds, opts.mortalityWeight);
-    await rateEntryService.create({
-        tripId,
-        rate: 50,
-        deliveries: [
-            { id: shop1DeliveryId, rate: 50 },
-            { id: shop2DeliveryId, rate: 50 },
-            { id: mortalityRowId, rate: 1 },
+    await rateEntryService.save(tripId, {
+        rates: [
+            { deliveryId: shop1DeliveryId, rate: 50 },
+            { deliveryId: shop2DeliveryId, rate: 50 },
+            { deliveryId: mortalityRowId, rate: 1 },
         ],
     });
     await rateEntryService.lock(tripId, { lockedBy: "qty-tester" });

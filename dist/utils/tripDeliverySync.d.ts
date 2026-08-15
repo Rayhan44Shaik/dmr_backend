@@ -7,16 +7,19 @@ type Client = pg.PoolClient;
  * Shop Sales afterwards would be a dead end. */
 export declare const RATE_ENTRY_ELIGIBLE_STATUSES: readonly ["Approved", "Completed"];
 export declare function editWindowExpiresAt(trip: {
+    rateLockedAt?: string | null;
     approvedAt?: string | null;
     tripDate: string;
 }): Date;
 /** A trip (and therefore its Shop Sales) is editable only while it has not
  * yet reached the finalized "Completed" state (still mid-workflow, handled
- * elsewhere), or — once Completed — only within EDIT_WINDOW_DAYS of
- * completion. Deleted trips are never editable. */
+ * elsewhere), or — once Completed — only within EDIT_WINDOW_DAYS of the
+ * rate-lock (or completion, for legacy rows). Deleted trips are never
+ * editable. */
 export declare function isTripEditable(trip: {
     status: string;
     deleted?: boolean;
+    rateLockedAt?: string | null;
     approvedAt?: string | null;
     tripDate: string;
 }): boolean;
@@ -24,6 +27,7 @@ export declare function assertTripEditable(trip: {
     tripNo?: string;
     status: string;
     deleted?: boolean;
+    rateLockedAt?: string | null;
     approvedAt?: string | null;
     tripDate: string;
 }): void;

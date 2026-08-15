@@ -62,15 +62,8 @@ export interface ShopSale {
     status: OpsRecordStatus;
     deleted: boolean;
     deletedReason?: string | null;
-    /** True when the parent trip is soft-deleted — the sale itself is NOT
-     * deleted and remains a permanent historical accounting record. */
     tripDeleted: boolean;
-    /** Whether this sale can currently be edited/deleted (Completed trip
-     * within the 10-day window, or not yet Completed). Backend is still the
-     * authority — this only lets the UI reflect state without recomputing it. */
     editable: boolean;
-    /** ISO date the 10-day edit window closes (only meaningful once the trip
-     * is Completed). */
     windowExpiresAt: string | null;
     approvedBy?: string | null;
     approvedAt?: string | null;
@@ -80,53 +73,11 @@ export interface ShopSale {
     createdBy?: string;
     createdAt?: string | null;
     updatedAt?: string | null;
-}
-export type RateEntryStatus = "Pending" | "Entered";
-/** A Rate Entry–eligible trip (status = Approved or Completed, not deleted,
- * not rate-locked), optionally joined with its rate record if one has been
- * saved (but not yet locked — locked trips never appear here). */
-export interface RateEntryTrip {
-    tripId: number;
-    tripNo: string;
-    tripDate: string;
-    tripStatus: string;
-    vehicleId: number | null;
-    vehicleNo: string | null;
-    driverId: number | null;
-    driverName: string | null;
-    supervisorId: number | null;
-    supervisorName: string | null;
-    sourceFarmId: number | null;
-    sourceFarm: string | null;
-    totalBirds: number;
-    totalWeight: number;
-    totalShops: number;
-    birdTypeId: number | null;
-    birdType: string | null;
-    rateStatus: RateEntryStatus;
-    rateEntryId: number | null;
-    rate: number | null;
-    remarks: string | null;
-    locked: boolean;
-    createdBy?: string | null;
-    createdAt?: string | null;
-    updatedAt?: string | null;
-}
-export interface RateEntry {
-    id: number;
-    tripId: number;
-    tripNo?: string;
-    birdTypeId: number | null;
-    birdType: string;
-    rate: number;
-    remarks: string;
-    locked: boolean;
-    lockedBy?: string | null;
-    lockedAt?: string | null;
-    createdBy?: string;
-    updatedBy?: string | null;
-    createdAt?: string | null;
-    updatedAt?: string | null;
+    rateCompleted?: boolean;
+    rateLockedAt?: string | null;
+    rateLockedBy?: string | null;
+    correctionWindowExpired?: boolean;
+    correctionWindowClosesAt?: string | null;
 }
 export interface Collection {
     id: number;
@@ -152,7 +103,6 @@ export interface Collection {
     createdBy?: string;
     createdAt?: string | null;
     updatedAt?: string | null;
-    /** computed */
     balance?: number;
 }
 export type FuelSourceType = "TRIP" | "MANUAL";
@@ -199,4 +149,54 @@ export interface RunningBalanceRow {
     totalCollected: number;
     pendingAmount: number;
     runningBalance: number;
+}
+export interface RateEntryMarketRate {
+    shopId: number | null;
+    shopName: string;
+    birdTypeId: number | null;
+    birdType: string;
+    masterRate: number | null;
+    lastTripRate: number | null;
+    lastTripDate: string | null;
+    lastTripNo: string | null;
+    avgTripRate: number | null;
+    tripRateSamples: number;
+}
+export interface RateEntryDelivery {
+    id: number;
+    serialNo: number | null;
+    boxNo: number | null;
+    shopId: number | null;
+    shopName: string;
+    birdTypeId: number | null;
+    birdType: string;
+    birds: number;
+    weight: number;
+    mortality: number;
+    mortKg: number | null;
+    rate: number | null;
+    amount: number;
+    remarks: string;
+    deliveryMode: "box" | "weight";
+    marketRate: RateEntryMarketRate | null;
+}
+export interface RateEntryTrip {
+    id: number;
+    tripNo: string;
+    tripDate: string;
+    status: TripStatus;
+    vehicleNo: string | null;
+    driverName: string | null;
+    supervisorName: string | null;
+    sourceFarm: string | null;
+    totalBirds: number;
+    totalWeight: number;
+    totalShops: number;
+    rateLocked: boolean;
+    rateLockedAt: string | null;
+    rateLockedBy: string | null;
+    ratesEntered: number;
+    deliveriesCount: number;
+    totalAmount: number;
+    deliveries: RateEntryDelivery[];
 }

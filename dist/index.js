@@ -1,3 +1,4 @@
+import http from "node:http";
 import cors from "cors";
 import express from "express";
 import { env } from "./config/env.js";
@@ -13,7 +14,7 @@ app.use(express.json({ limit: "25mb" }));
 app.get("/", (_req, res) => {
     res.json({
         name: "DMR Poultries API",
-        phase: "2 — Masters + Trips + Staff + Operations",
+        phase: "2 â€” Masters + Trips + Staff + Operations",
         docs: {
             swagger: "GET /api/docs",
             openapi: "GET /api/docs/openapi.json",
@@ -25,6 +26,7 @@ app.get("/", (_req, res) => {
                 dashboard: "GET /api/operations/dashboard",
                 trips: "GET|POST /api/operations/trips",
                 tripList: "GET /api/operations/trip-list",
+                rateEntry: "GET /api/operations/rate-entry  A GET/PUT /api/operations/rate-entry/:tripId  A POST /api/operations/rate-entry/:tripId/lock",
                 shopRates: "GET|POST /api/operations/shop-rates",
                 shopSales: "GET|POST /api/operations/shop-sales",
                 collections: "GET|POST /api/operations/collections",
@@ -56,7 +58,15 @@ app.use(notFound);
 app.use(errorHandler);
 async function start() {
     await pool.query("SELECT 1");
-    app.listen(env.port, () => {
+    const server = http.createServer(app);
+    server.on("error", (err) => {
+        if (err.code === "EADDRINUSE") {
+            console.error(`Port ${env.port} is already in use. Another process may already be running the backend.`);
+            process.exit(1);
+        }
+        throw err;
+    });
+    server.listen(env.port, () => {
         console.log(`DMR backend listening on http://localhost:${env.port}`);
         console.log(`PostgreSQL: ${env.databaseUrl.replace(/:[^:@]+@/, ":***@")}`);
     });

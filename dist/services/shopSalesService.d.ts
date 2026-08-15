@@ -1,10 +1,5 @@
 import type { ShopSale } from "../types/operations.js";
 import { type PaginatedResult, type PaginationParams } from "../utils/pagination.js";
-/**
- * Shop sales are trip_deliveries rows (+ parent trip). No separate
- * shop_sales table — deliberately reusing the existing Trip → Delivery
- * relationship instead of duplicating it (see 023_shop_sales_hardening.sql).
- */
 export declare const shopSalesService: {
     list(filters?: {
         shopId?: number;
@@ -16,40 +11,7 @@ export declare const shopSalesService: {
     }): Promise<ShopSale[] | PaginatedResult<ShopSale>>;
     getById(id: number): Promise<ShopSale>;
     create(body: unknown): Promise<ShopSale>;
-    /**
-     * Rate Entry LOCKED only means "this trip has moved from Rate Entry into
-     * Shop Sales" — it is NOT rate immutability. Within the 10-day Shop
-     * Sales edit window (assertTripEditable below — the same window that
-     * already gates birds/weight/delete), birds, weight, AND rate may all be
-     * corrected, each subject to its own validation (capacity for
-     * birds/weight, ₹50–₹300 for rate). Shop/trip reassignment remains
-     * permanently blocked — the data model has no safe way to reassign a
-     * delivery to a different shop/trip, independent of the edit window.
-     * Once the 10-day window closes, assertTripEditable rejects the whole
-     * update (birds, weight, rate, everything) — that is the real "Shop
-     * Sales trip locked" state, not rate_entry.locked.
-     */
     update(id: number, body: unknown): Promise<ShopSale>;
-    /**
-     * Historically this endpoint mutated the *parent trip's* status
-     * (Draft/Pending/Completed/Deleted) based on an ops-facing status value —
-     * completely bypassing the validated trip status-transition table
-     * (assertTripStatusTransition) and the wizard-completion gate
-     * (assertTripReadyForCompletion) that the real trip status endpoint
-     * (tripsService.updateStatus) enforces. That let a direct API call flip
-     * an incomplete trip straight to "Completed". A Shop Sale has no
-     * independent status of its own (Shop Sales is a projection of
-     * trip_deliveries — see shopSalesService module comment) beyond whether
-     * the row itself is soft-deleted, so this endpoint now only supports
-     * that one real transition — soft-delete — under the exact same guards
-     * softDelete() already uses (Rate Entry must be locked, trip must be
-     * editable/Approved-or-Completed). Every other status value is rejected;
-     * trip status must be changed through tripsService.updateStatus, never
-     * through Shop Sales.
-     */
     updateStatus(id: number, body: unknown): Promise<ShopSale>;
-    /** Soft-delete only — birds/weight/rate/amount are preserved for the
-     * historical accounting record, never zeroed out. Allowed only within the
-     * 10-day edit window. */
     softDelete(id: number, reason?: string): Promise<ShopSale>;
 };

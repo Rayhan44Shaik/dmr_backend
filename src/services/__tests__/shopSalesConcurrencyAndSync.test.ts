@@ -1,4 +1,4 @@
-import { after, describe, test } from "node:test";
+﻿import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { pool } from "../../config/db.js";
 import { AppError } from "../../middleware/errorHandler.js";
@@ -9,7 +9,7 @@ import { tripsService } from "../tripsService.js";
 /**
  * Concurrency/duplicate/security matrix for Shop Sales edit/delete, plus
  * verification that a Shop Sale edit/delete is immediately visible through
- * Trip List (tripsService.getById — the same data GET /operations/trips/:id
+ * Trip List (tripsService.getById â€” the same data GET /operations/trips/:id
  * and GET /operations/trip-list/:id serve) via recalcTripDeliveryTotals.
  */
 
@@ -41,7 +41,7 @@ async function makeShop(f: Fixture): Promise<number> {
 /**
  * Creates a trip + locked rate entry with a placeholder (0/0) delivery
  * (needed only so Rate Entry has a row to price/lock), then adds the real
- * test delivery via shopSalesService.create() — going through the real API
+ * test delivery via shopSalesService.create() â€” going through the real API
  * path so trips.total_* KPI columns are correctly seeded by
  * recalcTripDeliveryTotals() from the start, giving an accurate "before"
  * baseline for the sync assertions below (a raw SQL INSERT would bypass
@@ -66,7 +66,7 @@ async function makeLockedTrip(
      RETURNING id`,
     [tripId, `SALE-${uniqueInt()}`]
   );
-  await rateEntryService.create({ tripId, rate: 30, deliveries: [{ id: placeholder.rows[0].id, rate: 30 }] });
+  await rateEntryService.save(tripId, { rates: [{ deliveryId: placeholder.rows[0].id, rate: 30 }] });
   await rateEntryService.lock(tripId, { lockedBy: "sync-tester" });
 
   const created = await shopSalesService.create({ tripId, shopId, birds: opts.birds, weight: opts.weight });
@@ -94,7 +94,7 @@ describe("Concurrency / duplicate / security matrix", () => {
     // Both COULD legitimately succeed in either order (edit-then-delete
     // deletes the edited row; delete-then-edit is rejected because the
     // WHERE deleted=FALSE guard on update's SELECT ... FOR UPDATE won't
-    // find the row) — what must NEVER happen is a corrupted state where
+    // find the row) â€” what must NEVER happen is a corrupted state where
     // the row is both "updated to 60" AND still fully active with no
     // deleted flag change actually applied.
     const finalRow = await pool.query<{ birds: number; deleted: boolean }>(
@@ -103,7 +103,7 @@ describe("Concurrency / duplicate / security matrix", () => {
     );
     const row = finalRow.rows[0];
     if (row.deleted) {
-      // Delete won (either ran first, or ran after the edit) — fine either way.
+      // Delete won (either ran first, or ran after the edit) â€” fine either way.
       assert.ok(true);
     } else {
       // Edit won and delete must have failed.
@@ -160,7 +160,7 @@ describe("Concurrency / duplicate / security matrix", () => {
        VALUES ($1, $2, NULL, '', 0, 0, NULL) RETURNING id`,
       [tripId, `SALE-${uniqueInt()}`]
     );
-    await rateEntryService.create({ tripId, rate: 20, deliveries: [{ id: seed.rows[0].id, rate: 20 }] });
+    await rateEntryService.save(tripId, { rates: [{ deliveryId: seed.rows[0].id, rate: 20 }] });
     await rateEntryService.lock(tripId, { lockedBy: "sync-tester" });
 
     const results = await Promise.allSettled([
@@ -223,8 +223,8 @@ describe("Concurrency / duplicate / security matrix", () => {
 
     const seedA = await pool.query<{ id: number }>(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate) VALUES ($1,$2,NULL,'',0,0,NULL) RETURNING id`, [tA.rows[0].id, `SALE-${uniqueInt()}`]);
     const seedB = await pool.query<{ id: number }>(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate) VALUES ($1,$2,NULL,'',0,0,NULL) RETURNING id`, [tB.rows[0].id, `SALE-${uniqueInt()}`]);
-    await rateEntryService.create({ tripId: tA.rows[0].id, rate: 10, deliveries: [{ id: seedA.rows[0].id, rate: 10 }] });
-    await rateEntryService.create({ tripId: tB.rows[0].id, rate: 10, deliveries: [{ id: seedB.rows[0].id, rate: 10 }] });
+    await rateEntryService.save(tA.rows[0].id, { rates: [{ deliveryId: seedA.rows[0].id, rate: 10 }] });
+    await rateEntryService.save(tB.rows[0].id, { rates: [{ deliveryId: seedB.rows[0].id, rate: 10 }] });
     await rateEntryService.lock(tA.rows[0].id, { lockedBy: "t" });
     await rateEntryService.lock(tB.rows[0].id, { lockedBy: "t" });
 
@@ -235,7 +235,7 @@ describe("Concurrency / duplicate / security matrix", () => {
     ]);
     const elapsed = Date.now() - start;
     assert.ok(results.every((r) => r.status === "fulfilled"), "both unrelated-trip creates must succeed");
-    // Not a strict timing assertion (avoid flakiness) — just documents that
+    // Not a strict timing assertion (avoid flakiness) â€” just documents that
     // unrelated trips are not serialized behind one lock.
     void elapsed;
   });
@@ -253,11 +253,11 @@ describe("Concurrency / duplicate / security matrix", () => {
     const tripId = t3.rows[0].id;
     f.tripIds.push(tripId);
     const seed = await pool.query<{ id: number }>(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate) VALUES ($1,$2,NULL,'',0,0,NULL) RETURNING id`, [tripId, `SALE-${uniqueInt()}`]);
-    await rateEntryService.create({ tripId, rate: 10, deliveries: [{ id: seed.rows[0].id, rate: 10 }] });
+    await rateEntryService.save(tripId, { rates: [{ deliveryId: seed.rows[0].id, rate: 10 }] });
     await rateEntryService.lock(tripId, { lockedBy: "t" });
 
     // Capacity is 20 birds total; two concurrent creates each ask for 15
-    // (30 > 20) — only one can win.
+    // (30 > 20) â€” only one can win.
     const results = await Promise.allSettled([
       shopSalesService.create({ tripId, shopId: shopA, birds: 15, weight: 10 }),
       shopSalesService.create({ tripId, shopId: shopB, birds: 15, weight: 10 }),
@@ -323,7 +323,7 @@ describe("Trip List synchronization after Shop Sale edit/delete", () => {
     t.after(() => cleanup(f));
     const { tripId, shopId, deliveryId } = await makeLockedTrip(f, { capacityBirds: 50, capacityWeight: 100, birds: 50, weight: 100 });
 
-    // At full capacity — a new sale must be rejected.
+    // At full capacity â€” a new sale must be rejected.
     await assertStatus(shopSalesService.create({ tripId, shopId, birds: 1, weight: 1 }), 422);
 
     await shopSalesService.softDelete(deliveryId, "free up capacity");

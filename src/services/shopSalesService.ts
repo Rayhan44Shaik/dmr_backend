@@ -1,4 +1,4 @@
-import type pg from "pg";
+﻿import type pg from "pg";
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import type { ShopSale } from "../types/operations.js";
@@ -10,6 +10,7 @@ import {
   type PaginationParams,
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
+import { evaluateRateLock } from "../utils/rateLock.js";
 import {
   assertOpsStatus,
   assertShopSaleRateInRange,
@@ -35,17 +36,15 @@ interface TripRow {
   status: string;
   deleted: boolean;
   approvedAt: string | null;
-  /** When Rate Entry actually locked this trip — the real anchor for the
-   * 10-day Shop Sales correction window (falls back to approvedAt for trips
-   * locked before this column was populated). */
-  rateLockedAt: string | null;
   tripDate: string;
-  /** Authoritative bird/weight capacity Shop Sales must never exceed. */
   capacityBirds: number;
   capacityWeight: number;
 }
 
-/** Map trip_status → ops-facing status for API contract */
+function computeAmount(weight: number, rate: number): number {
+  return Number((Number(weight) * Number(rate)).toFixed(2));
+}
+
 function tripToOpsStatus(tripStatus: string, deleted: boolean): ShopSale["status"] {
   if (deleted || tripStatus === "Deleted") return "Deleted";
   if (tripStatus === "Completed") return "Approved";
@@ -60,12 +59,6 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
   const approvedAt = isoOrNull(row.approved_at);
   const tripDate = dateOnly(row.trip_date) ?? "";
 
-  // Effective rate/amount: once an operator explicitly edits a sale's rate
-  // it is persisted on the row (d.rate). Until then, a freshly-completed
-  // trip's deliveries carry rate = 0 from Trip Entry — fall back to the
-  // trip's single Rate Entry rate for display so Shop Sales shows a real
-  // amount immediately after "Save & Lock", without ever writing to
-  // rate_entry or trip_deliveries from here.
   const persistedRate = num(row.rate);
   const rate = persistedRate > 0 ? persistedRate : num(row.re_rate);
   const weight = num(row.weight);
@@ -75,10 +68,17 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
   const tripForWindow = {
     status: tripStatus,
     deleted: tripDeleted,
-    rateLockedAt: isoOrNull(row.rate_locked_at),
     approvedAt,
     tripDate,
   };
+
+  const rateCompleted = Boolean(row.rate_completed);
+  const rateLockedAt =
+    row.rate_locked_at == null ? null : new Date(str(row.rate_locked_at));
+  const lock = evaluateRateLock({
+    rate_completed: rateCompleted,
+    rate_locked_at: rateLockedAt,
+  });
 
   return {
     id: num(row.id),
@@ -108,44 +108,36 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
     approvedAt,
     createdAt: row.created_at == null ? null : str(row.created_at),
     updatedAt: row.updated_at == null ? null : str(row.updated_at),
+    rateCompleted,
+    rateLockedAt: lock.rateLockedAt,
+    rateLockedBy: row.rate_locked_by == null ? null : str(row.rate_locked_by),
+    correctionWindowExpired: lock.correctionWindowExpired,
+    correctionWindowClosesAt: lock.correctionWindowClosesAt,
   };
 }
 
 const SALE_SELECT = `
   SELECT d.*,
          t.trip_no, t.trip_date, t.status AS trip_status, t.deleted AS trip_deleted,
-         t.approved_by, t.approved_at, t.rate_locked_at, t.vehicle_no, t.source_farm,
+         t.deleted_reason, t.approved_by, t.approved_at, t.vehicle_no, t.source_farm,
+         t.rate_completed, t.rate_locked_at, t.rate_locked_by,
          re.rate AS re_rate
   FROM trip_deliveries d
   INNER JOIN trips t ON t.id = d.trip_id
   LEFT JOIN rate_entry re ON re.trip_id = t.id
 `;
 
-/**
- * The trip's bird/weight capacity for Shop Sales validation.
- *
- * Step 3 Pickup (`total_birds`, `dc_weight`) is the authoritative,
- * mandatory-before-Completion source — every Completed trip has these set
- * (pickup_step_submitted is required by assertTripReadyForCompletion). Step
- * 2 Farm-load fields (`farm_bird_count`, `farm_load_weight`) were added
- * later and are not consistently populated on older trips; when they ARE
- * genuinely set (>0) they take precedence, exactly mirroring the same
- * farmBirdCount ?? totalBirds / farmLoadWeight ?? dcWeight fallback
- * `computeTripKpis()` (tripCalculations.ts) already uses at Trip Entry
- * time — this is not a new business rule, just applying the existing one
- * consistently to Shop Sales.
- */
+const PROTECTED_FIELDS = ["birds", "weight", "rate", "amount"] as const;
+
 async function lockTrip(client: Client, tripId: number): Promise<TripRow> {
   const result = await client.query(
-    `SELECT id, trip_no, status, deleted, approved_at, rate_locked_at, trip_date,
-            farm_bird_count, farm_load_weight, total_birds, dc_weight
+    `SELECT id, trip_no, status, deleted, approved_at, trip_date,
+            total_birds, dc_weight
        FROM trips WHERE id = $1 FOR UPDATE`,
     [tripId]
   );
   if (!result.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
   const row = result.rows[0];
-  const farmBirdCount = num(row.farm_bird_count);
-  const farmLoadWeight = num(row.farm_load_weight);
   const totalBirds = num(row.total_birds);
   const dcWeight = num(row.dc_weight);
   return {
@@ -154,10 +146,12 @@ async function lockTrip(client: Client, tripId: number): Promise<TripRow> {
     status: str(row.status),
     deleted: Boolean(row.deleted),
     approvedAt: isoOrNull(row.approved_at),
-    rateLockedAt: isoOrNull(row.rate_locked_at),
     tripDate: dateOnly(row.trip_date) ?? "",
-    capacityBirds: farmBirdCount > 0 ? farmBirdCount : totalBirds,
-    capacityWeight: farmLoadWeight > 0 ? farmLoadWeight : dcWeight,
+    // The Pickup step is authoritative for the Shop Sales ceiling: total_birds
+    // (totalBirds) and dc_weight (dcWeight) are the mandatory-before-Completion
+    // Step 3 values. Step 2 farm_load_* fields are NOT used as the Shop Sales cap.
+    capacityBirds: totalBirds,
+    capacityWeight: dcWeight,
   };
 }
 
@@ -170,24 +164,16 @@ async function getDeliveryTripId(client: Client, saleId: number): Promise<number
   return num(result.rows[0].trip_id);
 }
 
-/**
- * Backend enforcement of the Trip → Rate Entry → Shop Sales flow: Shop Sales
- * create/edit/delete is rejected unless the trip's Rate Entry has been
- * explicitly saved AND locked (rate_entry.locked = TRUE) — a saved-but-not-
- * yet-locked rate is not enough. This is the authoritative gate; Rate Entry
- * "Save" and "Lock" are separate backend actions (rateEntryService.create /
- * rateEntryService.lock), and only a successful lock flips this flag.
- */
 async function assertRateEntryLocked(
   client: Client,
   tripId: number,
   trip: { tripNo?: string }
 ): Promise<void> {
-  const result = await client.query<{ id: number; locked: boolean }>(
-    `SELECT id, locked FROM rate_entry WHERE trip_id = $1`,
+  const result = await client.query<{ rate_completed: boolean }>(
+    `SELECT COALESCE(rate_completed, FALSE) AS rate_completed FROM trips WHERE id = $1`,
     [tripId]
   );
-  if (!result.rowCount || !result.rows[0].locked) {
+  if (!result.rowCount || !result.rows[0].rate_completed) {
     throw new AppError(
       409,
       `Trip ${trip.tripNo ?? ""} has no locked Rate Entry — ` +
@@ -199,11 +185,6 @@ async function assertRateEntryLocked(
   }
 }
 
-/**
- * Shop sales are trip_deliveries rows (+ parent trip). No separate
- * shop_sales table — deliberately reusing the existing Trip → Delivery
- * relationship instead of duplicating it (see 023_shop_sales_hardening.sql).
- */
 export const shopSalesService = {
   async list(
     filters: {
@@ -218,17 +199,8 @@ export const shopSalesService = {
     const clauses: string[] = [];
     const params: unknown[] = [];
 
-    // Shop Sales is only available once the trip's Rate Entry has been saved
-    // & explicitly LOCKED (rate_entry.locked = TRUE) — a saved-but-unlocked
-    // rate does not unlock Shop Sales. A trip being Completed alone does NOT
-    // unlock its deliveries either; the required flow is Trip Completed →
-    // Rate Entry → Save → Lock → Shop Sales. This is the authoritative
-    // backend enforcement (locked never flips back to false once set).
-    clauses.push(`EXISTS (SELECT 1 FROM rate_entry WHERE trip_id = t.id AND locked = TRUE)`);
+    clauses.push(`t.status = 'Completed' AND COALESCE(t.deleted, FALSE) = FALSE AND COALESCE(t.rate_completed, FALSE) = TRUE`);
 
-    // Historical requirement: sales for a deleted trip must remain visible
-    // (they are the accounting record) — only a sale's own `deleted` flag
-    // (soft-deleted within the edit window) is filtered by default.
     if (!filters.includeDeleted) {
       clauses.push(`COALESCE(d.deleted, FALSE) = FALSE`);
     }
@@ -279,10 +251,8 @@ export const shopSalesService = {
   },
 
   async getById(id: number) {
-    // Same backend rule as list(): a sale is only reachable once its trip's
-    // Rate Entry has been saved & locked.
     const result = await query(
-      `${SALE_SELECT} WHERE d.id = $1 AND EXISTS (SELECT 1 FROM rate_entry WHERE trip_id = t.id AND locked = TRUE)`,
+      `${SALE_SELECT} WHERE d.id = $1 AND t.status = 'Completed' AND COALESCE(t.deleted, FALSE) = FALSE AND COALESCE(t.rate_completed, FALSE) = TRUE`,
       [id]
     );
     if (!result.rowCount) throw new AppError(404, "Shop sale not found");
@@ -301,9 +271,6 @@ export const shopSalesService = {
         assertTripEditable(trip);
         assertTripCompletedForShopSales(trip);
         await assertRateEntryLocked(client, trip.id, trip);
-        // Shop is a mandatory reference — a sale with no shop is not a
-        // valid accounting record (Shop is also immutable once created,
-        // so it must be right from the start).
         if (data.shopId == null) {
           throw new AppError(400, "shopId is required to create a Shop Sale");
         }
@@ -313,21 +280,8 @@ export const shopSalesService = {
         const birds = data.birds ?? 0;
         const weight = data.weight ?? 0;
         const mortalityCount = data.mortality ?? 0;
-        // Shop Sales doesn't carry a mortality-weight input — a new row
-        // starts at 0 mort_kg (only Trip Step 4 ever sets it).
         const mortalityWeight = 0;
 
-        // Duplicate-submission guard: a network retry, accidental
-        // double-click, or a genuinely repeated create for the exact same
-        // (trip, shop, birds, weight) must not silently produce a second
-        // Shop Sale row. This pre-check gives a friendly error; the real,
-        // concurrency-safe guarantee is the unique partial index
-        // idx_trip_deliveries_no_dup_sale (029_shop_sales_duplicate_guard.sql)
-        // — two requests racing each other both pass this SELECT, but only
-        // one INSERT can win, and the loser's 23505 is mapped to 409 by
-        // rethrowIfAppError/mapPgError below. No time window: unlike the
-        // old 5-second check, a duplicate is rejected no matter how much
-        // time has passed since the original.
         const duplicate = await client.query(
           `SELECT id FROM trip_deliveries
             WHERE trip_id = $1 AND shop_id = $2 AND birds = $3 AND weight = $4
@@ -344,9 +298,6 @@ export const shopSalesService = {
           );
         }
 
-        // Farm capacity is consumed by delivered birds/weight AND
-        // mortality together — a bird either reaches a shop or is recorded
-        // as mortality, but either way it came out of the farm load.
         const existing = await sumActiveDeliveries(client, trip.id);
         assertWithinCapacity({
           label: "birds",
@@ -361,17 +312,14 @@ export const shopSalesService = {
           requested: weight + mortalityWeight,
         });
 
-        // Fall back to the persisted Rate Entry for this trip when the
-        // caller doesn't supply a rate explicitly.
         let rate = data.rate;
         if (rate == null) {
           const rateRow = await client.query<{ rate: string }>(
-            `SELECT rate FROM rate_entry WHERE trip_id = $1`,
+            `SELECT rate FROM trip_deliveries WHERE trip_id = $1 AND rate IS NOT NULL ORDER BY id LIMIT 1`,
             [trip.id]
           );
           rate = rateRow.rowCount ? Number(rateRow.rows[0].rate) : 0;
         }
-        // amount is always server-computed — client-supplied amount is never read.
         const amount = Number((weight * rate).toFixed(2));
         const saleNo = await generateSaleNo(client, trip.id, trip.tripNo);
 
@@ -407,144 +355,103 @@ export const shopSalesService = {
     });
   },
 
-  /**
-   * Rate Entry LOCKED only means "this trip has moved from Rate Entry into
-   * Shop Sales" — it is NOT rate immutability. Within the 10-day Shop
-   * Sales edit window (assertTripEditable below — the same window that
-   * already gates birds/weight/delete), birds, weight, AND rate may all be
-   * corrected, each subject to its own validation (capacity for
-   * birds/weight, ₹50–₹300 for rate). Shop/trip reassignment remains
-   * permanently blocked — the data model has no safe way to reassign a
-   * delivery to a different shop/trip, independent of the edit window.
-   * Once the 10-day window closes, assertTripEditable rejects the whole
-   * update (birds, weight, rate, everything) — that is the real "Shop
-   * Sales trip locked" state, not rate_entry.locked.
-   */
   async update(id: number, body: unknown) {
     const data = parseBody(shopSaleBodySchema.partial(), body);
 
-    const lockedFields = (
-      ["amount", "shopId", "shopName", "tripId"] as const
-    ).filter((field) => data[field] !== undefined);
-    if (lockedFields.length) {
+    const current = await query(
+      `${SALE_SELECT} WHERE d.id = $1`,
+      [id]
+    );
+    if (!current.rowCount) throw new AppError(404, "Shop sale not found");
+    const cur = current.rows[0];
+
+    // Shop Sales is only visible/editable once the trip's Rate Entry is locked
+    // (trips.rate_completed = TRUE). A sale on a trip that was never rate-locked
+    // must not be reachable or editable — same visibility rule as list/getById.
+    if (!Boolean(cur.rate_completed)) {
+      throw new AppError(404, "Shop sale not found");
+    }
+
+    const lock = evaluateRateLock({
+      rate_completed: cur.rate_completed,
+      rate_locked_at: cur.rate_locked_at == null ? null : new Date(str(cur.rate_locked_at)),
+    });
+
+    const touchesProtected = PROTECTED_FIELDS.some(
+      (f) => (data as Record<string, unknown>)[f] !== undefined
+    );
+
+    if (lock.rateCompleted && touchesProtected && lock.correctionWindowExpired) {
       throw new AppError(
         409,
-        `Cannot modify ${lockedFields.join(", ")} on a Shop Sale — the shop and trip relationship ` +
-          `are permanently fixed once created. Birds, weight, rate, mortality, bird type, and ` +
-          `remarks may be corrected within the 10-day edit window.`,
-        { lockedFields }
+        "Rate correction window expired - editing locked after 10 days",
+        {
+          tripId: num(cur.trip_id),
+          rateLockedAt: lock.rateLockedAt,
+          correctionWindowClosesAt: lock.correctionWindowClosesAt,
+        }
       );
     }
+
     if (data.rate != null) assertShopSaleRateInRange(data.rate);
 
+    const effectiveWeight = data.weight ?? num(cur.weight);
+    const effectiveRate = data.rate ?? num(cur.rate);
+    const nextAmount = computeAmount(effectiveWeight, effectiveRate);
+
     return withTransaction(async (client) => {
-      try {
-        const tripId = await getDeliveryTripId(client, id);
-        const trip = await lockTrip(client, tripId);
-        assertTripEditable(trip);
-        assertTripCompletedForShopSales(trip);
-        await assertRateEntryLocked(client, trip.id, trip);
+      const tripId = await getDeliveryTripId(client, id);
+      const trip = await lockTrip(client, tripId);
 
-        const currentResult = await client.query<{
-          birds: number;
-          weight: number;
-          rate: string;
-          mortality: number;
-          mort_kg: string;
-        }>(
-          `SELECT birds, weight, rate, mortality, mort_kg FROM trip_deliveries WHERE id = $1 AND deleted = FALSE FOR UPDATE`,
-          [id]
-        );
-        if (!currentResult.rowCount) throw new AppError(404, "Shop sale not found");
-        const current = currentResult.rows[0];
+      const birds = data.birds ?? num(cur.birds);
+      const weight = data.weight ?? num(cur.weight);
+      const mortalityCount = data.mortality ?? num(cur.mortality);
+      const mortalityWeight = num(cur.mort_kg ?? 0);
 
-        if (data.birdTypeId != null) await assertBirdTypeExists(data.birdTypeId, client);
+      const others = await sumActiveDeliveries(client, trip.id, id);
+      assertWithinCapacity({
+        label: "birds",
+        available: trip.capacityBirds,
+        alreadyAllocated: others.birds + others.mortalityCount,
+        requested: birds + mortalityCount,
+      });
+      assertWithinCapacity({
+        label: "weight",
+        available: trip.capacityWeight,
+        alreadyAllocated: others.weight + others.mortalityWeight,
+        requested: weight + mortalityWeight,
+      });
 
-        const birds = data.birds ?? num(current.birds);
-        const weight = data.weight ?? num(current.weight);
-        // Rate is editable within the 10-day window (already asserted via
-        // assertTripEditable above), range-checked above; otherwise carry
-        // the existing persisted rate forward unchanged.
-        const rate = data.rate ?? Number(current.rate ?? 0);
-        const mortalityCount = data.mortality ?? num(current.mortality);
-        // mort_kg isn't editable via Shop Sales — carry the row's existing
-        // value forward into the capacity check unchanged.
-        const mortalityWeight = num(current.mort_kg);
-
-        // Exclude this row entirely from "others", then add back its own
-        // (possibly edited) birds/weight/mortality — farm capacity is
-        // consumed by delivered + mortality together, same as create().
-        const others = await sumActiveDeliveries(client, trip.id, id);
-        assertWithinCapacity({
-          label: "birds",
-          available: trip.capacityBirds,
-          alreadyAllocated: others.birds + others.mortalityCount,
-          requested: birds + mortalityCount,
-        });
-        assertWithinCapacity({
-          label: "weight",
-          available: trip.capacityWeight,
-          alreadyAllocated: others.weight + others.mortalityWeight,
-          requested: weight + mortalityWeight,
-        });
-
-        // amount is always server-computed from weight × the effective rate
-        // (possibly just-edited above) — client-supplied amount is never read.
-        const amount = Number((weight * rate).toFixed(2));
-
-        const result = await client.query(
-          `UPDATE trip_deliveries SET
-             bird_type_id = COALESCE($2, bird_type_id),
-             bird_type = COALESCE($3, bird_type),
-             birds = $4,
-             weight = $5,
-             rate = $6,
-             amount = $7,
-             mortality = COALESCE($8, mortality),
-             remarks = COALESCE($9, remarks)
-           WHERE id = $1
-           RETURNING id`,
-          [
-            id,
-            data.birdTypeId ?? null,
-            data.birdType ?? null,
-            birds,
-            weight,
-            rate,
-            amount,
-            data.mortality ?? null,
-            data.remarks ?? null,
-          ]
-        );
-        if (!result.rowCount) throw new AppError(404, "Shop sale not found");
-
-        await recalcTripDeliveryTotals(client, trip.id);
-        const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [id]);
-        return mapDeliverySale(row.rows[0]);
-      } catch (err) {
-        rethrowIfAppError(err);
-        throw err;
-      }
+      const result = await client.query(
+        `UPDATE trip_deliveries SET
+           bird_type_id = COALESCE($2, bird_type_id),
+           bird_type = COALESCE($3, bird_type),
+           birds = $4,
+           weight = $5,
+           rate = $6,
+           amount = $7,
+           mortality = COALESCE($8, mortality),
+           remarks = COALESCE($9, remarks)
+         WHERE id = $1
+         RETURNING id`,
+        [
+          id,
+          data.birdTypeId ?? null,
+          data.birdType ?? null,
+          birds,
+          weight,
+          effectiveRate,
+          nextAmount,
+          data.mortality ?? null,
+          data.remarks ?? null,
+        ]
+      );
+      if (!result.rowCount) throw new AppError(404, "Shop sale not found");
+      await recalcTripDeliveryTotals(client, trip.id);
+      const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [id]);
+      return mapDeliverySale(row.rows[0]);
     });
   },
-
-  /**
-   * Historically this endpoint mutated the *parent trip's* status
-   * (Draft/Pending/Completed/Deleted) based on an ops-facing status value —
-   * completely bypassing the validated trip status-transition table
-   * (assertTripStatusTransition) and the wizard-completion gate
-   * (assertTripReadyForCompletion) that the real trip status endpoint
-   * (tripsService.updateStatus) enforces. That let a direct API call flip
-   * an incomplete trip straight to "Completed". A Shop Sale has no
-   * independent status of its own (Shop Sales is a projection of
-   * trip_deliveries — see shopSalesService module comment) beyond whether
-   * the row itself is soft-deleted, so this endpoint now only supports
-   * that one real transition — soft-delete — under the exact same guards
-   * softDelete() already uses (Rate Entry must be locked, trip must be
-   * editable/Approved-or-Completed). Every other status value is rejected;
-   * trip status must be changed through tripsService.updateStatus, never
-   * through Shop Sales.
-   */
   async updateStatus(id: number, body: unknown) {
     const status = String((body as { status?: string })?.status ?? "");
     assertOpsStatus(status);
@@ -562,9 +469,6 @@ export const shopSalesService = {
     return this.softDelete(id, patch.reason);
   },
 
-  /** Soft-delete only — birds/weight/rate/amount are preserved for the
-   * historical accounting record, never zeroed out. Allowed only within the
-   * 10-day edit window. */
   async softDelete(id: number, reason?: string) {
     return withTransaction(async (client) => {
       const tripId = await getDeliveryTripId(client, id);

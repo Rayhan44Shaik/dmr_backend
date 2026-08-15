@@ -1,4 +1,4 @@
-import { z } from "zod";
+﻿import { z } from "zod";
 import { AppError } from "../middleware/errorHandler.js";
 
 export const OPS_STATUSES = [
@@ -9,7 +9,7 @@ export const OPS_STATUSES = [
   "Deleted",
 ] as const;
 
-/** PostgreSQL trip_status enum — source of truth */
+/** PostgreSQL trip_status enum â€” source of truth */
 export const TRIP_STATUSES = ["Draft", "Pending", "Completed", "Deleted"] as const;
 
 export const opsStatusSchema = z.enum(OPS_STATUSES);
@@ -38,10 +38,10 @@ export const shopRateBodySchema = z.object({
 
 /**
  * Shop Sales rate-edit range. Rate Entry's own "Save & Lock" flow gets a
- * trip into Shop Sales, but locking is NOT rate immutability — within the
+ * trip into Shop Sales, but locking is NOT rate immutability â€” within the
  * 10-day Shop Sales edit window (tripDeliverySync.ts assertTripEditable),
  * the shop-wise rate may still be corrected, subject to this same
- * ₹50–₹300 range the Rate Entry UI has always used. After the window
+ * â‚¹50â€“â‚¹300 range the Rate Entry UI has always used. After the window
  * closes, assertTripEditable already rejects every field, rate included.
  */
 export const MIN_SHOP_SALE_RATE = 50;
@@ -51,14 +51,14 @@ export function assertShopSaleRateInRange(rate: number): void {
   if (rate < MIN_SHOP_SALE_RATE || rate > MAX_SHOP_SALE_RATE) {
     throw new AppError(
       400,
-      `Rate must be between ₹${MIN_SHOP_SALE_RATE} and ₹${MAX_SHOP_SALE_RATE} (got ₹${rate}).`
+      `Rate must be between â‚¹${MIN_SHOP_SALE_RATE} and â‚¹${MAX_SHOP_SALE_RATE} (got â‚¹${rate}).`
     );
   }
 }
 
 export const shopSaleBodySchema = z.object({
   saleNo: z.string().optional(),
-  // Derived from the trip (trips.trip_date) — never read from the client.
+  // Derived from the trip (trips.trip_date) â€” never read from the client.
   saleDate: z.string().optional(),
   shopId: z.number().int().positive().nullable().optional(),
   shopName: z.string().optional(),
@@ -69,7 +69,7 @@ export const shopSaleBodySchema = z.object({
   weight: z.number().nonnegative().optional(),
   rate: z.number().nonnegative().optional(),
   // amount is never read by the service (always server-computed from
-  // weight × rate) — kept optional here only so a client that still sends
+  // weight Ã— rate) â€” kept optional here only so a client that still sends
   // it doesn't fail validation; the value itself is always ignored.
   amount: z.number().nonnegative().optional(),
   mortality: z.number().int().nonnegative().optional(),
@@ -93,7 +93,7 @@ export const rateEntryBodySchema = z.object({
   createdBy: z.string().optional(),
   updatedBy: z.string().optional(),
   // Shop-wise rates for this trip's deliveries (trip_deliveries rows). Not
-  // required on every save — a trip can be saved incrementally — but every
+  // required on every save â€” a trip can be saved incrementally â€” but every
   // line supplied must reference a real, active delivery on the trip and
   // carry a positive rate; duplicates are rejected.
   deliveries: z
@@ -125,6 +125,25 @@ export const rateEntryUpdateSchema = z.object({
 
 export const rateEntryLockSchema = z.object({
   lockedBy: z.string().optional(),
+});
+
+/**
+ * Rate Entry payload.
+ *
+ * Each row targets an existing `trip_deliveries.id`. Only `rate` is accepted —
+ * amount is ALWAYS derived server-side as ROUND(weight * rate, 2).
+ */
+export const rateEntryItemSchema = z.object({
+  deliveryId: z.number().int().positive(),
+  rate: z
+    .number()
+    .min(MIN_SHOP_SALE_RATE, `Rate must be between ₹${MIN_SHOP_SALE_RATE} and ₹${MAX_SHOP_SALE_RATE}`)
+    .max(MAX_SHOP_SALE_RATE, `Rate must be between ₹${MIN_SHOP_SALE_RATE} and ₹${MAX_SHOP_SALE_RATE}`),
+});
+
+export const rateEntrySaveSchema = z.object({
+  /** Partial list — only deliveries included are updated. */
+  rates: z.array(rateEntryItemSchema).min(1),
 });
 
 export const collectionBodySchema = z.object({

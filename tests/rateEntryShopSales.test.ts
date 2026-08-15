@@ -1,10 +1,10 @@
-/**
- * Rate Entry / Shop Sales / Trip-Delivery sync backend tests — the
+﻿/**
+ * Rate Entry / Shop Sales / Trip-Delivery sync backend tests â€” the
  * production-readiness regression pass for the three tightly-coupled
  * modules: Trip -> Rate Entry -> (Save & Lock) -> Shop Sales.
  *
  * Runs the real Express app + real services against a real PostgreSQL
- * engine (PGlite WASM behind the pg-gateway wire-protocol server) — no
+ * engine (PGlite WASM behind the pg-gateway wire-protocol server) â€” no
  * mocks. Mirrors the pattern used by tests/tripList.test.ts and
  * tests/salaryLifecycle.test.ts.
  *
@@ -13,7 +13,7 @@
  *     saved-but-unlocked rate keeps the trip out of Shop Sales
  *   - Rate range (50-300 inclusive) is backend-enforced on Rate Entry
  *     itself, not just on the Shop Sales edit path (regression test for
- *     the gap fixed in this pass — see rateEntryService.ts)
+ *     the gap fixed in this pass â€” see rateEntryService.ts)
  *   - Lock is idempotent (second lock attempt is rejected, no duplicate
  *     Shop Sales rows are created)
  *   - Shop Sales is gated on rate_entry.locked = TRUE
@@ -153,7 +153,7 @@ async function makeCompletedTrip(
     dcWeight: opts.dcWeight,
   } as Record<string, unknown>);
   // tripsService.save() (unlike the real Approve/Complete status-transition
-  // path in tripsService.updateStatus) does not stamp approved_at — set it
+  // path in tripsService.updateStatus) does not stamp approved_at â€” set it
   // explicitly to "now" so the 10-day Shop Sales edit window anchors to a
   // realistic completion time instead of falling back to trip_date, which
   // would put every fixture trip immediately outside the window.
@@ -201,7 +201,7 @@ describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
 
     const rateListBeforeCompletion = await getJson(baseUrl, "/api/operations/rate-entry");
     assert.ok(
-      !rateListBeforeCompletion.body.some((t: { tripId: number }) => t.tripId === draft.id),
+      !rateListBeforeCompletion.body.some((t: { id: number }) => t.id === draft.id),
       "Draft trip must not appear in Rate Entry"
     );
 
@@ -216,7 +216,7 @@ describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
 
     const rateList = await getJson(baseUrl, "/api/operations/rate-entry");
     assert.ok(
-      rateList.body.some((t: { tripId: number }) => t.tripId === trip.id),
+      rateList.body.some((t: { id: number }) => t.id === trip.id),
       "Completed trip must appear in Rate Entry"
     );
 
@@ -226,15 +226,13 @@ describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
       "Trip must NOT appear in Shop Sales before rate lock"
     );
 
-    const saved = await postJson(baseUrl, "/api/operations/rate-entry", {
-      tripId: trip.id,
-      rate: 90,
-      deliveries: [
-        { id: deliveryA, rate: 90 },
-        { id: deliveryB, rate: 110 },
+    const saved = await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [
+        { deliveryId: deliveryA, rate: 90 },
+        { deliveryId: deliveryB, rate: 110 },
       ],
     });
-    assert.equal(saved.status, 201, JSON.stringify(saved.body));
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
 
     const shopSalesStillBeforeLock = await getJson(baseUrl, "/api/operations/shop-sales");
     assert.ok(
@@ -242,15 +240,15 @@ describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
       "Saved-but-unlocked rate must NOT unlock Shop Sales"
     );
 
-    const lock = await postJson(baseUrl, `/api/operations/rate-entry/trip/${trip.id}/lock`, {
+    const lock = await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {
       lockedBy: "tester",
     });
     assert.equal(lock.status, 200, JSON.stringify(lock.body));
-    assert.equal(lock.body.locked, true);
+    assert.equal(lock.body.rateLocked, true);
 
     const rateListAfterLock = await getJson(baseUrl, "/api/operations/rate-entry");
     assert.ok(
-      !rateListAfterLock.body.some((t: { tripId: number }) => t.tripId === trip.id),
+      !rateListAfterLock.body.some((t: { id: number }) => t.id === trip.id),
       "Trip must disappear from Rate Entry once locked"
     );
 
@@ -274,15 +272,13 @@ describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
       dcWeight: 900,
     });
     const delivery = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
-    await postJson(baseUrl, "/api/operations/rate-entry", {
-      tripId: trip.id,
-      rate: 100,
-      deliveries: [{ id: delivery, rate: 100 }],
+    await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [{ deliveryId: delivery, rate: 100 }],
     });
-    const first = await postJson(baseUrl, `/api/operations/rate-entry/trip/${trip.id}/lock`, {});
+    const first = await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
     assert.equal(first.status, 200);
 
-    const second = await postJson(baseUrl, `/api/operations/rate-entry/trip/${trip.id}/lock`, {});
+    const second = await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
     assert.equal(second.status, 409, "second lock attempt must be rejected");
 
     const shopSales = await getJson(baseUrl, "/api/operations/shop-sales");
@@ -310,7 +306,7 @@ describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. Rate range enforcement — backend authoritative, both Rate Entry and
+// 2. Rate range enforcement â€” backend authoritative, both Rate Entry and
 //    Shop Sales, direct API bypass (never trust the frontend min/max).
 // ---------------------------------------------------------------------------
 
@@ -324,20 +320,26 @@ describe("Rate range validation (50-300 inclusive) is backend-enforced", () => {
       dcWeight: 900,
     });
 
+    const delivery = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 100, 150);
+
     for (const bad of [49, 301, 0, -10]) {
-      const res = await postJson(baseUrl, "/api/operations/rate-entry", {
-        tripId: trip.id,
-        rate: bad,
+      const res = await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+        rates: [{ deliveryId: delivery, rate: bad }],
       });
       assert.equal(res.status, 400, `rate ${bad} must be rejected by Rate Entry, got ${res.status}`);
+      const row = await pool.query(`SELECT rate FROM trip_deliveries WHERE id = $1`, [delivery]);
+      assert.equal(
+        Number(row.rows[0].rate ?? 0),
+        0,
+        `rejected rate ${bad} must not be persisted`
+      );
     }
 
     for (const good of [50, 300, 90]) {
-      const res = await postJson(baseUrl, "/api/operations/rate-entry", {
-        tripId: trip.id,
-        rate: good,
+      const res = await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+        rates: [{ deliveryId: delivery, rate: good }],
       });
-      assert.equal(res.status, 201, `rate ${good} must be accepted, got ${res.status} ${JSON.stringify(res.body)}`);
+      assert.equal(res.status, 200, `rate ${good} must be accepted, got ${res.status} ${JSON.stringify(res.body)}`);
     }
   });
 
@@ -351,10 +353,8 @@ describe("Rate range validation (50-300 inclusive) is backend-enforced", () => {
     });
     const delivery = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 100, 150);
 
-    const badLine = await postJson(baseUrl, "/api/operations/rate-entry", {
-      tripId: trip.id,
-      rate: 100,
-      deliveries: [{ id: delivery, rate: 999 }],
+    const badLine = await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [{ deliveryId: delivery, rate: 999 }],
     });
     assert.equal(badLine.status, 400, JSON.stringify(badLine.body));
 
@@ -375,12 +375,10 @@ describe("Rate range validation (50-300 inclusive) is backend-enforced", () => {
       dcWeight: 900,
     });
     const delivery = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
-    await postJson(baseUrl, "/api/operations/rate-entry", {
-      tripId: trip.id,
-      rate: 100,
-      deliveries: [{ id: delivery, rate: 100 }],
+    await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [{ deliveryId: delivery, rate: 100 }],
     });
-    await postJson(baseUrl, `/api/operations/rate-entry/trip/${trip.id}/lock`, {});
+    await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
 
     for (const bad of [49, 301]) {
       const res = await putJson(baseUrl, `/api/operations/shop-sales/${delivery}`, { rate: bad });
@@ -408,15 +406,13 @@ describe("Shop Sales capacity validation", () => {
     });
     const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 300, 500, 20);
     const dB = await addDelivery(trip.id, m.shopB.id, m.shopB.shopName, 250, 450);
-    await postJson(baseUrl, "/api/operations/rate-entry", {
-      tripId: trip.id,
-      rate: 100,
-      deliveries: [
-        { id: dA, rate: 90 },
-        { id: dB, rate: 110 },
+    await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [
+        { deliveryId: dA, rate: 90 },
+        { deliveryId: dB, rate: 110 },
       ],
     });
-    await postJson(baseUrl, `/api/operations/rate-entry/trip/${trip.id}/lock`, {});
+    await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
 
     // Remaining birds = 1000 - 300 - 250 - 20(mortality) = 430. Pushing shop A
     // to 320 birds (delta +20) still fits (total birds allocated = 320+250+20=590 <= 1000).
@@ -447,12 +443,10 @@ describe("Shop Sales capacity validation", () => {
       dcWeight: 1800,
     });
     const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 300, 500);
-    await postJson(baseUrl, "/api/operations/rate-entry", {
-      tripId: trip.id,
-      rate: 100,
-      deliveries: [{ id: dA, rate: 100 }],
+    await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [{ deliveryId: dA, rate: 100 }],
     });
-    await postJson(baseUrl, `/api/operations/rate-entry/trip/${trip.id}/lock`, {});
+    await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
 
     const res = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, {
       birds: 320,
@@ -485,12 +479,10 @@ describe("Duplicate Shop Sale prevention", () => {
       dcWeight: 1800,
     });
     const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 0, 0);
-    await postJson(baseUrl, "/api/operations/rate-entry", {
-      tripId: trip.id,
-      rate: 100,
-      deliveries: [{ id: dA, rate: 100 }],
+    await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [{ deliveryId: dA, rate: 100 }],
     });
-    await postJson(baseUrl, `/api/operations/rate-entry/trip/${trip.id}/lock`, {});
+    await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
 
     const first = await postJson(baseUrl, "/api/operations/shop-sales", {
       tripId: trip.id,
@@ -526,20 +518,18 @@ describe("10-day Shop Sales edit window", () => {
       dcWeight: 900,
     });
     const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
-    await postJson(baseUrl, "/api/operations/rate-entry", {
-      tripId: trip.id,
-      rate: 100,
-      deliveries: [{ id: dA, rate: 100 }],
+    await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [{ deliveryId: dA, rate: 100 }],
     });
-    await postJson(baseUrl, `/api/operations/rate-entry/trip/${trip.id}/lock`, {});
+    await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
 
     // The window anchor is rate_locked_at (when Shop Sales actually became
-    // available — see tripDeliverySync.ts editWindowAnchor), not approved_at.
+    // available â€” see tripDeliverySync.ts editWindowAnchor), not approved_at.
     // Backdate rate_locked_at to just under 10 full days before "now" (a
     // small safety margin below the exact boundary avoids test flakiness
     // from the few milliseconds of request latency between computing "now"
     // here and the server evaluating its own `new Date() <= expiresAt`
-    // check) — still inside the window per isTripEditable()'s inclusive
+    // check) â€” still inside the window per isTripEditable()'s inclusive
     // `<=` comparison. approved_at is also backdated so the fallback path
     // is exercised identically for any legacy trip locked before
     // rate_locked_at existed.
@@ -553,7 +543,7 @@ describe("10-day Shop Sales edit window", () => {
     const atDay10 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 120 });
     assert.equal(atDay10.status, 200, "day 10 must still be editable (inclusive boundary)");
 
-    // Backdate to 11 days ago — now past the window.
+    // Backdate to 11 days ago â€” now past the window.
     const elevenDaysAgo = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000).toISOString();
     await pool.query(
       `UPDATE trips SET approved_at = $2, rate_locked_at = $2 WHERE id = $1`,

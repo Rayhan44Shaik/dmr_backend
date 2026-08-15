@@ -14,7 +14,7 @@ export declare const tripsService: {
         full?: boolean;
     }): Promise<TripSummary[] | Trip[] | PaginatedResult<TripSummary>>;
     /**
-     * Trip List — returns ONLY completed/approved, non-deleted trips.
+     * Trip List â€” returns ONLY completed/approved, non-deleted trips.
      * The eligibility rule lives in the SQL WHERE clause (see buildTripListWhere),
      * so the frontend can never pull Draft/Pending/Deleted rows and filter locally.
      */
@@ -29,7 +29,7 @@ export declare const tripsService: {
         pagination?: PaginationParams | null;
     }): Promise<TripSummary[] | PaginatedResult<TripSummary>>;
     /**
-     * Trip List detail — full trip only when eligible (completed + not deleted).
+     * Trip List detail â€” full trip only when eligible (completed + not deleted).
      * A Draft / Pending / Deleted trip id returns 404, so the read-only view can
      * never surface a trip that should not be in the list.
      */
@@ -333,7 +333,7 @@ export declare const tripsService: {
         dcPhotoData?: string | null;
         dcPhotoMime?: string | null;
     }>;
-    /** Autosave engine — partial upsert with optimistic locking */
+    /** Autosave engine â€” partial upsert with optimistic locking */
     save(id: number | null, body: Partial<Trip> & Record<string, unknown>): Promise<{
         resumeStep: TripWizardStep | null;
         resumeStepLabel: string | null;
@@ -641,7 +641,7 @@ export declare const tripsService: {
         dcPhotoData?: string | null;
         dcPhotoMime?: string | null;
     }>;
-    /** Backs GET /trips/vehicle/:vehicleId/last-meter — the Trip Step 1 opening
+    /** Backs GET /trips/vehicle/:vehicleId/last-meter â€” the Trip Step 1 opening
      * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
      * maintenance), not just trip closing meters, while keeping the same
      * response shape the frontend already consumes. */

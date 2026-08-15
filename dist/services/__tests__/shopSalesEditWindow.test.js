@@ -45,7 +45,7 @@ async function makeAgedTrip(f, ageOffsetMs) {
      VALUES ($1, $2, $3, $4, $5, $6, NULL)
      RETURNING id`, [tripId, `SALE-${uniqueInt()}`, shopId, "window-shop", 50, 100]);
     const deliveryId = d.rows[0].id;
-    await rateEntryService.create({ tripId, rate: 40, deliveries: [{ id: deliveryId, rate: 40 }] });
+    await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 40 }] });
     await rateEntryService.lock(tripId, { lockedBy: "window-tester" });
     return { tripId, deliveryId };
 }

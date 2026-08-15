@@ -7,7 +7,7 @@ import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import { computeFarmAmount, computeTotalKm, computeTripKpis, sumDieselFuel, } from "../utils/tripCalculations.js";
 import { loadDcPhoto, syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
-import { generateSaleNo } from "../utils/tripDeliverySync.js";
+import { assertWithinCapacity, generateSaleNo } from "../utils/tripDeliverySync.js";
 import { getLatestVehicleMeter, lockVehicleForMeterWrite, preciseIsoOrUndefined, validateVehicleMeter, } from "../utils/vehicleMeterLedger.js";
 import { assertStepOrder, getResumeLabel, getResumeStep, getWizardProgress, } from "../utils/tripResume.js";
 import { assertTripResourcesAvailable } from "../validation/tripResourceValidation.js";
@@ -148,9 +148,9 @@ function normalizeTripTimestamp(value) {
 }
 /**
  * Derived per-step wizard state used by the UI:
- *  - "completed"    → step was successfully submitted (server flag)
- *  - "saved"        → partial data persisted but step not submitted
- *  - "not_started"  → no meaningful data for the step
+ *  - "completed"    â†’ step was successfully submitted (server flag)
+ *  - "saved"        â†’ partial data persisted but step not submitted
+ *  - "not_started"  â†’ no meaningful data for the step
  */
 function computeStepStatuses(src, counts) {
     const startSaved = Boolean(src.vehicleId) ||
@@ -406,7 +406,65 @@ async function replaceBoxes(client, tripId, boxes = []) {
         await client.query(`INSERT INTO trip_boxes (trip_id, box_no, birds, weight) VALUES ($1,$2,$3,$4)`, [tripId, box.boxNo, box.birds ?? 0, box.weight ?? 0]);
     }
 }
+/**
+ * Trip Entry Step 4 (Deliveries) capacity guard â€” backend-authoritative,
+ * mirrors the same rule already proven correct for Shop Sales edits
+ * (assertWithinCapacity / sumActiveDeliveries in tripDeliverySync.ts, and
+ * shopSalesService.ts's lockTrip()): the sum of every shop delivery's birds
+ * PLUS mortality must never exceed the trip's originally loaded birds, and
+ * the sum of every delivery's weight PLUS mortality-weight must never
+ * exceed the originally loaded weight. Birds and weight are independent â€”
+ * neither is derived from the other.
+ *
+ * replaceDeliveries() below is a full delete+reinsert of the whole delivery
+ * list in one call (not a single-row edit like Shop Sales), so there is no
+ * "existing minus self" to exclude â€” every row in the incoming `deliveries`
+ * array is summed against the trip's own capacity. The trip row is locked
+ * FOR UPDATE first (same pattern already proven correct under real
+ * concurrency for Shop Sales in shopSalesService.ts) so two concurrent Step
+ * 4 submissions for the same trip can never both race past capacity.
+ */
+async function assertDeliveriesWithinCapacity(client, tripId, deliveries) {
+    const tripRow = await client.query(`SELECT farm_bird_count, farm_load_weight, total_birds, dc_weight
+       FROM trips WHERE id = $1 FOR UPDATE`, [tripId]);
+    if (!tripRow.rowCount)
+        return; // caller already guarantees the trip exists
+    const row = tripRow.rows[0];
+    const farmBirdCount = num(row.farm_bird_count);
+    const farmLoadWeight = num(row.farm_load_weight);
+    const capacityBirds = farmBirdCount > 0 ? farmBirdCount : num(row.total_birds);
+    const capacityWeight = farmLoadWeight > 0 ? farmLoadWeight : num(row.dc_weight);
+    let totalBirds = 0;
+    let totalWeight = 0;
+    for (const d of deliveries) {
+        const birds = Number(d.birds ?? 0);
+        const weight = Number(d.weight ?? 0);
+        if (!Number.isInteger(birds) || birds < 0) {
+            throw new AppError(422, `Shop delivery birds must be a non-negative whole number (got ${d.birds}).`);
+        }
+        if (!Number.isFinite(weight) || weight < 0) {
+            throw new AppError(422, `Shop delivery weight must be a non-negative number (got ${d.weight}).`);
+        }
+        totalBirds += birds + Number(d.mortality ?? 0);
+        totalWeight += weight + Number(d.mortKg ?? 0);
+    }
+    assertWithinCapacity({
+        label: "birds",
+        available: capacityBirds,
+        alreadyAllocated: 0,
+        requested: totalBirds,
+    });
+    assertWithinCapacity({
+        label: "weight",
+        available: capacityWeight,
+        alreadyAllocated: 0,
+        requested: totalWeight,
+    });
+}
 async function replaceDeliveries(client, tripId, deliveries = []) {
+    if (deliveries.length > 0) {
+        await assertDeliveriesWithinCapacity(client, tripId, deliveries);
+    }
     await client.query(`DELETE FROM trip_deliveries WHERE trip_id = $1`, [tripId]);
     if (deliveries.length === 0)
         return;
@@ -414,7 +472,7 @@ async function replaceDeliveries(client, tripId, deliveries = []) {
     // existing "<tripNo>-S<seq>" format also used by shopSalesService.ts for
     // post-completion Shop Sales edits. This wizard path (Step 4, Draft/Pending
     // trips) never populated it, which is exactly why new inserts here started
-    // violating the constraint — reuse the same generateSaleNo() rather than
+    // violating the constraint â€” reuse the same generateSaleNo() rather than
     // inventing a second numbering scheme. Full delete+reinsert (existing
     // behavior above) means the per-trip sequence restarts each save; that is
     // unchanged from how serial_no/id already behave for this same function.
@@ -528,12 +586,12 @@ function buildListWhere(filters) {
     const params = [];
     // A caller explicitly filtering status=Deleted is asking for deleted trips
     // by definition (soft-delete always sets status='Deleted'), so the default
-    // "hide deleted" clause must not be ANDed in — otherwise the two clauses
+    // "hide deleted" clause must not be ANDed in â€” otherwise the two clauses
     // contradict each other and the query always returns zero rows.
     if (!filters.includeDeleted && filters.status !== "Deleted") {
         clauses.push(`deleted = FALSE`);
         // A trip whose `status` is 'Deleted' is deleted even if the boolean flag
-        // was left inconsistent by a legacy write path — never list it again.
+        // was left inconsistent by a legacy write path â€” never list it again.
         if (!filters.status) {
             clauses.push(`status <> 'Deleted'`);
         }
@@ -568,11 +626,11 @@ function buildListWhere(filters) {
     };
 }
 /**
- * Trip List query — read-only historical view.
+ * Trip List query â€” read-only historical view.
  *
  * Eligibility is enforced IN THE DATABASE, never in the caller:
- *   • only `status = 'Completed'` trips (the system's completed/approved state)
- *   • only `deleted = FALSE` rows
+ *   â€¢ only `status = 'Completed'` trips (the system's completed/approved state)
+ *   â€¢ only `deleted = FALSE` rows
  * Draft / Pending / Deleted / soft-deleted / inconsistent rows are excluded
  * by the WHERE clause itself, regardless of any filter the client sends.
  */
@@ -687,7 +745,7 @@ export const tripsService = {
         return result.rows.map(toTripSummary);
     },
     /**
-     * Trip List — returns ONLY completed/approved, non-deleted trips.
+     * Trip List â€” returns ONLY completed/approved, non-deleted trips.
      * The eligibility rule lives in the SQL WHERE clause (see buildTripListWhere),
      * so the frontend can never pull Draft/Pending/Deleted rows and filter locally.
      */
@@ -710,7 +768,7 @@ export const tripsService = {
         return result.rows.map(toTripSummary);
     },
     /**
-     * Trip List detail — full trip only when eligible (completed + not deleted).
+     * Trip List detail â€” full trip only when eligible (completed + not deleted).
      * A Draft / Pending / Deleted trip id returns 404, so the read-only view can
      * never surface a trip that should not be in the list.
      */
@@ -793,7 +851,7 @@ export const tripsService = {
                 return {
                     ...trip,
                     resumeStep: getResumeStep(flags) ?? "start",
-                    resumeStepLabel: getResumeLabel(flags) ?? "Step 1 — Trip Header",
+                    resumeStepLabel: getResumeLabel(flags) ?? "Step 1 â€” Trip Header",
                     wizardProgress: getWizardProgress(flags),
                     stepStatuses: computeStepStatuses(trip, {
                         boxCount: trip.boxDetails.length,
@@ -808,7 +866,7 @@ export const tripsService = {
             }
         });
     },
-    /** Autosave engine — partial upsert with optimistic locking */
+    /** Autosave engine â€” partial upsert with optimistic locking */
     async save(id, body) {
         parseTripAutosave(body);
         // Deletion is permanent and atomic: whenever a write marks a trip deleted
@@ -858,7 +916,7 @@ export const tripsService = {
                     // A new trip is numbered ONLY by the server. Never trust a
                     // client-supplied tripNo here: a stale value forwarded by the UI
                     // collides with trips_trip_no_key (23505) and surfaces to the user
-                    // as the Generic "Duplicate record" 409 — even for a different vehicle.
+                    // as the Generic "Duplicate record" 409 â€” even for a different vehicle.
                     const tripNo = await generateTripNo(client, tripDate);
                     const inserted = await client.query(`INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,$3) RETURNING id`, [tripNo, tripDate, body.status ?? "Draft"]);
                     tripId = num(inserted.rows[0].id);
@@ -869,14 +927,14 @@ export const tripsService = {
                 // ---- Universal vehicle meter validation ----
                 // Only runs on a real step submission (start/expenses), never on
                 // "Save Progress" autosave (submitStep already strips these flags for
-                // autosave bodies before calling save() — see submitStep below), so
+                // autosave bodies before calling save() â€” see submitStep below), so
                 // partial in-progress drafts are never blocked mid-entry.
                 if (body.startStepSubmitted === true || body.expensesStepSubmitted === true) {
                     const vehicleIdForMeter = numOrNull(body.vehicleId) ?? (existing ? numOrNull(existing.rows[0].vehicle_id) : null);
                     if (vehicleIdForMeter == null) {
                         throw new AppError(422, "A vehicle must be selected before submitting this step.");
                     }
-                    // The trip's business date — primary chronological key (see the
+                    // The trip's business date â€” primary chronological key (see the
                     // vehicle_meter_events view's comment for why date, not timestamp,
                     // is primary: it keeps same-day cross-module comparisons fair).
                     const tripBusinessDate = dateOnly(body.tripDate) ?? (existing ? dateOnly(existing.rows[0].trip_date) : null);
@@ -892,7 +950,7 @@ export const tripsService = {
                             (existing ? numOrNull(existing.rows[0].opening_meter) : null);
                         if (effectiveOpening != null) {
                             // On a re-submit/edit, prefer the trip's own already-persisted
-                            // instant over "now" — matches the view's own COALESCE so a
+                            // instant over "now" â€” matches the view's own COALESCE so a
                             // re-validated edit is compared against the SAME neighbors it
                             // originally had, not shoved past every same-day record created
                             // since (see fleetMaintenanceService.update() for the same fix).
@@ -946,7 +1004,7 @@ export const tripsService = {
                         // rule where a meter reading is actually persisted. Self-excluded
                         // via the diesel row's own already-synced fuel_expenses record
                         // (identity: trip_id + trip_fuel_entry_index, source_type='TRIP'
-                        // — see tripFuelSync.ts) so re-submitting the same value never
+                        // â€” see tripFuelSync.ts) so re-submitting the same value never
                         // compares a reading against itself.
                         for (const entry of dieselEntries) {
                             const meter = numOrNull(entry.meter);
@@ -1138,7 +1196,7 @@ export const tripsService = {
                     body.weightLoss ?? null,
                     body.survivalRate ?? null,
                     body.lastShop ?? null,
-                    // rate_completed is never accepted from the client here — it is
+                    // rate_completed is never accepted from the client here â€” it is
                     // exclusively written by rateEntryService.lock() (in sync with
                     // rate_entry.locked), so a generic trip save can never
                     // independently declare a trip "rate complete". Always passing
@@ -1217,6 +1275,9 @@ export const tripsService = {
                     await replaceBoxes(client, tripId, body.boxDetails);
                 }
                 if (body.deliveries) {
+                    if (existing && existing.rowCount && Boolean(existing.rows[0].rate_completed)) {
+                        throw new AppError(409, "Cannot modify deliveries — trip rates are locked by Rate Entry", { tripId });
+                    }
                     await replaceDeliveries(client, tripId, body.deliveries);
                 }
                 if (dieselEntries.length || body.dieselEntries) {
@@ -1386,7 +1447,7 @@ export const tripsService = {
                 }
             }
             // Diesel bills synced to fuel_expenses get Approved only when the whole
-            // trip completion succeeds — same transaction, so failure rolls both back.
+            // trip completion succeeds â€” same transaction, so failure rolls both back.
             if (status === "Completed") {
                 await client.query(`UPDATE fuel_expenses
              SET status = 'Approved', approved_by = $2, approved_date = NOW(),
@@ -1398,7 +1459,7 @@ export const tripsService = {
             return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
         });
     },
-    /** Backs GET /trips/vehicle/:vehicleId/last-meter — the Trip Step 1 opening
+    /** Backs GET /trips/vehicle/:vehicleId/last-meter â€” the Trip Step 1 opening
      * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
      * maintenance), not just trip closing meters, while keeping the same
      * response shape the frontend already consumes. */
