@@ -135,6 +135,16 @@ export declare const salaryStatusPatchSchema: z.ZodObject<{
 }, {
     status: "Pending";
 }>;
+export interface SalarySubmitBody {
+    submittedBy?: string;
+}
+export declare const salarySubmitSchema: z.ZodObject<{
+    submittedBy: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
+}, "strip", z.ZodTypeAny, {
+    submittedBy?: string | undefined;
+}, {
+    submittedBy?: unknown;
+}>;
 export interface SalaryPayBody {
     paymentDate: string;
     paymentMode: PaymentMode;

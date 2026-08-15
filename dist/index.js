@@ -24,6 +24,7 @@ app.get("/", (_req, res) => {
             operations: {
                 dashboard: "GET /api/operations/dashboard",
                 trips: "GET|POST /api/operations/trips",
+                tripList: "GET /api/operations/trip-list",
                 shopRates: "GET|POST /api/operations/shop-rates",
                 shopSales: "GET|POST /api/operations/shop-sales",
                 collections: "GET|POST /api/operations/collections",

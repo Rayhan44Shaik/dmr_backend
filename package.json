@@ -13,7 +13,7 @@
     "seed:demo": "tsx src/scripts/seed-demo-data.ts",
     "fuel:reconcile": "tsx src/scripts/reconcileTripFuel.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test tests/tripList.test.ts tests/bulkImport.test.ts",
+    "test": "node --import tsx --test tests/tripList.test.ts tests/bulkImport.test.ts tests/salaryLifecycle.test.ts tests/dutyPlannerWeekly.test.ts",
     "test:typecheck": "tsc -p tsconfig.tests.json"
   },
   "dependencies": {

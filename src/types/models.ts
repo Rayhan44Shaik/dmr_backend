@@ -337,12 +337,15 @@ export interface SalaryRecord {
   otherDeductions: number;
   totalDeductions: number;
   netSalary: number;
-  status: "Pending" | "Paid";
+  status: "Pending" | "Submitted" | "Paid";
   paymentDate?: string | null;
   /** Accounts payment number (PAY-...) written by the payment operation. */
   paymentRef?: string | null;
   /** TIMESTAMPTZ of the Pending → Paid transition (payment operation). */
   paidAt?: string | null;
+  /** TIMESTAMPTZ + actor of the Draft → Submitted (frozen) transition. */
+  submittedAt?: string | null;
+  submittedBy?: string | null;
   createdAt: string;
   /** Derived at read time from the authoritative Duty Planner attendance
    *  summary (duty_assignments + approved leave) — never stored. */

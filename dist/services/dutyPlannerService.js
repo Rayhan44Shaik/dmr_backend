@@ -104,6 +104,11 @@ export async function getDutyWeek(weekStart) {
     const days = weekDays(ms);
     const weekEnd = days[6].date;
     const week = await getOrCreateWeek(ms, weekEnd);
+    // Completed weeks (Sunday 23:59:59 already passed) are permanently closed,
+    // regardless of what their stored status says. "today" is the business date
+    // (server-local calendar date, matching the existing date handling).
+    const today = dateOnly(new Date()) ?? "";
+    const effectiveStatus = weekEnd < today ? "Closed" : week.status;
     const [empRes, leaves, assignRes, vehRes, tripRes, maintRes] = await Promise.all([
         query("SELECT id, employee_no, employee_name, department, role, status, license_number FROM employees ORDER BY employee_no"),
         query("SELECT employee_id, from_date, to_date FROM leave_requests WHERE status='Approved'"),
@@ -182,7 +187,7 @@ export async function getDutyWeek(weekStart) {
     return {
         weekStart: ms,
         weekEnd,
-        status: week.status,
+        status: effectiveStatus,
         allRoles,
         days,
         employees,
@@ -362,12 +367,17 @@ export async function submitWeek(weekStart, submittedBy = "user") {
     const week = await getDutyWeek(ms);
     if (week.status === "Locked")
         throw new AppError(409, "This week is locked.");
+    if (week.status === "Submitted")
+        throw new AppError(409, "This week has already been submitted and cannot be submitted again.");
+    if (week.status === "Closed") {
+        throw new AppError(409, "This week is closed — previous completed weeks cannot be submitted.");
+    }
     if (!week.validation.ok && week.validation.problems.length)
         throw new AppError(422, "Cannot submit: " + week.validation.problems.length + " critical issue(s) found. " + week.validation.problems.join("; "));
     await query("UPDATE duty_weeks SET status='Submitted', submitted_at=NOW(), submitted_by=$2 WHERE week_start=$1", [ms, submittedBy]);
     return getDutyWeek(ms);
 }
-export async function getWeekStatus(weekStart) { const ms = mondayOf(weekStart); const week = await getOrCreateWeek(ms, weekDays(ms)[6].date); return { weekStart: ms, weekEnd: weekDays(ms)[6].date, status: week.status }; }
+export async function getWeekStatus(weekStart) { const ms = mondayOf(weekStart); const week = await getOrCreateWeek(ms, weekDays(ms)[6].date); const today = dateOnly(new Date()) ?? ""; const weekEnd = weekDays(ms)[6].date; const status = weekEnd < today ? "Closed" : week.status; return { weekStart: ms, weekEnd, status }; }
 export async function getAttendanceSummary(month) {
     const empRes = await query("SELECT id, employee_name, department FROM employees");
     const duties = await query("SELECT e.id employee_id, d.duty_date, d.duty_type FROM employees e LEFT JOIN duty_assignments d ON d.employee_id = e.id AND to_char(d.duty_date, 'YYYY-MM') = $1", [month]);

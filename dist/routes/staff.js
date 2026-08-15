@@ -2,7 +2,7 @@ import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { staffService } from "../services/staffService.js";
 import { dutyPlannerService } from "../services/dutyPlannerService.js";
-import { parseBody, salaryGenerateSchema, salaryListQuerySchema, salaryStatusPatchSchema, } from "../validation/salary.js";
+import { parseBody, salaryGenerateSchema, salaryListQuerySchema, salaryStatusPatchSchema, salarySubmitSchema, } from "../validation/salary.js";
 export const staffRouter = Router();
 // Duty Planner
 staffRouter.get("/duties", asyncHandler(async (req, res) => {
@@ -46,6 +46,13 @@ staffRouter.post("/salaries", asyncHandler(async (req, res) => {
 }));
 staffRouter.put("/salaries", asyncHandler(async (req, res) => {
     res.json(await staffService.upsertSalary(req.body));
+}));
+// Submit (Draft → Submitted): freezes the record. Registered before the
+// /:id PUT route so "submit" is never parsed as a record id.
+staffRouter.post("/salaries/:id/submit", asyncHandler(async (req, res) => {
+    parseBody(salarySubmitSchema, req.body);
+    const submittedBy = typeof req.body?.submittedBy === "string" ? req.body.submittedBy : "user";
+    res.json(await staffService.submitSalary(req.params.id, submittedBy));
 }));
 staffRouter.patch("/salaries/:id/status", asyncHandler(async (req, res) => {
     // Only { status: "Pending" } is accepted here; Pending → Paid is reserved

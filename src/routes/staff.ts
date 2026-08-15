@@ -7,6 +7,7 @@ import {
   salaryGenerateSchema,
   salaryListQuerySchema,
   salaryStatusPatchSchema,
+  salarySubmitSchema,
 } from "../validation/salary.js";
 import type {
   SalaryGenerateBody,
@@ -111,6 +112,17 @@ staffRouter.put(
   "/salaries",
   asyncHandler(async (req, res) => {
     res.json(await staffService.upsertSalary(req.body));
+  })
+);
+
+// Submit (Draft → Submitted): freezes the record. Registered before the
+// /:id PUT route so "submit" is never parsed as a record id.
+staffRouter.post(
+  "/salaries/:id/submit",
+  asyncHandler(async (req, res) => {
+    parseBody(salarySubmitSchema, req.body);
+    const submittedBy = typeof req.body?.submittedBy === "string" ? req.body.submittedBy : "user";
+    res.json(await staffService.submitSalary(req.params.id, submittedBy));
   })
 );
 

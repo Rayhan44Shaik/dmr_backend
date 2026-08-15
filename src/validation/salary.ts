@@ -145,6 +145,19 @@ export const salaryStatusPatchSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Submit body (POST /salaries/:id/submit). The record is frozen (Pending ->
+// Submitted). submittedBy is optional audit metadata; no salary component or
+// lifecycle field is accepted from the client.
+// ---------------------------------------------------------------------------
+export interface SalarySubmitBody {
+  submittedBy?: string;
+}
+
+export const salarySubmitSchema = z.object({
+  submittedBy: z.preprocess(trimmed, z.string().optional()),
+});
+
+// ---------------------------------------------------------------------------
 // Payment body (POST /salaries/:id/pay).
 // ---------------------------------------------------------------------------
 export interface SalaryPayBody {

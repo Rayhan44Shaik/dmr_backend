@@ -82,6 +82,9 @@ export const salaryStatusPatchSchema = z.object({
         }),
     }),
 });
+export const salarySubmitSchema = z.object({
+    submittedBy: z.preprocess(trimmed, z.string().optional()),
+});
 export const salaryPaySchema = z.object({
     paymentDate: dateString,
     paymentMode: z.enum(PAYMENT_MODES),

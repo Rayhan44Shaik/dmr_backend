@@ -30,8 +30,13 @@ export declare const staffService: {
         baseSalary: number;
     }>;
     createSalary(body: unknown): Promise<SalaryRecord>;
-    /** PUT /salaries/:id — only Pending records are editable; totals are always
-     *  recomputed on the backend from the supplied components. */
+    /** POST /salaries/:id/submit — Draft (Pending) → Submitted. Freezes the row:
+     *  no normal editing afterwards. Only Draft records can be submitted, and a
+     *  closed payroll month rejects submission. */
+    submitSalary(id: string, submittedBy?: string): Promise<SalaryRecord>;
+    /** PUT /salaries/:id — only Draft (Pending) records are editable; Submitted
+     *  and Paid records are frozen. Totals are always recomputed on the backend
+     *  from the supplied components. A closed payroll month rejects all edits. */
     updateSalaryById(id: string, body: unknown): Promise<SalaryRecord>;
     /**
      * Backward-compatible upsert (POST /salaries + PUT /salaries + seed script):
@@ -48,9 +53,17 @@ export declare const staffService: {
      *  payment linkage. Any failure rolls everything back — payment and counter
      *  increment included — leaving the salary Pending. */
     paySalary(id: string, body: unknown): Promise<SalaryRecord>;
-    /** PATCH /salaries/:id/status. Only target "Pending" is possible (validated
-     *  in the route); this is an idempotent no-op that never reaches "Paid" —
-     *  Pending → Paid is reserved for paySalary(). */
+    /** PATCH /salaries/:id/status. Only target "Pending" is accepted by the route,
+     *  but that single operation means different things depending on the current
+     *  record state:
+     *    - Pending   → Pending : idempotent no-op.
+     *    - Submitted → Pending : un-submit (back to editable Draft) for correction.
+     *    - Paid      → Pending : Mark-Unpaid — ONLY allowed inside the 7 calendar-day
+     *                            correction window measured from paid_at. After the
+     *                            window the record (and the whole month once all
+     *                            records are paid) is permanently locked.
+     *  Pending → Paid remains reserved for paySalary(). A closed payroll month
+     *  rejects every transition. */
     updateSalaryStatus(id: string): Promise<SalaryRecord>;
     deleteSalary(id: string): Promise<{
         id: string;

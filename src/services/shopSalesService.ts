@@ -12,6 +12,7 @@ import {
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import {
   assertOpsStatus,
+  assertShopSaleRateInRange,
   parseBody,
   shopSaleBodySchema,
 } from "../validation/operations.js";
@@ -401,32 +402,34 @@ export const shopSalesService = {
   },
 
   /**
-   * Reaching this function already requires the trip's Rate Entry to be
-   * locked (assertRateEntryLocked below) — so `rate`/`amount` are always
-   * the LOCKED price at this point, never an unpriced placeholder. Once
-   * locked, the price is immutable: Shop Sales may only correct
-   * birds/weight/mortality/remarks/bird type, never re-price a delivery or
-   * reassign it to a different shop/trip. A client that includes
-   * rate/amount/shopId/shopName/tripId in the request body is rejected
-   * outright (409) rather than having those fields silently dropped, so
-   * the immutability is an explicit, visible contract rather than a
-   * side-effect of which SQL columns happen to be in the UPDATE.
+   * Rate Entry LOCKED only means "this trip has moved from Rate Entry into
+   * Shop Sales" — it is NOT rate immutability. Within the 10-day Shop
+   * Sales edit window (assertTripEditable below — the same window that
+   * already gates birds/weight/delete), birds, weight, AND rate may all be
+   * corrected, each subject to its own validation (capacity for
+   * birds/weight, ₹50–₹300 for rate). Shop/trip reassignment remains
+   * permanently blocked — the data model has no safe way to reassign a
+   * delivery to a different shop/trip, independent of the edit window.
+   * Once the 10-day window closes, assertTripEditable rejects the whole
+   * update (birds, weight, rate, everything) — that is the real "Shop
+   * Sales trip locked" state, not rate_entry.locked.
    */
   async update(id: number, body: unknown) {
     const data = parseBody(shopSaleBodySchema.partial(), body);
 
     const lockedFields = (
-      ["rate", "amount", "shopId", "shopName", "tripId"] as const
+      ["amount", "shopId", "shopName", "tripId"] as const
     ).filter((field) => data[field] !== undefined);
     if (lockedFields.length) {
       throw new AppError(
         409,
-        `Cannot modify ${lockedFields.join(", ")} on a Shop Sale — the shop, trip, and rate are ` +
-          `locked once Rate Entry has been locked. Only birds, weight, mortality, bird type, and ` +
-          `remarks may be corrected.`,
+        `Cannot modify ${lockedFields.join(", ")} on a Shop Sale — the shop and trip relationship ` +
+          `are permanently fixed once created. Birds, weight, rate, mortality, bird type, and ` +
+          `remarks may be corrected within the 10-day edit window.`,
         { lockedFields }
       );
     }
+    if (data.rate != null) assertShopSaleRateInRange(data.rate);
 
     return withTransaction(async (client) => {
       try {
@@ -453,10 +456,10 @@ export const shopSalesService = {
 
         const birds = data.birds ?? num(current.birds);
         const weight = data.weight ?? num(current.weight);
-        // rate is never client-supplied here (rejected above) — always the
-        // currently-locked price, recomputing amount only for the possibly
-        // edited weight.
-        const rate = Number(current.rate ?? 0);
+        // Rate is editable within the 10-day window (already asserted via
+        // assertTripEditable above), range-checked above; otherwise carry
+        // the existing persisted rate forward unchanged.
+        const rate = data.rate ?? Number(current.rate ?? 0);
         const mortalityCount = data.mortality ?? num(current.mortality);
         // mort_kg isn't editable via Shop Sales — carry the row's existing
         // value forward into the capacity check unchanged.
@@ -479,8 +482,8 @@ export const shopSalesService = {
           requested: weight + mortalityWeight,
         });
 
-        // amount is always server-computed from the locked rate — client-
-        // supplied amount is never read.
+        // amount is always server-computed from weight × the effective rate
+        // (possibly just-edited above) — client-supplied amount is never read.
         const amount = Number((weight * rate).toFixed(2));
 
         const result = await client.query(

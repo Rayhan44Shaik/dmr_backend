@@ -60,6 +60,8 @@ function mapSalary(row) {
         paymentDate: dateOnly(row.payment_date),
         paymentRef: row.payment_ref == null ? null : str(row.payment_ref),
         paidAt: isoOrNull(row.paid_at),
+        submittedAt: isoOrNull(row.submitted_at),
+        submittedBy: row.submitted_by == null ? null : str(row.submitted_by),
         createdAt: isoOrNull(row.created_at) ?? "",
     };
 }
@@ -91,6 +93,41 @@ function mapAttendance(row) {
         leaveCount: num(row.leave_count),
         halfDayCount: num(row.half_day_count),
     };
+}
+// ---------------------------------------------------------------------------
+// Salary lifecycle helpers.
+//
+// Lifecycle: Draft (Pending) -> Submitted (frozen) -> Paid (frozen).
+// The 7 calendar-day correction window starts at paid_at; while it is open the
+// ONLY lifecycle operation on a Paid row is Mark-Unpaid (Paid -> Pending).
+// After expiry the record, and a payroll month in which every record is Paid
+// with an expired window, are permanently locked. Every mutation below is
+// additionally guarded at the DB level by the trg_salary_lifecycle trigger.
+// ---------------------------------------------------------------------------
+const SALARY_CORRECTION_DAYS = 7;
+/** A payroll month is "closed" once it has records and every one of them is
+ *  Paid with an expired correction window. A closed month rejects all
+ *  mutations, so an older finalized payroll month can never be edited
+ *  accidentally (or bypassed) regardless of frontend state. */
+async function salaryMonthIsClosed(month) {
+    const res = await query(`SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status <> 'Paid') AS not_paid,
+            COUNT(*) FILTER (WHERE paid_at IS NULL OR paid_at + INTERVAL '7 days' <= NOW()) AS expired
+     FROM salary_records WHERE month = $1`, [month]);
+    const row = res.rows[0];
+    const total = num(row.total);
+    if (!total)
+        return false;
+    return num(row.not_paid) === 0 && num(row.expired) === total;
+}
+/** true once paid_at's 7-calendar-day correction window has elapsed. */
+function correctionWindowExpired(paidAt) {
+    if (!paidAt)
+        return true;
+    const ms = new Date(paidAt).getTime();
+    if (!Number.isFinite(ms))
+        return true;
+    return ms + SALARY_CORRECTION_DAYS * 86_400_000 < Date.now();
 }
 export const staffService = {
     // ── Duty Planner ──────────────────────────────────────────────
@@ -260,6 +297,9 @@ export const staffService = {
     },
     async createSalary(body) {
         const data = parseBody(salaryCreateSchema, body);
+        if (await salaryMonthIsClosed(str(data.month))) {
+            throw new AppError(409, "This payroll month is closed — new salary records cannot be created");
+        }
         const emp = await this.resolveEmployeeBase(data.employeeId);
         const dup = await query("SELECT id FROM salary_records WHERE employee_id = $1 AND month = $2", [data.employeeId, data.month]);
         if (dup.rowCount) {
@@ -304,16 +344,50 @@ export const staffService = {
         ]);
         return mapSalary(result.rows[0]);
     },
-    /** PUT /salaries/:id — only Pending records are editable; totals are always
-     *  recomputed on the backend from the supplied components. */
+    /** POST /salaries/:id/submit — Draft (Pending) → Submitted. Freezes the row:
+     *  no normal editing afterwards. Only Draft records can be submitted, and a
+     *  closed payroll month rejects submission. */
+    async submitSalary(id, submittedBy = "user") {
+        const existing = await query("SELECT * FROM salary_records WHERE id = $1", [id]);
+        if (!existing.rowCount)
+            throw new AppError(404, "Salary record not found");
+        const row = existing.rows[0];
+        if (await salaryMonthIsClosed(str(row.month))) {
+            throw new AppError(409, "This payroll month is closed and cannot be modified");
+        }
+        if (row.status === "Submitted") {
+            throw new AppError(409, "Salary record is already submitted");
+        }
+        if (row.status === "Paid") {
+            throw new AppError(409, "Paid salary records cannot be submitted");
+        }
+        if (row.status !== "Pending") {
+            throw new AppError(409, "Salary record is not in a submittable (Pending) state");
+        }
+        const updated = await query(`UPDATE salary_records SET status = 'Submitted', submitted_at = NOW(), submitted_by = $2
+       WHERE id = $1 AND status = 'Pending'
+       RETURNING *`, [id, submittedBy]);
+        if (!updated.rowCount) {
+            throw new AppError(409, "Salary record could not be submitted (state changed unexpectedly)");
+        }
+        return mapSalary(updated.rows[0]);
+    },
+    /** PUT /salaries/:id — only Draft (Pending) records are editable; Submitted
+     *  and Paid records are frozen. Totals are always recomputed on the backend
+     *  from the supplied components. A closed payroll month rejects all edits. */
     async updateSalaryById(id, body) {
         const data = parseBody(salaryUpdateSchema, body);
         const existing = await query("SELECT * FROM salary_records WHERE id = $1", [id]);
         if (!existing.rowCount)
             throw new AppError(404, "Salary record not found");
         const row = existing.rows[0];
-        if (row.status === "Paid") {
-            throw new AppError(409, "Paid salary records cannot be edited");
+        if (await salaryMonthIsClosed(str(row.month))) {
+            throw new AppError(409, "This payroll month is closed and cannot be modified");
+        }
+        if (row.status !== "Pending") {
+            throw new AppError(409, row.status === "Paid"
+                ? "Paid salary records cannot be edited"
+                : "Submitted salary records are frozen and cannot be edited");
         }
         const totals = salaryCalculationService.calculateTotals({
             basicSalary: data.basicSalary ?? num(row.basic_salary),
@@ -390,8 +464,11 @@ export const staffService = {
                 if (!locked.rowCount)
                     throw new AppError(404, "Salary record not found");
                 const row = locked.rows[0];
-                if (row.status !== "Pending") {
-                    throw new AppError(409, "Salary is not Pending — it cannot be paid again");
+                if (await salaryMonthIsClosed(str(row.month))) {
+                    throw new AppError(409, "This payroll month is closed and cannot be modified");
+                }
+                if (row.status !== "Pending" && row.status !== "Submitted") {
+                    throw new AppError(409, "Salary is not Pending or Submitted — it cannot be paid again");
                 }
                 if (row.payment_ref != null) {
                     throw new AppError(409, "Duplicate payment — this salary already has a payment reference");
@@ -414,7 +491,7 @@ export const staffService = {
                 }, client);
                 const updated = await client.query(`UPDATE salary_records SET
              status = 'Paid', payment_ref = $2, payment_date = $3, paid_at = NOW()
-           WHERE id = $1 AND status = 'Pending' AND payment_ref IS NULL
+           WHERE id = $1 AND status IN ('Pending','Submitted') AND payment_ref IS NULL
            RETURNING *`, [id, payment.paymentNo, data.paymentDate]);
                 if (!updated.rowCount) {
                     // Concurrency safety net — the row changed under us despite the lock.
@@ -430,28 +507,74 @@ export const staffService = {
             }
         });
     },
-    /** PATCH /salaries/:id/status. Only target "Pending" is possible (validated
-     *  in the route); this is an idempotent no-op that never reaches "Paid" —
-     *  Pending → Paid is reserved for paySalary(). */
+    /** PATCH /salaries/:id/status. Only target "Pending" is accepted by the route,
+     *  but that single operation means different things depending on the current
+     *  record state:
+     *    - Pending   → Pending : idempotent no-op.
+     *    - Submitted → Pending : un-submit (back to editable Draft) for correction.
+     *    - Paid      → Pending : Mark-Unpaid — ONLY allowed inside the 7 calendar-day
+     *                            correction window measured from paid_at. After the
+     *                            window the record (and the whole month once all
+     *                            records are paid) is permanently locked.
+     *  Pending → Paid remains reserved for paySalary(). A closed payroll month
+     *  rejects every transition. */
     async updateSalaryStatus(id) {
         const existing = await query("SELECT * FROM salary_records WHERE id = $1", [id]);
         if (!existing.rowCount)
             throw new AppError(404, "Salary record not found");
         const row = existing.rows[0];
-        if (row.status === "Paid") {
-            throw new AppError(409, "Paid salary cannot be moved back to Pending");
+        const month = str(row.month);
+        if (await salaryMonthIsClosed(month)) {
+            throw new AppError(409, "This payroll month is closed and cannot be modified");
         }
-        const records = await this.enrichAttendance([mapSalary(row)], [str(row.month)]);
-        return records[0];
+        if (row.status === "Pending") {
+            const records = await this.enrichAttendance([mapSalary(row)], [month]);
+            return records[0];
+        }
+        if (row.status === "Submitted") {
+            const updated = await query(`UPDATE salary_records SET status = 'Pending', submitted_at = NULL, submitted_by = NULL
+         WHERE id = $1 AND status = 'Submitted'
+         RETURNING *`, [id]);
+            if (!updated.rowCount) {
+                throw new AppError(409, "Salary could not be moved back to draft (state changed unexpectedly)");
+            }
+            const records = await this.enrichAttendance([mapSalary(updated.rows[0])], [month]);
+            return records[0];
+        }
+        // Paid → Pending (Mark-Unpaid): correction window only.
+        if (row.status === "Paid") {
+            if (correctionWindowExpired(row.paid_at == null ? null : String(row.paid_at))) {
+                throw new AppError(409, "Correction window expired — paid salaries are permanently locked 7 calendar days after payment");
+            }
+            const updated = await query(`UPDATE salary_records SET
+           status = 'Pending', payment_ref = NULL, payment_date = NULL, paid_at = NULL
+         WHERE id = $1 AND status = 'Paid' AND paid_at = $2::timestamptz
+         RETURNING *`, [id, row.paid_at]);
+            if (!updated.rowCount) {
+                throw new AppError(409, "Paid salary could not be reverted for correction (state changed unexpectedly)");
+            }
+            const records = await this.enrichAttendance([mapSalary(updated.rows[0])], [month]);
+            return records[0];
+        }
+        throw new AppError(409, "Salary record is not in a supported lifecycle state and cannot be modified");
     },
     async deleteSalary(id) {
-        const existing = await query("SELECT status FROM salary_records WHERE id = $1", [id]);
+        const existing = await query("SELECT status, month FROM salary_records WHERE id = $1", [id]);
         if (!existing.rowCount)
             throw new AppError(404, "Salary record not found");
-        if (existing.rows[0].status === "Paid") {
-            throw new AppError(409, "Paid salary records cannot be deleted");
+        const row = existing.rows[0];
+        if (await salaryMonthIsClosed(str(row.month))) {
+            throw new AppError(409, "This payroll month is closed and cannot be modified");
         }
-        await query("DELETE FROM salary_records WHERE id = $1 AND status = 'Pending'", [id]);
+        if (row.status !== "Pending") {
+            throw new AppError(409, str(row.status) === "Paid"
+                ? "Paid salary records cannot be deleted"
+                : "Submitted salary records cannot be deleted");
+        }
+        const result = await query("DELETE FROM salary_records WHERE id = $1 AND status = 'Pending'", [id]);
+        if (!result.rowCount) {
+            throw new AppError(409, "Salary record is not in a Pending state and cannot be deleted");
+        }
         return { id, deleted: true };
     },
     /** Applicable active advances for a salary month, keyed by employee. Only
@@ -486,6 +609,9 @@ export const staffService = {
     async generateForMonth(month, department) {
         if (!/^\d{4}-\d{2}$/.test(month)) {
             throw new AppError(400, "month must be in YYYY-MM format");
+        }
+        if (await salaryMonthIsClosed(month)) {
+            throw new AppError(409, "This payroll month is closed — salary regeneration is not allowed");
         }
         const empClauses = ["status IN ('Active','Inactive','Suspended')"];
         const empParams = [];
