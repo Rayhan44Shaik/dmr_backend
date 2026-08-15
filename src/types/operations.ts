@@ -95,8 +95,9 @@ export interface ShopSale {
 
 export type RateEntryStatus = "Pending" | "Entered";
 
-/** A Rate Entry–eligible trip (status = Completed, not deleted),
- * optionally joined with its rate record if one has been entered. */
+/** A Rate Entry–eligible trip (status = Approved or Completed, not deleted,
+ * not rate-locked), optionally joined with its rate record if one has been
+ * saved (but not yet locked — locked trips never appear here). */
 export interface RateEntryTrip {
   tripId: number;
   tripNo: string;
@@ -119,6 +120,7 @@ export interface RateEntryTrip {
   rateEntryId: number | null;
   rate: number | null;
   remarks: string | null;
+  locked: boolean;
   createdBy?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
@@ -132,6 +134,9 @@ export interface RateEntry {
   birdType: string;
   rate: number;
   remarks: string;
+  locked: boolean;
+  lockedBy?: string | null;
+  lockedAt?: string | null;
   createdBy?: string;
   updatedBy?: string | null;
   createdAt?: string | null;

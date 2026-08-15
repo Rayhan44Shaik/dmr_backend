@@ -2,7 +2,7 @@ import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
 import { aadharNumberOrNull, isMissing, licenseNumberOrNull, validateBirdTypeFields, validateEmployeeFields, validateFarmFields, validateShopFields, validateVehicleFields, } from "../utils/masterValidation.js";
-function mapEmployee(row) {
+export function mapEmployee(row) {
     return {
         id: num(row.id),
         employeeNo: num(row.employee_no),
@@ -20,7 +20,7 @@ function mapEmployee(row) {
         avatar: row.avatar ? str(row.avatar) : null,
     };
 }
-function mapVehicle(row) {
+export function mapVehicle(row) {
     return {
         id: num(row.id),
         vehicleNo: num(row.vehicle_no),
@@ -45,7 +45,7 @@ function mapVehicle(row) {
         status: str(row.status),
     };
 }
-function mapFarm(row) {
+export function mapFarm(row) {
     return {
         id: num(row.id),
         farmNo: num(row.farm_no),
@@ -59,7 +59,7 @@ function mapFarm(row) {
         status: str(row.status),
     };
 }
-function mapShop(row) {
+export function mapShop(row) {
     return {
         id: num(row.id),
         shopNo: num(row.shop_no),
@@ -84,7 +84,7 @@ function mapBank(row) {
         status: str(row.status),
     };
 }
-function mapBirdType(row) {
+export function mapBirdType(row) {
     return {
         id: num(row.id),
         birdTypeNo: num(row.bird_type_no),

@@ -51,6 +51,11 @@ export const shopSaleBodySchema = z.object({
     status: opsStatusSchema.optional(),
     createdBy: z.string().optional(),
 });
+/** One shop-wise rate line, applied to an existing trip_deliveries row. */
+export const rateEntryDeliverySchema = z.object({
+    id: z.number({ required_error: "delivery id is required" }).int().positive(),
+    rate: z.number({ required_error: "rate is required" }).positive("rate must be greater than 0"),
+});
 export const rateEntryBodySchema = z.object({
     tripId: z.number({ required_error: "tripId is required" }).int(),
     rate: z.number({ required_error: "rate is required" }).nonnegative(),
@@ -58,6 +63,28 @@ export const rateEntryBodySchema = z.object({
     birdType: z.string().optional(),
     remarks: z.string().nullable().optional(),
     createdBy: z.string().optional(),
+    updatedBy: z.string().optional(),
+    // Shop-wise rates for this trip's deliveries (trip_deliveries rows). Not
+    // required on every save — a trip can be saved incrementally — but every
+    // line supplied must reference a real, active delivery on the trip and
+    // carry a positive rate; duplicates are rejected.
+    deliveries: z
+        .array(rateEntryDeliverySchema)
+        .optional()
+        .superRefine((rows, ctx) => {
+        if (!rows)
+            return;
+        const seen = new Set();
+        for (const row of rows) {
+            if (seen.has(row.id)) {
+                ctx.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: `Duplicate rate entry for delivery ${row.id}`,
+                });
+            }
+            seen.add(row.id);
+        }
+    }),
 });
 export const rateEntryUpdateSchema = z.object({
     rate: z.number().nonnegative().optional(),
@@ -65,6 +92,10 @@ export const rateEntryUpdateSchema = z.object({
     birdType: z.string().optional(),
     remarks: z.string().nullable().optional(),
     updatedBy: z.string().optional(),
+    deliveries: z.array(rateEntryDeliverySchema).optional(),
+});
+export const rateEntryLockSchema = z.object({
+    lockedBy: z.string().optional(),
 });
 export const collectionBodySchema = z.object({
     collectionNo: z.string().optional(),

@@ -173,22 +173,22 @@ async function getDeliveryTripId(client: Client, saleId: number): Promise<number
 
 /**
  * Backend enforcement of the Trip → Rate Entry → Shop Sales flow: Shop Sales
- * create/edit/delete is rejected unless the trip's Rate Entry has been saved
- * & locked. The authoritative state is the rate_entry row for the trip (one
- * per trip — UNIQUE(trip_id) — inserted by Rate Entry "Save & Lock" and
- * never deleted). No new state field is introduced; this only reads the
- * existing rate_entry row.
+ * create/edit/delete is rejected unless the trip's Rate Entry has been
+ * explicitly saved AND locked (rate_entry.locked = TRUE) — a saved-but-not-
+ * yet-locked rate is not enough. This is the authoritative gate; Rate Entry
+ * "Save" and "Lock" are separate backend actions (rateEntryService.create /
+ * rateEntryService.lock), and only a successful lock flips this flag.
  */
 async function assertRateEntryLocked(
   client: Client,
   tripId: number,
   trip: { tripNo?: string }
 ): Promise<void> {
-  const result = await client.query<{ id: number }>(
-    `SELECT id FROM rate_entry WHERE trip_id = $1`,
+  const result = await client.query<{ id: number; locked: boolean }>(
+    `SELECT id, locked FROM rate_entry WHERE trip_id = $1`,
     [tripId]
   );
-  if (!result.rowCount) {
+  if (!result.rowCount || !result.rows[0].locked) {
     throw new AppError(
       409,
       `Trip ${trip.tripNo ?? ""} has no locked Rate Entry — ` +
@@ -220,12 +220,12 @@ export const shopSalesService = {
     const params: unknown[] = [];
 
     // Shop Sales is only available once the trip's Rate Entry has been saved
-    // & locked — i.e. a rate_entry row exists for the trip. A trip being
-    // Completed alone does NOT unlock its deliveries for Shop Sales; the
-    // required flow is Trip Completed → Rate Entry → Save & Lock → Shop
-    // Sales. This is the authoritative backend enforcement (the rate_entry
-    // row is never deleted once entered, so once unlocked it stays unlocked).
-    clauses.push(`EXISTS (SELECT 1 FROM rate_entry WHERE trip_id = t.id)`);
+    // & explicitly LOCKED (rate_entry.locked = TRUE) — a saved-but-unlocked
+    // rate does not unlock Shop Sales. A trip being Completed alone does NOT
+    // unlock its deliveries either; the required flow is Trip Completed →
+    // Rate Entry → Save → Lock → Shop Sales. This is the authoritative
+    // backend enforcement (locked never flips back to false once set).
+    clauses.push(`EXISTS (SELECT 1 FROM rate_entry WHERE trip_id = t.id AND locked = TRUE)`);
 
     // Historical requirement: sales for a deleted trip must remain visible
     // (they are the accounting record) — only a sale's own `deleted` flag
@@ -283,7 +283,7 @@ export const shopSalesService = {
     // Same backend rule as list(): a sale is only reachable once its trip's
     // Rate Entry has been saved & locked.
     const result = await query(
-      `${SALE_SELECT} WHERE d.id = $1 AND EXISTS (SELECT 1 FROM rate_entry WHERE trip_id = t.id)`,
+      `${SALE_SELECT} WHERE d.id = $1 AND EXISTS (SELECT 1 FROM rate_entry WHERE trip_id = t.id AND locked = TRUE)`,
       [id]
     );
     if (!result.rowCount) throw new AppError(404, "Shop sale not found");

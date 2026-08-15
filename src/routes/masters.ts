@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { asyncHandler } from "../middleware/errorHandler.js";
+import { mastersBulkService } from "../services/mastersBulkService.js";
 import { mastersService } from "../services/mastersService.js";
 import { marketRatesService } from "../services/marketRatesService.js";
 import { routesService } from "../services/routesService.js";
@@ -17,8 +18,7 @@ mastersRouter.get(
 mastersRouter.post(
   "/employees/bulk",
   asyncHandler(async (req, res) => {
-    const created = await mastersService.bulkCreateEmployees(req.body);
-    res.status(201).json(created);
+    res.status(201).json(await mastersBulkService.importEmployees(req.body));
   })
 );
 
@@ -67,8 +67,7 @@ mastersRouter.get(
 mastersRouter.post(
   "/vehicles/bulk",
   asyncHandler(async (req, res) => {
-    const created = await mastersService.bulkCreateVehicles(req.body);
-    res.status(201).json(created);
+    res.status(201).json(await mastersBulkService.importVehicles(req.body));
   })
 );
 
@@ -117,8 +116,7 @@ mastersRouter.get(
 mastersRouter.post(
   "/farms/bulk",
   asyncHandler(async (req, res) => {
-    const created = await mastersService.bulkCreateFarms(req.body);
-    res.status(201).json(created);
+    res.status(201).json(await mastersBulkService.importFarms(req.body));
   })
 );
 
@@ -161,6 +159,13 @@ mastersRouter.get(
   "/shops",
   asyncHandler(async (_req, res) => {
     res.json(await mastersService.listShops());
+  })
+);
+
+mastersRouter.post(
+  "/shops/bulk",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await mastersBulkService.importShops(req.body));
   })
 );
 
@@ -259,8 +264,7 @@ mastersRouter.get(
 mastersRouter.post(
   "/bird-types/bulk",
   asyncHandler(async (req, res) => {
-    const created = await mastersService.bulkCreateBirdTypes(req.body);
-    res.status(201).json(created);
+    res.status(201).json(await mastersBulkService.importBirdTypes(req.body));
   })
 );
 

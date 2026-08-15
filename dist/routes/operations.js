@@ -94,6 +94,13 @@ operationsRouter.post("/rate-entry", asyncHandler(async (req, res) => {
 operationsRouter.put("/rate-entry/:id", asyncHandler(async (req, res) => {
     res.json(await rateEntryService.update(Number(req.params.id), req.body));
 }));
+// Explicit lock — the only way a trip's rate becomes immutable and eligible
+// for Shop Sales. Separate from save/update so "rates saved" and "rates
+// locked" are distinguishable states, per the Rate Entry -> Shop Sales
+// business workflow.
+operationsRouter.post("/rate-entry/trip/:tripId/lock", asyncHandler(async (req, res) => {
+    res.json(await rateEntryService.lock(Number(req.params.tripId), req.body));
+}));
 // ── Shop Rates ───────────────────────────────────────────────────
 operationsRouter.get("/shop-rates", asyncHandler(async (req, res) => {
     res.json(await shopRatesService.list({

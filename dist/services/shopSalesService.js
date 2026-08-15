@@ -132,6 +132,21 @@ async function getDeliveryTripId(client, saleId) {
     return num(result.rows[0].trip_id);
 }
 /**
+ * Backend enforcement of the Trip → Rate Entry → Shop Sales flow: Shop Sales
+ * create/edit/delete is rejected unless the trip's Rate Entry has been
+ * explicitly saved AND locked (rate_entry.locked = TRUE) — a saved-but-not-
+ * yet-locked rate is not enough. This is the authoritative gate; Rate Entry
+ * "Save" and "Lock" are separate backend actions (rateEntryService.create /
+ * rateEntryService.lock), and only a successful lock flips this flag.
+ */
+async function assertRateEntryLocked(client, tripId, trip) {
+    const result = await client.query(`SELECT id, locked FROM rate_entry WHERE trip_id = $1`, [tripId]);
+    if (!result.rowCount || !result.rows[0].locked) {
+        throw new AppError(409, `Trip ${trip.tripNo ?? ""} has no locked Rate Entry — ` +
+            `Shop Sales requires the trip's Rate Entry to be saved & locked first.`.replace(/\s+/g, " "));
+    }
+}
+/**
  * Shop sales are trip_deliveries rows (+ parent trip). No separate
  * shop_sales table — deliberately reusing the existing Trip → Delivery
  * relationship instead of duplicating it (see 023_shop_sales_hardening.sql).
@@ -140,6 +155,13 @@ export const shopSalesService = {
     async list(filters = {}) {
         const clauses = [];
         const params = [];
+        // Shop Sales is only available once the trip's Rate Entry has been saved
+        // & explicitly LOCKED (rate_entry.locked = TRUE) — a saved-but-unlocked
+        // rate does not unlock Shop Sales. A trip being Completed alone does NOT
+        // unlock its deliveries either; the required flow is Trip Completed →
+        // Rate Entry → Save → Lock → Shop Sales. This is the authoritative
+        // backend enforcement (locked never flips back to false once set).
+        clauses.push(`EXISTS (SELECT 1 FROM rate_entry WHERE trip_id = t.id AND locked = TRUE)`);
         // Historical requirement: sales for a deleted trip must remain visible
         // (they are the accounting record) — only a sale's own `deleted` flag
         // (soft-deleted within the edit window) is filtered by default.
@@ -185,7 +207,9 @@ export const shopSalesService = {
         return result.rows.map(mapDeliverySale);
     },
     async getById(id) {
-        const result = await query(`${SALE_SELECT} WHERE d.id = $1`, [id]);
+        // Same backend rule as list(): a sale is only reachable once its trip's
+        // Rate Entry has been saved & locked.
+        const result = await query(`${SALE_SELECT} WHERE d.id = $1 AND EXISTS (SELECT 1 FROM rate_entry WHERE trip_id = t.id AND locked = TRUE)`, [id]);
         if (!result.rowCount)
             throw new AppError(404, "Shop sale not found");
         return mapDeliverySale(result.rows[0]);
@@ -200,6 +224,7 @@ export const shopSalesService = {
                 const trip = await lockTrip(client, data.tripId);
                 assertTripEditable(trip);
                 assertTripCompletedForShopSales(trip);
+                await assertRateEntryLocked(client, trip.id, trip);
                 // Shop is a mandatory reference — a sale with no shop is not a
                 // valid accounting record (Shop is also immutable once created,
                 // so it must be right from the start).
@@ -289,6 +314,7 @@ export const shopSalesService = {
                 const trip = await lockTrip(client, tripId);
                 assertTripEditable(trip);
                 assertTripCompletedForShopSales(trip);
+                await assertRateEntryLocked(client, trip.id, trip);
                 const currentResult = await client.query(`SELECT birds, weight, rate, mortality, mort_kg FROM trip_deliveries WHERE id = $1 AND deleted = FALSE FOR UPDATE`, [id]);
                 if (!currentResult.rowCount)
                     throw new AppError(404, "Shop sale not found");
@@ -399,6 +425,7 @@ export const shopSalesService = {
             const trip = await lockTrip(client, tripId);
             assertTripEditable(trip);
             assertTripCompletedForShopSales(trip);
+            await assertRateEntryLocked(client, trip.id, trip);
             const result = await client.query(`UPDATE trip_deliveries SET deleted = TRUE, deleted_at = NOW(), deleted_reason = $2
          WHERE id = $1 AND deleted = FALSE
          RETURNING id`, [id, reason ?? null]);

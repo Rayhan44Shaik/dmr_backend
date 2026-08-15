@@ -5,6 +5,7 @@ export interface DutyWeek {
     weekEnd: string;
     status: string;
     lockReason?: string;
+    allRoles: string[];
     days: {
         date: string;
         weekday: string;

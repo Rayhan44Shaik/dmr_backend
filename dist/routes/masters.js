@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { asyncHandler } from "../middleware/errorHandler.js";
+import { mastersBulkService } from "../services/mastersBulkService.js";
 import { mastersService } from "../services/mastersService.js";
 import { marketRatesService } from "../services/marketRatesService.js";
 import { routesService } from "../services/routesService.js";
@@ -73,6 +74,9 @@ mastersRouter.patch("/farms/:id/status", asyncHandler(async (req, res) => {
 }));
 mastersRouter.get("/shops", asyncHandler(async (_req, res) => {
     res.json(await mastersService.listShops());
+}));
+mastersRouter.post("/shops/bulk", asyncHandler(async (req, res) => {
+    res.status(201).json(await mastersBulkService.importShops(req.body));
 }));
 mastersRouter.post("/shops", asyncHandler(async (req, res) => {
     res.status(201).json(await mastersService.upsertShop(req.body));

@@ -3,6 +3,35 @@
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
+const DUTY_TYPES = new Set([
+    "Driver",
+    "Delivery",
+    "Rest",
+    "Repair",
+    "Office",
+    "OfficeDuty",
+    "Collection",
+    "WeeklyOff",
+]);
+function assertDutyInput(input) {
+    if (!DUTY_TYPES.has(input.dutyType)) {
+        throw new AppError(422, "Invalid duty type: " + String(input.dutyType));
+    }
+    const ds = input.date;
+    if (typeof ds !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(ds)) {
+        throw new AppError(422, "Invalid or missing duty date. Expected YYYY-MM-DD.");
+    }
+    const parsed = new Date(ds + "T00:00:00Z");
+    if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== ds) {
+        throw new AppError(422, "Invalid duty date: " + ds);
+    }
+    if (!Number.isInteger(input.employeeId) || input.employeeId <= 0) {
+        throw new AppError(422, "Invalid employee id.");
+    }
+    if (input.vehicleId != null && (!Number.isInteger(input.vehicleId) || input.vehicleId <= 0)) {
+        throw new AppError(422, "Invalid vehicle id.");
+    }
+}
 function weekDays(weekStart) {
     const labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     return Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + i); return { date: d.toISOString().slice(0, 10), weekday: labels[i] }; });
@@ -22,7 +51,7 @@ async function weekIsLocked(weekStart, weekEnd) {
         return "This week is locked and cannot be modified.";
     if (week.status === "Submitted")
         return "This week is submitted and changes are restricted.";
-    const today = dateOnly(new Date().toISOString()) ?? "";
+    const today = dateOnly(new Date()) ?? "";
     if (weekEnd < today)
         return "Previous completed weeks are locked and cannot be modified.";
     return null;
@@ -31,6 +60,7 @@ function mapAssignment(row) {
     return { id: str(row.id), employeeId: num(row.employee_id), employeeName: str(row.employee_name), department: str(row.department), role: str(row.role), dutyType: str(row.duty_type), date: dateOnly(row.duty_date) ?? "", vehicleId: row.vehicle_id == null ? null : num(row.vehicle_id), vehicleNo: row.vehicle_no == null ? null : str(row.vehicle_no) };
 }
 export async function validateAssignment(input, opts = {}) {
+    assertDutyInput(input);
     const weekStart = mondayOf(input.date);
     const weekEnd = weekDays(weekStart)[6].date;
     const locked = await weekIsLocked(weekStart, weekEnd);
@@ -94,6 +124,7 @@ export async function getDutyWeek(weekStart) {
         }
     }
     const employees = employeesRaw.map((e) => ({ id: e.id, employeeNo: e.employee_no, name: e.employee_name, department: e.department, role: e.role || e.department, status: e.status, license: e.license_number ?? "", active: e.status === "Active", onApprovedLeave: leaveDatesByEmp[e.id] ? Array.from(leaveDatesByEmp[e.id]) : [] }));
+    const allRoles = Array.from(new Set(employees.map((e) => e.role).filter((r) => r !== ""))).sort();
     const assignments = assignRes.rows.map(mapAssignment);
     const perEmployee = {};
     for (const e of employeesRaw) {
@@ -152,6 +183,7 @@ export async function getDutyWeek(weekStart) {
         weekStart: ms,
         weekEnd,
         status: week.status,
+        allRoles,
         days,
         employees,
         assignments,

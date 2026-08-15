@@ -4,6 +4,7 @@ import { dateOnly, num, str } from "../utils/coerce.js";
 import { assertBirdTypeExists, assertShopExists, } from "../utils/fkValidation.js";
 import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
+import { generateSaleNo } from "../utils/tripDeliverySync.js";
 import { assertOpsStatus, parseBody, shopRateBodySchema, } from "../validation/operations.js";
 function mapRate(row) {
     const tripStatus = str(row.trip_status || "Completed");
@@ -123,11 +124,17 @@ export const shopRatesService = {
                     throw new AppError(400, "No active trip available to attach shop rate (uses trip_deliveries)");
                 }
                 const tripId = num(trip.rows[0].id);
+                // trip_deliveries.sale_no is NOT NULL (023_shop_sales_hardening.sql) —
+                // a Shop Rate row lives on trip_deliveries, so it needs a real sale
+                // number like any other delivery (same generator Shop Sales uses).
+                const tripNoRow = await client.query(`SELECT trip_no FROM trips WHERE id = $1`, [tripId]);
+                const saleNo = await generateSaleNo(client, tripId, str(tripNoRow.rows[0]?.trip_no));
                 const inserted = await client.query(`INSERT INTO trip_deliveries (
-             trip_id, shop_id, shop_name, bird_type_id, bird_type, rate, amount, remarks, birds, weight
-           ) VALUES ($1,$2,$3,$4,$5,$6,0,$7,0,0)
+             trip_id, sale_no, shop_id, shop_name, bird_type_id, bird_type, rate, amount, remarks, birds, weight
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,0,0)
            RETURNING id`, [
                     tripId,
+                    saleNo,
                     data.shopId ?? null,
                     data.shopName ?? "",
                     data.birdTypeId ?? null,

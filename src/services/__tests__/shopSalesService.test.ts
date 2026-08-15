@@ -174,10 +174,18 @@ describe("Shop Sales visibility vs Rate Entry lock", () => {
       weight: 200,
     });
 
-    // Save & Lock via the existing Rate Entry service.
-    const locked = await rateEntryService.create({ tripId: trip.tripId, rate: 62.5, remarks: "locked" });
-    assert.equal(locked.tripId, trip.tripId);
-    assert.equal(locked.rate, 62.5);
+    // Save shop-wise rates, then explicitly Lock via the Rate Entry service.
+    const saved = await rateEntryService.create({
+      tripId: trip.tripId,
+      rate: 62.5,
+      remarks: "locked",
+      deliveries: [{ id: trip.deliveryId, rate: 62.5 }],
+    });
+    assert.equal(saved.tripId, trip.tripId);
+    assert.equal(saved.rate, 62.5);
+    assert.equal(saved.locked, false, "saving alone must not lock the trip");
+    const locked = await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
+    assert.equal(locked.locked, true);
 
     const list = (await shopSalesService.list({ shopId: shop.id })) as ShopSale[];
     const sale = list.find((s) => s.tripId === trip.tripId);
@@ -186,8 +194,8 @@ describe("Shop Sales visibility vs Rate Entry lock", () => {
     assert.equal(sale.status, "Approved");
     assert.equal(sale.editable, true);
 
-    // Delivery rate is NULL (Trip Entry left it 0) → the existing display
-    // fallback to the trip's single locked Rate Entry rate is preserved.
+    // Rate Entry "Save" writes the shop-wise rate directly onto the
+    // delivery row, so Shop Sales reads it straight from trip_deliveries.
     assert.equal(sale.rate, 62.5);
     assert.equal(sale.amount, Number((200 * 62.5).toFixed(2)));
 
@@ -210,7 +218,12 @@ describe("Shop Sales visibility vs Rate Entry lock", () => {
       birds: 100,
       weight: 200,
     });
-    await rateEntryService.create({ tripId: trip.tripId, rate: 55.5 });
+    await rateEntryService.create({
+      tripId: trip.tripId,
+      rate: 55.5,
+      deliveries: [{ id: trip.deliveryId, rate: 55.5 }],
+    });
+    await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
 
     const created = await shopSalesService.create({
       tripId: trip.tripId,
@@ -294,7 +307,7 @@ describe("Shop Sales visibility vs Rate Entry lock", () => {
 });
 
 describe("Existing Rate Entry behavior", () => {
-  test("Save & Lock works, reads back, and duplicate locks are rejected (no duplication)", async (t) => {
+  test("Save is repeatable while unlocked; Lock is explicit and duplicate locks are rejected (no duplication)", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
 
@@ -311,24 +324,45 @@ describe("Existing Rate Entry behavior", () => {
     // No rate entry yet → getByTripId reports null (Pending).
     assert.equal(await rateEntryService.getByTripId(trip.tripId), null);
 
-    // Save & Lock.
-    const locked = await rateEntryService.create({ tripId: trip.tripId, rate: 40, remarks: "locked" });
-    assert.equal(locked.rate, 40);
+    // Save (including the shop-wise rate on the trip's one delivery, so it
+    // meets the completeness check the later lock() call performs).
+    const saved = await rateEntryService.create({
+      tripId: trip.tripId,
+      rate: 40,
+      remarks: "draft",
+      deliveries: [{ id: trip.deliveryId, rate: 40 }],
+    });
+    assert.equal(saved.rate, 40);
+    assert.equal(saved.locked, false);
 
     // Read back via the same single record.
     const read = await rateEntryService.getByTripId(trip.tripId);
     assert.ok(read);
-    assert.equal(read.id, locked.id);
+    assert.equal(read.id, saved.id);
     assert.equal(read.rate, 40);
 
-    // A second lock for the same trip is rejected at the DB level (UNIQUE
-    // trip_id → 409), never duplicating the rate record.
-    await assertAppErrorStatus(rateEntryService.create({ tripId: trip.tripId, rate: 50 }), 409);
+    // Saving again while unlocked updates the same row (never a 2nd row —
+    // UNIQUE trip_id guarantees this even under a raw INSERT race).
+    const resaved = await rateEntryService.create({ tripId: trip.tripId, rate: 50 });
+    assert.equal(resaved.id, saved.id);
+    assert.equal(resaved.rate, 50);
 
-    // Editing the existing rate record still works (never creates a 2nd row).
-    const updated = await rateEntryService.update(locked.id, { rate: 45.25 });
-    assert.equal(updated.id, locked.id);
+    // Editing the existing rate record still works pre-lock.
+    const updated = await rateEntryService.update(saved.id, { rate: 45.25 });
+    assert.equal(updated.id, saved.id);
     assert.equal(updated.rate, 45.25);
     assert.equal(await rateEntryService.getByTripId(trip.tripId).then((r) => r?.rate), 45.25);
+
+    // Lock.
+    const locked = await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
+    assert.equal(locked.id, saved.id);
+    assert.equal(locked.locked, true);
+
+    // A second lock for the same trip is rejected — already locked.
+    await assertAppErrorStatus(rateEntryService.lock(trip.tripId, { lockedBy: "tester2" }), 409);
+
+    // Save/update are rejected once locked — no silent overwrite.
+    await assertAppErrorStatus(rateEntryService.create({ tripId: trip.tripId, rate: 99 }), 409);
+    await assertAppErrorStatus(rateEntryService.update(saved.id, { rate: 99 }), 409);
   });
 });

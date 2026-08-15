@@ -106,6 +106,17 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     amount?: number | undefined;
     mortality?: number | undefined;
 }>;
+/** One shop-wise rate line, applied to an existing trip_deliveries row. */
+export declare const rateEntryDeliverySchema: z.ZodObject<{
+    id: z.ZodNumber;
+    rate: z.ZodNumber;
+}, "strip", z.ZodTypeAny, {
+    id: number;
+    rate: number;
+}, {
+    id: number;
+    rate: number;
+}>;
 export declare const rateEntryBodySchema: z.ZodObject<{
     tripId: z.ZodNumber;
     rate: z.ZodNumber;
@@ -113,20 +124,47 @@ export declare const rateEntryBodySchema: z.ZodObject<{
     birdType: z.ZodOptional<z.ZodString>;
     remarks: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     createdBy: z.ZodOptional<z.ZodString>;
+    updatedBy: z.ZodOptional<z.ZodString>;
+    deliveries: z.ZodEffects<z.ZodOptional<z.ZodArray<z.ZodObject<{
+        id: z.ZodNumber;
+        rate: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        id: number;
+        rate: number;
+    }, {
+        id: number;
+        rate: number;
+    }>, "many">>, {
+        id: number;
+        rate: number;
+    }[] | undefined, {
+        id: number;
+        rate: number;
+    }[] | undefined>;
 }, "strip", z.ZodTypeAny, {
     tripId: number;
     rate: number;
+    deliveries?: {
+        id: number;
+        rate: number;
+    }[] | undefined;
     birdType?: string | undefined;
     birdTypeId?: number | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
+    updatedBy?: string | undefined;
 }, {
     tripId: number;
     rate: number;
+    deliveries?: {
+        id: number;
+        rate: number;
+    }[] | undefined;
     birdType?: string | undefined;
     birdTypeId?: number | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
+    updatedBy?: string | undefined;
 }>;
 export declare const rateEntryUpdateSchema: z.ZodObject<{
     rate: z.ZodOptional<z.ZodNumber>;
@@ -134,18 +172,43 @@ export declare const rateEntryUpdateSchema: z.ZodObject<{
     birdType: z.ZodOptional<z.ZodString>;
     remarks: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     updatedBy: z.ZodOptional<z.ZodString>;
+    deliveries: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        id: z.ZodNumber;
+        rate: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        id: number;
+        rate: number;
+    }, {
+        id: number;
+        rate: number;
+    }>, "many">>;
 }, "strip", z.ZodTypeAny, {
+    deliveries?: {
+        id: number;
+        rate: number;
+    }[] | undefined;
     birdType?: string | undefined;
     birdTypeId?: number | null | undefined;
     rate?: number | undefined;
     remarks?: string | null | undefined;
     updatedBy?: string | undefined;
 }, {
+    deliveries?: {
+        id: number;
+        rate: number;
+    }[] | undefined;
     birdType?: string | undefined;
     birdTypeId?: number | null | undefined;
     rate?: number | undefined;
     remarks?: string | null | undefined;
     updatedBy?: string | undefined;
+}>;
+export declare const rateEntryLockSchema: z.ZodObject<{
+    lockedBy: z.ZodOptional<z.ZodString>;
+}, "strip", z.ZodTypeAny, {
+    lockedBy?: string | undefined;
+}, {
+    lockedBy?: string | undefined;
 }>;
 export declare const collectionBodySchema: z.ZodObject<{
     collectionNo: z.ZodOptional<z.ZodString>;

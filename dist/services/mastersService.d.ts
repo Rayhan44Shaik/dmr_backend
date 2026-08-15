@@ -1,4 +1,9 @@
 import type { Bank, BirdType, Employee, Farm, Shop, Vehicle } from "../types/models.js";
+export declare function mapEmployee(row: Record<string, unknown>): Employee;
+export declare function mapVehicle(row: Record<string, unknown>): Vehicle;
+export declare function mapFarm(row: Record<string, unknown>): Farm;
+export declare function mapShop(row: Record<string, unknown>): Shop;
+export declare function mapBirdType(row: Record<string, unknown>): BirdType;
 export declare const mastersService: {
     listEmployees(department?: string): Promise<Employee[]>;
     upsertEmployee(body: Partial<Employee> & {

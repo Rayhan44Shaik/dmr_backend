@@ -143,8 +143,8 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     driverId?: number | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    driverName?: string | null | undefined;
     date?: string | undefined;
+    driverName?: string | null | undefined;
     currentKM?: number | undefined;
     nextServiceKM?: number | null | undefined;
     maintenanceType?: string | string[] | undefined;
@@ -166,8 +166,8 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     driverId?: number | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    driverName?: string | null | undefined;
     date?: string | undefined;
+    driverName?: string | null | undefined;
     currentKM?: number | undefined;
     nextServiceKM?: number | null | undefined;
     maintenanceType?: string | string[] | undefined;
