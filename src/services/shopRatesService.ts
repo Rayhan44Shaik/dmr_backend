@@ -12,6 +12,7 @@ import {
   type PaginationParams,
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
+import { evaluateRateLock } from "../utils/rateLock.js";
 import {
   assertOpsStatus,
   parseBody,
@@ -190,6 +191,49 @@ export const shopRatesService = {
 
   async update(id: number, body: unknown) {
     const data = parseBody(shopRateBodySchema.partial(), body);
+
+    // The authoritative amount lives on the same trip_deliveries row. Whenever
+    // rate changes, amount MUST be recomputed server-side from the current
+    // authoritative weight — a client-supplied amount is never trusted.
+    let nextAmount: number | null = null;
+    if (data.rate !== undefined) {
+      // Shop Rates edits the same trip_deliveries.rate column as Shop Sales.
+      // The same 10-day correction window applies: allowed while the window
+      // is open, permanently rejected once it has closed. The DB trigger is
+      // the final enforcer.
+      const parent = await query<{
+        rate_completed: boolean;
+        rate_locked_at: Date | null;
+        weight: number;
+      }>(
+        `SELECT COALESCE(t.rate_completed, FALSE) AS rate_completed,
+                t.rate_locked_at,
+                d.weight
+         FROM trip_deliveries d
+         INNER JOIN trips t ON t.id = d.trip_id
+         WHERE d.id = $1`,
+        [id]
+      );
+      if (!parent.rowCount) throw new AppError(404, "Shop rate not found");
+      const lock = evaluateRateLock({
+        rate_completed: parent.rows[0].rate_completed,
+        rate_locked_at: parent.rows[0].rate_locked_at,
+      });
+      if (lock.rateCompleted && lock.correctionWindowExpired) {
+        throw new AppError(
+          409,
+          "Rate correction window expired — editing locked after 10 days",
+          {
+            rateLockedAt: lock.rateLockedAt,
+            correctionWindowClosesAt: lock.correctionWindowClosesAt,
+          }
+        );
+      }
+      nextAmount = Number(
+        (Number(parent.rows[0].weight ?? 0) * Number(data.rate)).toFixed(2)
+      );
+    }
+
     const result = await query(
       `UPDATE trip_deliveries SET
          shop_id = COALESCE($2, shop_id),
@@ -197,7 +241,8 @@ export const shopRatesService = {
          bird_type_id = COALESCE($4, bird_type_id),
          bird_type = COALESCE($5, bird_type),
          rate = COALESCE($6, rate),
-         remarks = COALESCE($7, remarks)
+         amount = COALESCE($7, amount),
+         remarks = COALESCE($8, remarks)
        WHERE id = $1
        RETURNING id`,
       [
@@ -207,6 +252,7 @@ export const shopRatesService = {
         data.birdTypeId ?? null,
         data.birdType ?? null,
         data.rate ?? null,
+        nextAmount,
         data.remarks ?? null,
       ]
     );
@@ -235,15 +281,52 @@ export const shopRatesService = {
           [tripId, patch.approvedBy ?? "system"]
         );
       } else if (status === "Pending Approval") {
-        await client.query(`UPDATE trips SET status = 'Pending', deleted = FALSE WHERE id = $1`, [
-          tripId,
-        ]);
+        await client.query(
+          `UPDATE trips SET status = 'Pending', deleted = FALSE,
+             rate_completed = COALESCE(rate_completed, FALSE)
+           WHERE id = $1`,
+          [tripId]
+        );
       } else if (status === "Deleted") {
-        await client.query(`UPDATE trip_deliveries SET rate = NULL WHERE id = $1`, [id]);
+        // Clearing the rate is a mutation of trip_deliveries.rate. It is
+        // allowed before Rate Entry lock and during the correction window,
+        // but permanently rejected once the 10-day window has closed.
+        const locked = await client.query<{
+          rate_completed: boolean;
+          rate_locked_at: Date | null;
+        }>(
+          `SELECT COALESCE(rate_completed, FALSE) AS rate_completed,
+                  rate_locked_at
+           FROM trips WHERE id = $1`,
+          [tripId]
+        );
+        if (locked.rowCount) {
+          const lock = evaluateRateLock({
+            rate_completed: locked.rows[0].rate_completed,
+            rate_locked_at: locked.rows[0].rate_locked_at,
+          });
+          if (lock.rateCompleted && lock.correctionWindowExpired) {
+            throw new AppError(
+              409,
+              "Rate correction window expired — editing locked after 10 days",
+              {
+                rateLockedAt: lock.rateLockedAt,
+                correctionWindowClosesAt: lock.correctionWindowClosesAt,
+              }
+            );
+          }
+        }
+        await client.query(
+          `UPDATE trip_deliveries SET rate = NULL, amount = 0 WHERE id = $1`,
+          [id]
+        );
       } else if (status === "Draft" || status === "Rejected") {
-        await client.query(`UPDATE trips SET status = 'Draft', deleted = FALSE WHERE id = $1`, [
-          tripId,
-        ]);
+        await client.query(
+          `UPDATE trips SET status = 'Draft', deleted = FALSE,
+             rate_completed = COALESCE(rate_completed, FALSE)
+           WHERE id = $1`,
+          [tripId]
+        );
       }
 
       const row = await client.query(

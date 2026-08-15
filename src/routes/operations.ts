@@ -3,6 +3,7 @@ import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { collectionsService } from "../services/collectionsService.js";
 import { dashboardService } from "../services/dashboardService.js";
 import { fuelExpensesService } from "../services/fuelExpensesService.js";
+import { rateEntryService } from "../services/rateEntryService.js";
 import { shopRatesService } from "../services/shopRatesService.js";
 import { shopSalesService } from "../services/shopSalesService.js";
 import { tripsService } from "../services/tripsService.js";
@@ -139,6 +140,58 @@ operationsRouter.get(
   "/trip-list/:id",
   asyncHandler(async (req, res) => {
     res.json(await tripsService.getCompletedById(Number(req.params.id)));
+  })
+);
+
+// ── Rate Entry ───────────────────────────────────────────────────
+// Work queue for finalizing shop-wise rates on Completed trips.
+//
+//   GET    /rate-entry                 → eligible trips (Completed, not deleted, not locked)
+//   GET    /rate-entry/:tripId         → trip + shop-wise deliveries + market-rate reference
+//   PUT    /rate-entry/:tripId         → save (draft) rates; does not lock
+//   POST   /rate-entry/:tripId/lock    → save & lock — rates become immutable
+//
+// Eligibility is enforced server-side. Locked trips still appear in Trip List
+// (read-only historical view) and Shop Sales (which uses the finalized rates).
+operationsRouter.get(
+  "/rate-entry",
+  asyncHandler(async (req, res) => {
+    const { params: pagination, enabled } = parsePagination(req.query);
+    res.json(
+      await rateEntryService.list({
+        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        supervisorId: req.query.supervisorId
+          ? Number(req.query.supervisorId)
+          : undefined,
+        driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
+        farmId: req.query.farmId ? Number(req.query.farmId) : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
+        pagination: enabled ? pagination : null,
+      })
+    );
+  })
+);
+
+operationsRouter.get(
+  "/rate-entry/:tripId",
+  asyncHandler(async (req, res) => {
+    res.json(await rateEntryService.getById(Number(req.params.tripId)));
+  })
+);
+
+operationsRouter.put(
+  "/rate-entry/:tripId",
+  asyncHandler(async (req, res) => {
+    res.json(await rateEntryService.save(Number(req.params.tripId), req.body));
+  })
+);
+
+operationsRouter.post(
+  "/rate-entry/:tripId/lock",
+  asyncHandler(async (req, res) => {
+    res.json(await rateEntryService.lock(Number(req.params.tripId), req.body));
   })
 );
 

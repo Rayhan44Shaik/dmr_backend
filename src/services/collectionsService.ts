@@ -238,13 +238,34 @@ export const collectionsService = {
 
         const collected = data.amountCollected ?? 0;
         const due = data.amountDue ?? 0;
-        const rateCompleted = due > 0 ? collected >= due : collected > 0;
+        const collectedInFull = due > 0 ? collected >= due : collected > 0;
+
+        // Rate Entry owns trips.rate_completed. A collection can confirm
+        // payment-in-full (which leaves an already rate-locked trip locked),
+        // but it must NEVER unlock a trip whose rates were finalized by the
+        // Rate Entry workflow.
+        const current = await client.query<{ rate_completed: boolean }>(
+          `SELECT COALESCE(rate_completed, FALSE) AS rate_completed
+           FROM trips WHERE id = $1`,
+          [tripId]
+        );
+        const alreadyLocked = Boolean(current.rows[0]?.rate_completed);
+        const rateCompleted = alreadyLocked || collectedInFull;
 
         await client.query(
-          `UPDATE trips SET rate_completed = $2, status = CASE
-             WHEN status = 'Draft' THEN 'Pending'::trip_status
-             ELSE status
-           END
+          `UPDATE trips SET
+             rate_completed = $2,
+             -- If this collection is the first to mark the trip locked, stamp
+             -- the authoritative correction-window start. Never overwrite an
+             -- existing Rate Entry timestamp, and never unlock a locked trip.
+             rate_locked_at = CASE
+               WHEN $2 = TRUE THEN COALESCE(rate_locked_at, NOW())
+               ELSE rate_locked_at
+             END,
+             status = CASE
+               WHEN status = 'Draft' THEN 'Pending'::trip_status
+               ELSE status
+             END
            WHERE id = $1`,
           [tripId, rateCompleted]
         );
@@ -301,10 +322,20 @@ export const collectionsService = {
         const current = mapCollection(currentRow.rows[0]);
         const due = data.amountDue ?? current.amountDue;
         const collected = data.amountCollected ?? current.amountCollected;
-        await client.query(`UPDATE trips SET rate_completed = $2 WHERE id = $1`, [
-          tripId,
-          due > 0 && collected >= due,
-        ]);
+        // Never unlock a rate-locked trip from the collections module.
+        const alreadyLocked = Boolean(currentRow.rows[0]?.rate_completed);
+        const collectedInFull = due > 0 && collected >= due;
+        const newLocked = alreadyLocked || collectedInFull;
+        await client.query(
+          `UPDATE trips SET
+             rate_completed = $2,
+             rate_locked_at = CASE
+               WHEN $2 = TRUE THEN COALESCE(rate_locked_at, NOW())
+               ELSE rate_locked_at
+             END
+           WHERE id = $1`,
+          [tripId, newLocked]
+        );
       }
 
       const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [id]);
@@ -327,14 +358,19 @@ export const collectionsService = {
 
       if (status === "Approved") {
         await client.query(
-          `UPDATE trips SET status = 'Completed', rate_completed = TRUE, deleted = FALSE,
+          `UPDATE trips SET status = 'Completed', rate_completed = TRUE,
+             rate_locked_at = COALESCE(rate_locked_at, NOW()),
+             deleted = FALSE,
              approved_by = COALESCE($2, approved_by), approved_at = NOW()
            WHERE id = $1`,
           [tripId, patch.approvedBy ?? "system"]
         );
       } else if (status === "Pending Approval") {
+        // Do not unlock a rate-locked trip from the collections workflow.
         await client.query(
-          `UPDATE trips SET status = 'Pending', rate_completed = FALSE, deleted = FALSE WHERE id = $1`,
+          `UPDATE trips SET status = 'Pending', deleted = FALSE,
+             rate_completed = COALESCE(rate_completed, FALSE)
+           WHERE id = $1`,
           [tripId]
         );
       } else if (status === "Deleted") {
@@ -343,8 +379,11 @@ export const collectionsService = {
           [tripId, patch.reason ?? null]
         );
       } else {
+        // Draft / Rejected — keep the rate lock if Rate Entry already finalized.
         await client.query(
-          `UPDATE trips SET status = 'Draft', rate_completed = FALSE, deleted = FALSE WHERE id = $1`,
+          `UPDATE trips SET status = 'Draft', deleted = FALSE,
+             rate_completed = COALESCE(rate_completed, FALSE)
+           WHERE id = $1`,
           [tripId]
         );
       }
