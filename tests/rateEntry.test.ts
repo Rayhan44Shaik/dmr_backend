@@ -30,6 +30,7 @@ const { pool } = await import("../src/config/db.js");
 const { mastersService } = await import("../src/services/mastersService.js");
 const { tripsService } = await import("../src/services/tripsService.js");
 const { shopSalesService } = await import("../src/services/shopSalesService.js");
+const { shopRatesService } = await import("../src/services/shopRatesService.js");
 const { collectionsService } = await import("../src/services/collectionsService.js");
 
 after(async () => {
@@ -661,6 +662,107 @@ describe("Other modules", () => {
     // The full `npm test` run at the end of this file exercises Trip Entry
     // (bulkImport) and Trip List (tripList) without modification.
     assert.ok(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: Shop Rates amount consistency + Collections lock timestamp
+// ---------------------------------------------------------------------------
+
+describe("Shop Rates rate correction keeps amount consistent", () => {
+  it("B1. within the 10-day window, Shop Rates rate change recomputes amount from current weight", async () => {
+    const t = await makeLockedWindowTrip("SHOPRATES-OK", 2);
+    const deliveryId = t.deliveries[0].id;
+    // Current weight is 200; set rate to 180. Client sends NO amount.
+    const updated = await shopRatesService.update(deliveryId, { rate: 180 });
+    assert.equal(updated.rate, 180);
+    const row = await pool.query(
+      `SELECT rate, amount, weight FROM trip_deliveries WHERE id = $1`,
+      [deliveryId]
+    );
+    assert.equal(Number(row.rows[0].weight), 200);
+    assert.equal(Number(row.rows[0].amount), Number((200 * 180).toFixed(2)));
+  });
+
+  it("B2. after 10 days, Shop Rates rate change is rejected (409)", async () => {
+    const t = await makeLockedWindowTrip("SHOPRATES-EXPIRED", 11);
+    const deliveryId = t.deliveries[0].id;
+    await assert.rejects(
+      shopRatesService.update(deliveryId, { rate: 180 }),
+      /correction window expired/
+    );
+  });
+
+  it("B3. clearing rate (status Deleted) zeros amount before window expiry", async () => {
+    const t = await makeLockedWindowTrip("SHOPRATES-CLEAR", 1);
+    const deliveryId = t.deliveries[0].id;
+    await shopRatesService.updateStatus(deliveryId, { status: "Deleted" });
+    const row = await pool.query(
+      `SELECT rate, amount FROM trip_deliveries WHERE id = $1`,
+      [deliveryId]
+    );
+    assert.equal(row.rows[0].rate, null);
+    assert.equal(Number(row.rows[0].amount), 0);
+  });
+});
+
+describe("Collections lock timestamp consistency", () => {
+  it("C1. collections approval sets rate_locked_at when first locking a trip", async () => {
+    const t = await makeTrip({
+      tripNo: "TRP-RE-COLL-TS",
+      tripDate: "2026-08-16",
+      status: "Completed",
+      deliveries: [
+        { shopId: m.shopA.id, shopName: m.shopA.shopName, birds: 10, weight: 100, rate: 50 },
+      ],
+    });
+    // Sanity: not yet locked.
+    const before = await pool.query(
+      `SELECT rate_completed, rate_locked_at FROM trips WHERE id = $1`,
+      [t.id]
+    );
+    assert.equal(before.rows[0].rate_completed, false);
+    assert.equal(before.rows[0].rate_locked_at, null);
+
+    await collectionsService.updateStatus(t.deliveries[0].id, {
+      status: "Approved",
+    });
+
+    const after = await pool.query(
+      `SELECT rate_completed, rate_locked_at FROM trips WHERE id = $1`,
+      [t.id]
+    );
+    assert.equal(after.rows[0].rate_completed, true);
+    assert.ok(after.rows[0].rate_locked_at, "rate_locked_at must be stamped");
+  });
+
+  it("C2. collections never overwrites an existing Rate Entry rate_locked_at", async () => {
+    const t = await makeTrip({
+      tripNo: "TRP-RE-COLL-KEEP",
+      tripDate: "2026-08-16",
+      status: "Completed",
+      deliveries: [
+        { shopId: m.shopA.id, shopName: m.shopA.shopName, birds: 10, weight: 100, rate: 50 },
+      ],
+    });
+    // Lock via Rate Entry first.
+    await postJson(baseUrl, `/api/operations/rate-entry/${t.id}/lock`, {
+      rates: [{ deliveryId: t.deliveries[0].id, rate: 50 }],
+    });
+    const original = await pool.query(
+      `SELECT rate_locked_at FROM trips WHERE id = $1`,
+      [t.id]
+    );
+    const originalTs = original.rows[0].rate_locked_at;
+    assert.ok(originalTs);
+
+    // Collection approval must not reset the timestamp.
+    await collectionsService.updateStatus(t.deliveries[0].id, { status: "Approved" });
+    const again = await pool.query(
+      `SELECT rate_locked_at FROM trips WHERE id = $1`,
+      [t.id]
+    );
+    assert.equal(String(again.rows[0].rate_locked_at), String(originalTs));
   });
 });
 

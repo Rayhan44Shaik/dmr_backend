@@ -253,10 +253,19 @@ export const collectionsService = {
         const rateCompleted = alreadyLocked || collectedInFull;
 
         await client.query(
-          `UPDATE trips SET rate_completed = $2, status = CASE
-             WHEN status = 'Draft' THEN 'Pending'::trip_status
-             ELSE status
-           END
+          `UPDATE trips SET
+             rate_completed = $2,
+             -- If this collection is the first to mark the trip locked, stamp
+             -- the authoritative correction-window start. Never overwrite an
+             -- existing Rate Entry timestamp, and never unlock a locked trip.
+             rate_locked_at = CASE
+               WHEN $2 = TRUE THEN COALESCE(rate_locked_at, NOW())
+               ELSE rate_locked_at
+             END,
+             status = CASE
+               WHEN status = 'Draft' THEN 'Pending'::trip_status
+               ELSE status
+             END
            WHERE id = $1`,
           [tripId, rateCompleted]
         );
@@ -316,10 +325,17 @@ export const collectionsService = {
         // Never unlock a rate-locked trip from the collections module.
         const alreadyLocked = Boolean(currentRow.rows[0]?.rate_completed);
         const collectedInFull = due > 0 && collected >= due;
-        await client.query(`UPDATE trips SET rate_completed = $2 WHERE id = $1`, [
-          tripId,
-          alreadyLocked || collectedInFull,
-        ]);
+        const newLocked = alreadyLocked || collectedInFull;
+        await client.query(
+          `UPDATE trips SET
+             rate_completed = $2,
+             rate_locked_at = CASE
+               WHEN $2 = TRUE THEN COALESCE(rate_locked_at, NOW())
+               ELSE rate_locked_at
+             END
+           WHERE id = $1`,
+          [tripId, newLocked]
+        );
       }
 
       const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [id]);
@@ -342,7 +358,9 @@ export const collectionsService = {
 
       if (status === "Approved") {
         await client.query(
-          `UPDATE trips SET status = 'Completed', rate_completed = TRUE, deleted = FALSE,
+          `UPDATE trips SET status = 'Completed', rate_completed = TRUE,
+             rate_locked_at = COALESCE(rate_locked_at, NOW()),
+             deleted = FALSE,
              approved_by = COALESCE($2, approved_by), approved_at = NOW()
            WHERE id = $1`,
           [tripId, patch.approvedBy ?? "system"]

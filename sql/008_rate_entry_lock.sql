@@ -75,10 +75,14 @@ CREATE OR REPLACE FUNCTION trip_deliveries_window_expired(
   locked_at TIMESTAMPTZ
 ) RETURNS BOOLEAN AS $$
 BEGIN
+  -- CURRENT_TIMESTAMP is transaction-stable (not immutable): this function
+  -- must be STABLE so real PostgreSQL accepts it. The actual rule is
+  -- unchanged: FALSE before expiry, TRUE at exactly rate_locked_at + 10 days
+  -- and forever after.
   RETURN locked_at IS NOT NULL
      AND CURRENT_TIMESTAMP >= locked_at + INTERVAL '10 days';
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$$ LANGUAGE plpgsql STABLE;
 
 CREATE OR REPLACE FUNCTION trip_deliveries_rate_lock_guard()
 RETURNS TRIGGER AS $$

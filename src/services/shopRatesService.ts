@@ -192,6 +192,10 @@ export const shopRatesService = {
   async update(id: number, body: unknown) {
     const data = parseBody(shopRateBodySchema.partial(), body);
 
+    // The authoritative amount lives on the same trip_deliveries row. Whenever
+    // rate changes, amount MUST be recomputed server-side from the current
+    // authoritative weight — a client-supplied amount is never trusted.
+    let nextAmount: number | null = null;
     if (data.rate !== undefined) {
       // Shop Rates edits the same trip_deliveries.rate column as Shop Sales.
       // The same 10-day correction window applies: allowed while the window
@@ -200,9 +204,11 @@ export const shopRatesService = {
       const parent = await query<{
         rate_completed: boolean;
         rate_locked_at: Date | null;
+        weight: number;
       }>(
         `SELECT COALESCE(t.rate_completed, FALSE) AS rate_completed,
-                t.rate_locked_at
+                t.rate_locked_at,
+                d.weight
          FROM trip_deliveries d
          INNER JOIN trips t ON t.id = d.trip_id
          WHERE d.id = $1`,
@@ -223,6 +229,9 @@ export const shopRatesService = {
           }
         );
       }
+      nextAmount = Number(
+        (Number(parent.rows[0].weight ?? 0) * Number(data.rate)).toFixed(2)
+      );
     }
 
     const result = await query(
@@ -232,7 +241,8 @@ export const shopRatesService = {
          bird_type_id = COALESCE($4, bird_type_id),
          bird_type = COALESCE($5, bird_type),
          rate = COALESCE($6, rate),
-         remarks = COALESCE($7, remarks)
+         amount = COALESCE($7, amount),
+         remarks = COALESCE($8, remarks)
        WHERE id = $1
        RETURNING id`,
       [
@@ -242,6 +252,7 @@ export const shopRatesService = {
         data.birdTypeId ?? null,
         data.birdType ?? null,
         data.rate ?? null,
+        nextAmount,
         data.remarks ?? null,
       ]
     );
@@ -305,7 +316,10 @@ export const shopRatesService = {
             );
           }
         }
-        await client.query(`UPDATE trip_deliveries SET rate = NULL WHERE id = $1`, [id]);
+        await client.query(
+          `UPDATE trip_deliveries SET rate = NULL, amount = 0 WHERE id = $1`,
+          [id]
+        );
       } else if (status === "Draft" || status === "Rejected") {
         await client.query(
           `UPDATE trips SET status = 'Draft', deleted = FALSE,
