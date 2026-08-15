@@ -537,6 +537,11 @@ function buildListWhere(filters: {
 
   if (!filters.includeDeleted) {
     clauses.push(`deleted = FALSE`);
+    // A trip whose `status` is 'Deleted' is deleted even if the boolean flag
+    // was left inconsistent by a legacy write path — never list it again.
+    if (!filters.status) {
+      clauses.push(`status <> 'Deleted'`);
+    }
   }
   if (filters.fromDate) {
     params.push(filters.fromDate);
@@ -567,6 +572,64 @@ function buildListWhere(filters: {
 
   return {
     where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "",
+    params,
+  };
+}
+
+/**
+ * Trip List query — read-only historical view.
+ *
+ * Eligibility is enforced IN THE DATABASE, never in the caller:
+ *   • only `status = 'Completed'` trips (the system's completed/approved state)
+ *   • only `deleted = FALSE` rows
+ * Draft / Pending / Deleted / soft-deleted / inconsistent rows are excluded
+ * by the WHERE clause itself, regardless of any filter the client sends.
+ */
+function buildTripListWhere(filters: {
+  fromDate?: string;
+  toDate?: string;
+  vehicleId?: number;
+  supervisorId?: number;
+  driverId?: number;
+  farmId?: number;
+  search?: string;
+}) {
+  const clauses: string[] = [`deleted = FALSE`, `status = 'Completed'`];
+  const params: unknown[] = [];
+
+  if (filters.fromDate) {
+    params.push(filters.fromDate);
+    clauses.push(`trip_date >= $${params.length}`);
+  }
+  if (filters.toDate) {
+    params.push(filters.toDate);
+    clauses.push(`trip_date <= $${params.length}`);
+  }
+  if (filters.vehicleId) {
+    params.push(filters.vehicleId);
+    clauses.push(`vehicle_id = $${params.length}`);
+  }
+  if (filters.supervisorId) {
+    params.push(filters.supervisorId);
+    clauses.push(`supervisor_id = $${params.length}`);
+  }
+  if (filters.driverId) {
+    params.push(filters.driverId);
+    clauses.push(`driver_id = $${params.length}`);
+  }
+  if (filters.farmId) {
+    params.push(filters.farmId);
+    clauses.push(`source_farm_id = $${params.length}`);
+  }
+  if (filters.search) {
+    params.push(`%${filters.search}%`);
+    clauses.push(
+      `(trip_no ILIKE $${params.length} OR vehicle_no ILIKE $${params.length} OR driver_name ILIKE $${params.length} OR supervisor_name ILIKE $${params.length} OR source_farm ILIKE $${params.length})`
+    );
+  }
+
+  return {
+    where: `WHERE ${clauses.join(" AND ")}`,
     params,
   };
 }
@@ -670,6 +733,94 @@ export const tripsService = {
     return result.rows.map(toTripSummary);
   },
 
+  /**
+   * Trip List — returns ONLY completed/approved, non-deleted trips.
+   * The eligibility rule lives in the SQL WHERE clause (see buildTripListWhere),
+   * so the frontend can never pull Draft/Pending/Deleted rows and filter locally.
+   */
+  async listCompleted(
+    filters: {
+      fromDate?: string;
+      toDate?: string;
+      vehicleId?: number;
+      supervisorId?: number;
+      driverId?: number;
+      farmId?: number;
+      search?: string;
+      pagination?: PaginationParams | null;
+    } = {}
+  ): Promise<TripSummary[] | PaginatedResult<TripSummary>> {
+    const { where, params } = buildTripListWhere(filters);
+
+    if (filters.pagination) {
+      const countResult = await query<{ c: string }>(
+        `SELECT COUNT(*)::text AS c FROM trips ${where}`,
+        params
+      );
+      const total = Number(countResult.rows[0]?.c ?? 0);
+      const pagedParams = [
+        ...params,
+        filters.pagination.limit,
+        filters.pagination.offset,
+      ];
+      const result = await query(
+        `SELECT * FROM trips ${where}
+         ORDER BY trip_date DESC, id DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        pagedParams
+      );
+      return paginatedResult(
+        result.rows.map(toTripSummary),
+        total,
+        filters.pagination
+      );
+    }
+
+    const result = await query(
+      `SELECT * FROM trips ${where} ORDER BY trip_date DESC, id DESC`,
+      params
+    );
+    return result.rows.map(toTripSummary);
+  },
+
+  /**
+   * Trip List detail — full trip only when eligible (completed + not deleted).
+   * A Draft / Pending / Deleted trip id returns 404, so the read-only view can
+   * never surface a trip that should not be in the list.
+   */
+  async getCompletedById(id: number) {
+    const result = await query(
+      `SELECT * FROM trips WHERE id = $1 AND deleted = FALSE AND status = 'Completed'`,
+      [id]
+    );
+    if (!result.rowCount) {
+      throw new AppError(404, `Trip ${id} not found in Trip List`);
+    }
+
+    return withTransaction(async (client) => {
+      const trip = await hydrateTrip(client, result.rows[0], {
+        includeDcPhoto: true,
+      });
+      const flags = {
+        startStepSubmitted: trip.startStepSubmitted,
+        farmStepSubmitted: trip.farmStepSubmitted,
+        pickupStepSubmitted: trip.pickupStepSubmitted,
+        deliveryStepSubmitted: trip.deliveryStepSubmitted,
+        expensesStepSubmitted: trip.expensesStepSubmitted,
+        endStepSubmitted: trip.endStepSubmitted,
+        status: trip.status,
+        deleted: trip.deleted,
+      };
+      return {
+        ...trip,
+        ...flattenDiesel(trip.dieselEntries ?? []),
+        resumeStep: getResumeStep(flags),
+        resumeStepLabel: getResumeLabel(flags),
+        wizardProgress: getWizardProgress(flags),
+      };
+    });
+  },
+
   async getById(id: number) {
     const result = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
     if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
@@ -734,6 +885,14 @@ export const tripsService = {
   /** Autosave engine — partial upsert with optimistic locking */
   async save(id: number | null, body: Partial<Trip> & Record<string, unknown>) {
     parseTripAutosave(body);
+
+    // Deletion is permanent and atomic: whenever a write marks a trip deleted
+    // (via `status` or the `deleted` flag), keep both in lockstep so a soft-
+    // deleted trip can never partially un-delete and reappear in Trip List.
+    if (body.status === "Deleted" || body.deleted === true) {
+      body.status = "Deleted";
+      body.deleted = true;
+    }
 
     return withTransaction(async (client) => {
       try {
@@ -1128,7 +1287,15 @@ export const tripsService = {
       if (!existing.rowCount) throw new AppError(404, `Trip ${id} not found`);
 
       const currentStatus = str(existing.rows[0].status);
+      const currentDeleted = Boolean(existing.rows[0].deleted);
       assertTripStatusTransition(currentStatus, status);
+
+      // A deleted trip is deleted forever. Guard against the legacy generic
+      // branch (which resets `deleted = FALSE`) ever resurrecting a row that
+      // is already flagged as deleted but whose `status` was left inconsistent.
+      if (currentDeleted && status !== "Deleted") {
+        throw new AppError(422, "Cannot restore a deleted trip", { tripId: id });
+      }
 
       if (status === "Completed") {
         assertTripReadyForCompletion({
