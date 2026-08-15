@@ -894,12 +894,23 @@ export const tripsService = {
       body.deleted = true;
     }
 
+    // Rate Entry is the ONLY writer of trips.rate_completed. Trip autosave
+    // must never accept this flag from the client (would allow bypassing the
+    // lock workflow / unlock a locked trip). Strip it before touching the DB.
+    if ("rateCompleted" in body) {
+      delete (body as Partial<Trip> & { rateCompleted?: unknown }).rateCompleted;
+    }
+
     return withTransaction(async (client) => {
       try {
         let tripId = id;
+        let existing: { rowCount: number | null; rows: Array<Record<string, unknown>> } = {
+          rowCount: 0,
+          rows: [],
+        };
 
         if (tripId) {
-          const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+          existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
           if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
           if (existing.rows[0].deleted) {
             throw new AppError(422, "Cannot modify a deleted trip", { tripId });
@@ -1104,7 +1115,9 @@ export const tripsService = {
             body.weightLoss ?? null,
             body.survivalRate ?? null,
             body.lastShop ?? null,
-            body.rateCompleted ?? null,
+            // rate_completed is intentionally NOT writable from trip autosave;
+            // it's owned exclusively by the Rate Entry lock workflow.
+            null,
             body.deleted ?? null,
             body.deletedReason ?? null,
             body.approvedBy ?? null,
@@ -1154,6 +1167,17 @@ export const tripsService = {
           await replaceBoxes(client, tripId, body.boxDetails as BoxDetail[]);
         }
         if (body.deliveries) {
+          // If this trip has been rate-locked, the Rate Entry workflow owns
+          // trip_deliveries.rate/amount. We must not wholesale-replace the
+          // deliveries (which would reset rates to null / supplied values).
+          // The DB trigger enforces this; bail with a clear 409 first.
+          if (existing.rowCount && Boolean(existing.rows[0].rate_completed)) {
+            throw new AppError(
+              409,
+              "Cannot modify deliveries — trip rates are locked by Rate Entry",
+              { tripId }
+            );
+          }
           await replaceDeliveries(client, tripId, body.deliveries as ShopDelivery[]);
         }
         if (dieselEntries.length || body.dieselEntries) {

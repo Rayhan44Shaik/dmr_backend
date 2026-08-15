@@ -190,6 +190,24 @@ export const shopRatesService = {
 
   async update(id: number, body: unknown) {
     const data = parseBody(shopRateBodySchema.partial(), body);
+
+    if (data.rate !== undefined) {
+      const parent = await query<{ rate_completed: boolean }>(
+        `SELECT COALESCE(t.rate_completed, FALSE) AS rate_completed
+         FROM trip_deliveries d
+         INNER JOIN trips t ON t.id = d.trip_id
+         WHERE d.id = $1`,
+        [id]
+      );
+      if (!parent.rowCount) throw new AppError(404, "Shop rate not found");
+      if (parent.rows[0].rate_completed) {
+        throw new AppError(
+          409,
+          "Cannot modify rate — trip rates are locked by Rate Entry"
+        );
+      }
+    }
+
     const result = await query(
       `UPDATE trip_deliveries SET
          shop_id = COALESCE($2, shop_id),
@@ -235,15 +253,31 @@ export const shopRatesService = {
           [tripId, patch.approvedBy ?? "system"]
         );
       } else if (status === "Pending Approval") {
-        await client.query(`UPDATE trips SET status = 'Pending', deleted = FALSE WHERE id = $1`, [
-          tripId,
-        ]);
+        await client.query(
+          `UPDATE trips SET status = 'Pending', deleted = FALSE,
+             rate_completed = COALESCE(rate_completed, FALSE)
+           WHERE id = $1`,
+          [tripId]
+        );
       } else if (status === "Deleted") {
+        const locked = await client.query<{ rate_completed: boolean }>(
+          `SELECT COALESCE(rate_completed, FALSE) AS rate_completed FROM trips WHERE id = $1`,
+          [tripId]
+        );
+        if (locked.rowCount && locked.rows[0].rate_completed) {
+          throw new AppError(
+            409,
+            "Cannot clear a rate whose trip is locked by Rate Entry"
+          );
+        }
         await client.query(`UPDATE trip_deliveries SET rate = NULL WHERE id = $1`, [id]);
       } else if (status === "Draft" || status === "Rejected") {
-        await client.query(`UPDATE trips SET status = 'Draft', deleted = FALSE WHERE id = $1`, [
-          tripId,
-        ]);
+        await client.query(
+          `UPDATE trips SET status = 'Draft', deleted = FALSE,
+             rate_completed = COALESCE(rate_completed, FALSE)
+           WHERE id = $1`,
+          [tripId]
+        );
       }
 
       const row = await client.query(

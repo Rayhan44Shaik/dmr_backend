@@ -12,7 +12,7 @@
     "db:seed": "tsx src/scripts/seed.ts",
     "seed:demo": "tsx src/scripts/seed-demo-data.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test tests/tripList.test.ts tests/bulkImport.test.ts",
+    "test": "node --import tsx --test tests/tripList.test.ts tests/bulkImport.test.ts tests/rateEntry.test.ts",
     "test:typecheck": "tsc -p tsconfig.tests.json"
   },
   "dependencies": {

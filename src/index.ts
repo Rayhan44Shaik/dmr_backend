@@ -30,6 +30,8 @@ app.get("/", (_req, res) => {
         dashboard: "GET /api/operations/dashboard",
         trips: "GET|POST /api/operations/trips",
         tripList: "GET /api/operations/trip-list",
+        rateEntry:
+          "GET /api/operations/rate-entry · GET/PUT /api/operations/rate-entry/:tripId · POST /api/operations/rate-entry/:tripId/lock",
         shopRates: "GET|POST /api/operations/shop-rates",
         shopSales: "GET|POST /api/operations/shop-sales",
         collections: "GET|POST /api/operations/collections",

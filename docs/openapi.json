@@ -15,6 +15,7 @@
     { "name": "Staff" },
     { "name": "Operations Dashboard" },
     { "name": "Operations Trips" },
+    { "name": "Rate Entry" },
     { "name": "Shop Rates" },
     { "name": "Shop Sales" },
     { "name": "Collections" },
@@ -201,6 +202,110 @@
         "responses": {
           "200": { "description": "Trip", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TripSummary" } } } },
           "404": { "description": "Not eligible / not found" }
+        }
+      }
+    },
+    "/api/operations/rate-entry": {
+      "get": {
+        "tags": ["Rate Entry"],
+        "summary": "List trips eligible for rate entry (Completed, not deleted, not already locked)",
+        "parameters": [
+          { "name": "fromDate", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "toDate", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "vehicleId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "supervisorId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "driverId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "farmId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "search", "in": "query", "schema": { "type": "string" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Eligible trips" } }
+      }
+    },
+    "/api/operations/rate-entry/{tripId}": {
+      "get": {
+        "tags": ["Rate Entry"],
+        "summary": "Rate Entry detail — trip, shop-wise deliveries, market/reference rates",
+        "parameters": [
+          { "name": "tripId", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": { "description": "Rate entry detail (locked trips are returned read-only)" },
+          "404": { "description": "Trip not eligible (draft/pending/deleted)" }
+        }
+      },
+      "put": {
+        "tags": ["Rate Entry"],
+        "summary": "Save (draft) shop-wise rates — does not lock the trip",
+        "parameters": [
+          { "name": "tripId", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["rates"],
+                "properties": {
+                  "rates": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["deliveryId", "rate"],
+                      "properties": {
+                        "deliveryId": { "type": "integer" },
+                        "rate": { "type": "number", "minimum": 0 }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Updated rate entry detail" },
+          "409": { "description": "Trip is already rate-locked" },
+          "422": { "description": "Validation error" }
+        }
+      }
+    },
+    "/api/operations/rate-entry/{tripId}/lock": {
+      "post": {
+        "tags": ["Rate Entry"],
+        "summary": "Save & Lock — finalize rates; rate/amount become immutable",
+        "parameters": [
+          { "name": "tripId", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "rates": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["deliveryId", "rate"],
+                      "properties": {
+                        "deliveryId": { "type": "integer" },
+                        "rate": { "type": "number", "minimum": 0 }
+                      }
+                    }
+                  },
+                  "lockedBy": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Trip rates locked" },
+          "409": { "description": "Already locked" },
+          "422": { "description": "Every delivery must have a rate before locking" }
         }
       }
     },

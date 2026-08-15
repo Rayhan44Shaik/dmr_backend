@@ -70,6 +70,29 @@ export const collectionBodySchema = z.object({
   createdBy: z.string().optional(),
 });
 
+/**
+ * Rate Entry payload.
+ *
+ * Each row targets an existing `trip_deliveries.id` (the actual shop delivery
+ * on a completed trip). Only `rate` is accepted — `amount` is ALWAYS derived
+ * server-side as ROUND(weight * rate, 2), and weight is never changed here.
+ */
+export const rateEntryItemSchema = z.object({
+  deliveryId: z.number().int().positive(),
+  rate: z.number().nonnegative(),
+});
+
+export const rateEntrySaveSchema = z.object({
+  /** Partial list — only deliveries included are updated. */
+  rates: z.array(rateEntryItemSchema).min(1),
+});
+
+export const rateEntryLockSchema = z.object({
+  /** All trip deliveries must have a rate at lock time. */
+  rates: z.array(rateEntryItemSchema).optional(),
+  lockedBy: z.string().optional(),
+});
+
 export const fuelExpenseBodySchema = z.object({
   billNo: z.string().optional(),
   billDate: z.string().min(1),

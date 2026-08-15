@@ -130,6 +130,7 @@ Base path: `/api/operations`
 | Dashboard | `GET /dashboard` (Completed trips; Approved sales/collections/fuel) |
 | Trips | `GET/POST /trips`, `PUT /trips/:id`, `POST /trips/:id/steps/:step`, `PATCH /trips/:id/status`, `DELETE /trips/:id` |
 | Trip List | `GET /trip-list`, `GET /trip-list/:id` — read-only, completed/approved trips only |
+| Rate Entry | `GET /rate-entry`, `GET/PUT /rate-entry/:tripId`, `POST /rate-entry/:tripId/lock` |
 | Shop Rates | `GET/POST /shop-rates`, `PUT/PATCH/DELETE /shop-rates/:id` |
 | Shop Sales | `GET/POST /shop-sales`, `PUT/PATCH/DELETE /shop-sales/:id` |
 | Collections | `GET/POST /collections`, `GET /collections/pending|register|running-balance` |
@@ -138,6 +139,45 @@ Base path: `/api/operations`
 Swagger UI: `GET /api/docs` · OpenAPI JSON: `GET /api/docs/openapi.json`
 
 Trip statuses (`trip_status`): Draft → Pending → Completed | Deleted (soft delete only).
+
+### Rate Entry (operational work queue)
+
+Rate Entry finalizes shop-wise rates on **completed** trips. It is the ONLY
+writer of `trips.rate_completed` and the `trip_deliveries.rate` / `amount` of
+an already-locked trip. The same completed trip still appears in Trip List
+(historical read-only view) — the two screens read PostgreSQL independently.
+
+Authoritative data path (no duplicate tables):
+
+```
+trips (rate_completed = lock flag, rate_locked_at/by = audit)
+   └─ trip_deliveries.rate      ← actual rate entered per shop
+      trip_deliveries.amount    ← ROUND(weight * rate, 2), computed server-side
+```
+
+Eligibility is enforced in the SQL WHERE clause, never in the client:
+
+- `trips.status = 'Completed'`
+- `trips.deleted = FALSE`
+- `trips.rate_completed = FALSE` (not already locked)
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/operations/rate-entry` | List eligible trips (server-side filters + pagination) |
+| `GET /api/operations/rate-entry/:tripId` | Trip + shop-wise deliveries + read-only market/reference rates |
+| `PUT /api/operations/rate-entry/:tripId` | Save (draft) `{ rates: [{ deliveryId, rate }] }`; recomputes amount, does not lock |
+| `POST /api/operations/rate-entry/:tripId/lock` | Save & Lock — every delivery must have a rate; sets `rate_completed=TRUE` |
+
+Once a trip is locked:
+
+- `trips.rate_completed = TRUE`, `rate_locked_at` / `rate_locked_by` are stamped.
+- A PostgreSQL trigger (`trg_trip_deliveries_rate_lock`) rejects any UPDATE of
+  `rate`/`amount` or DELETE of the delivery row. Trip autosave, Shop Sales,
+  Shop Rates and Collections also refuse to mutate those values.
+- Shop Sales automatically reads the finalized rate/amount (it queries
+  `trip_deliveries` on completed trips).
+- A locked trip remains visible in Trip List and via `GET /rate-entry/:id`
+  (read-only) but disappears from the Rate Entry work queue.
 
 ### Trip List (read-only historical view)
 

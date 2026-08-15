@@ -147,3 +147,76 @@ export interface RunningBalanceRow {
   pendingAmount: number;
   runningBalance: number;
 }
+
+// ---------------------------------------------------------------------------
+// Rate Entry
+//
+// Authoritative data path (PostgreSQL only — no duplicate tables):
+//   trips (rate_completed = lock flag, rate_locked_at/by = audit)
+//     └─ trip_deliveries.rate / trip_deliveries.amount
+//
+// "Market rate" reference data is READ-ONLY and is derived from:
+//   • shop_rates (master rate records, if any)
+//   • previously rate-LOCKED trips' trip_deliveries (actual realized rates)
+// ---------------------------------------------------------------------------
+
+export interface RateEntryMarketRate {
+  shopId: number | null;
+  shopName: string;
+  birdTypeId: number | null;
+  birdType: string;
+  /** Last known master rate from shop_rates, if any. */
+  masterRate: number | null;
+  /** Last rate realized on a rate-locked trip. */
+  lastTripRate: number | null;
+  lastTripDate: string | null;
+  lastTripNo: string | null;
+  /** Average realized rate across recent locked trips. */
+  avgTripRate: number | null;
+  tripRateSamples: number;
+}
+
+export interface RateEntryDelivery {
+  id: number;
+  serialNo: number | null;
+  boxNo: number | null;
+  shopId: number | null;
+  shopName: string;
+  birdTypeId: number | null;
+  birdType: string;
+  birds: number;
+  weight: number;
+  mortality: number;
+  mortKg: number | null;
+  rate: number | null;
+  amount: number;
+  remarks: string;
+  deliveryMode: "box" | "weight";
+  /** Read-only market/reference information for the Rate Entry modal. */
+  marketRate: RateEntryMarketRate | null;
+}
+
+export interface RateEntryTrip {
+  id: number;
+  tripNo: string;
+  tripDate: string;
+  status: TripStatus;
+  vehicleNo: string | null;
+  driverName: string | null;
+  supervisorName: string | null;
+  sourceFarm: string | null;
+  totalBirds: number;
+  totalWeight: number;
+  totalShops: number;
+  /** Lock flag — mirrors trips.rate_completed. */
+  rateLocked: boolean;
+  rateLockedAt: string | null;
+  rateLockedBy: string | null;
+  /** Number of deliveries with a non-null rate. */
+  ratesEntered: number;
+  /** Total deliveries on the trip. */
+  deliveriesCount: number;
+  /** Sum of delivery.amount for deliveries that have a rate. */
+  totalAmount: number;
+  deliveries: RateEntryDelivery[];
+}

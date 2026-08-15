@@ -194,6 +194,27 @@ export const shopSalesService = {
 
   async update(id: number, body: unknown) {
     const data = parseBody(shopSaleBodySchema.partial(), body);
+
+    // If the parent trip is rate-locked, Rate Entry owns rate/amount and they
+    // are immutable. The DB trigger would reject this anyway — surface a clear
+    // 409 before attempting the write.
+    if (data.rate !== undefined || data.amount !== undefined || data.weight !== undefined) {
+      const parent = await query<{ rate_completed: boolean }>(
+        `SELECT COALESCE(t.rate_completed, FALSE) AS rate_completed
+         FROM trip_deliveries d
+         INNER JOIN trips t ON t.id = d.trip_id
+         WHERE d.id = $1`,
+        [id]
+      );
+      if (!parent.rowCount) throw new AppError(404, "Shop sale not found");
+      if (parent.rows[0].rate_completed) {
+        throw new AppError(
+          409,
+          "Cannot modify weight/rate/amount — trip rates are locked by Rate Entry"
+        );
+      }
+    }
+
     const result = await query(
       `UPDATE trip_deliveries SET
          shop_id = COALESCE($2, shop_id),
@@ -241,6 +262,18 @@ export const shopSalesService = {
       const tripId = num(delivery.rows[0].trip_id);
 
       if (tripStatus === "Deleted") {
+        // Refuse to zero a delivery that belongs to a rate-locked trip.
+        const locked = await client.query<{ rate_completed: boolean }>(
+          `SELECT COALESCE(rate_completed, FALSE) AS rate_completed
+           FROM trips WHERE id = $1`,
+          [tripId]
+        );
+        if (locked.rowCount && locked.rows[0].rate_completed) {
+          throw new AppError(
+            409,
+            "Cannot delete a shop sale whose trip rates are locked by Rate Entry"
+          );
+        }
         await client.query(
           `UPDATE trip_deliveries SET amount = 0, birds = 0, weight = 0 WHERE id = $1`,
           [id]
@@ -253,10 +286,13 @@ export const shopSalesService = {
           [tripId, patch.approvedBy ?? "system"]
         );
       } else {
-        await client.query(`UPDATE trips SET status = $2::trip_status, deleted = FALSE WHERE id = $1`, [
-          tripId,
-          tripStatus,
-        ]);
+        // Pending / Draft: do not clear a Rate Entry lock.
+        await client.query(
+          `UPDATE trips SET status = $2::trip_status, deleted = FALSE,
+             rate_completed = COALESCE(rate_completed, FALSE)
+           WHERE id = $1`,
+          [tripId, tripStatus]
+        );
       }
 
       const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [id]);

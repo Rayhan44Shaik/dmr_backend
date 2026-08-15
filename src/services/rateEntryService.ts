@@ -1,0 +1,629 @@
+import type pg from "pg";
+import { query, withTransaction } from "../config/db.js";
+import { AppError } from "../middleware/errorHandler.js";
+import type {
+  RateEntryDelivery,
+  RateEntryMarketRate,
+  RateEntryTrip,
+} from "../types/operations.js";
+import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
+import {
+  paginatedResult,
+  type PaginatedResult,
+  type PaginationParams,
+} from "../utils/pagination.js";
+import { rethrowIfAppError } from "../utils/pgErrors.js";
+import {
+  parseBody,
+  rateEntryLockSchema,
+  rateEntrySaveSchema,
+} from "../validation/operations.js";
+
+type Client = pg.PoolClient;
+
+/**
+ * Eligibility predicate for Rate Entry, enforced in the database.
+ *
+ *   trips.status     = 'Completed'   (the system's completed/approved state)
+ *   trips.deleted    = FALSE
+ *   rate_completed   = FALSE         (not already rate-locked)
+ *
+ * Draft/Pending/Deleted and already-locked trips are excluded by the WHERE
+ * clause itself — frontend filtering is never sufficient.
+ */
+const ELIGIBLE_WHERE = `
+  WHERE t.status = 'Completed'
+    AND COALESCE(t.deleted, FALSE) = FALSE
+    AND COALESCE(t.rate_completed, FALSE) = FALSE
+`;
+
+/** Same eligibility but for a single trip id (detail/save/lock). */
+const ELIGIBLE_BY_ID = `
+  SELECT t.*
+  FROM trips t
+  WHERE t.id = $1
+    AND t.status = 'Completed'
+    AND COALESCE(t.deleted, FALSE) = FALSE
+    AND COALESCE(t.rate_completed, FALSE) = FALSE
+`;
+
+interface DeliveryRow extends Record<string, unknown> {
+  id: number;
+  serial_no: number | null;
+  box_no: number | null;
+  shop_id: number | null;
+  shop_name: string;
+  bird_type_id: number | null;
+  bird_type: string;
+  birds: number;
+  weight: number;
+  mortality: number;
+  mort_kg: number | null;
+  rate: number | null;
+  amount: number;
+  remarks: string;
+  delivery_mode: "box" | "weight";
+}
+
+interface MarketRateRow {
+  shop_id: number | null;
+  bird_type_id: number | null;
+  master_rate: number | null;
+  last_trip_rate: number | null;
+  last_trip_date: string | null;
+  last_trip_no: string | null;
+  avg_trip_rate: number | null;
+  samples: number;
+}
+
+function marketKey(shopId: number | null, birdTypeId: number | null) {
+  return `${shopId ?? "null"}::${birdTypeId ?? "null"}`;
+}
+
+/**
+ * Load market/reference rate information for the given shop + bird_type pairs.
+ *
+ * Reference rates are READ-ONLY — they are presented to the Rate Entry modal
+ * but never written back to master data from this workflow. Sources:
+ *   1. shop_rates — the most recent non-deleted master rate per shop/bird_type.
+ *   2. trip_deliveries on previously rate-LOCKED trips — the last realized
+ *      rate and the average over the most recent locked trips.
+ */
+async function loadMarketRates(
+  client: Client,
+  pairs: Array<{ shopId: number | null; birdTypeId: number | null }>
+): Promise<Map<string, RateEntryMarketRate>> {
+  const out = new Map<string, RateEntryMarketRate>();
+  if (!pairs.length) return out;
+
+  const pairSet = new Map<string, { shopId: number | null; birdTypeId: number | null }>();
+  for (const p of pairs) pairSet.set(marketKey(p.shopId, p.birdTypeId), p);
+
+  // ── 1. Master rates from shop_rates (most recent effective row) ─────────
+  //     We only read the table; Rate Entry never writes to it.
+  const masterResult = await client.query<{
+    shop_id: number | null;
+    bird_type_id: number | null;
+    shop_name: string;
+    bird_type: string;
+    rate: number;
+  }>(
+    `SELECT DISTINCT ON (r.shop_id, r.bird_type_id)
+       r.shop_id, r.bird_type_id, r.shop_name, r.bird_type, r.rate
+     FROM shop_rates r
+     INNER JOIN UNNEST($1::int[], $2::int[])
+       AS pair(shop_id, bird_type_id)
+       ON pair.shop_id IS NOT DISTINCT FROM r.shop_id
+      AND pair.bird_type_id IS NOT DISTINCT FROM r.bird_type_id
+     WHERE COALESCE(r.deleted, FALSE) = FALSE
+     ORDER BY r.shop_id, r.bird_type_id, r.effective_from DESC, r.id DESC`,
+    [
+      pairs.map((p) => p.shopId),
+      pairs.map((p) => p.birdTypeId),
+    ]
+  );
+
+  for (const row of masterResult.rows) {
+    const key = marketKey(row.shop_id, row.bird_type_id);
+    out.set(key, {
+      shopId: numOrNull(row.shop_id),
+      shopName: str(row.shop_name),
+      birdTypeId: numOrNull(row.bird_type_id),
+      birdType: str(row.bird_type),
+      masterRate: numOrNull(row.rate),
+      lastTripRate: null,
+      lastTripDate: null,
+      lastTripNo: null,
+      avgTripRate: null,
+      tripRateSamples: 0,
+    });
+  }
+
+  // ── 2. Realized rates from previously rate-LOCKED trips ─────────────────
+  //     Distinct per (shop, bird_type) using DISTINCT ON.
+  const lastResult = await client.query<MarketRateRow>(
+    `
+    WITH target AS (
+      SELECT shop_id, bird_type_id
+      FROM UNNEST($1::int[], $2::int[]) AS pair(shop_id, bird_type_id)
+    ),
+    matched AS (
+      SELECT d.shop_id, d.bird_type_id, d.rate, t.trip_date, t.trip_no, d.id AS delivery_id
+      FROM trip_deliveries d
+      INNER JOIN trips t ON t.id = d.trip_id
+      INNER JOIN target p
+        ON p.shop_id IS NOT DISTINCT FROM d.shop_id
+       AND p.bird_type_id IS NOT DISTINCT FROM d.bird_type_id
+      WHERE t.status = 'Completed'
+        AND COALESCE(t.deleted, FALSE) = FALSE
+        AND t.rate_completed = TRUE
+        AND d.rate IS NOT NULL
+    ),
+    latest AS (
+      SELECT DISTINCT ON (shop_id, bird_type_id)
+             shop_id, bird_type_id, rate, trip_date, trip_no
+      FROM matched
+      ORDER BY shop_id, bird_type_id, trip_date DESC, delivery_id DESC
+    ),
+    avg AS (
+      SELECT shop_id, bird_type_id,
+             AVG(rate)::numeric(12,2) AS avg_rate,
+             COUNT(*)::int AS samples
+      FROM matched
+      GROUP BY shop_id, bird_type_id
+    )
+    SELECT l.shop_id, l.bird_type_id,
+           l.rate AS last_trip_rate, l.trip_date AS last_trip_date,
+           l.trip_no AS last_trip_no,
+           a.avg_rate AS avg_trip_rate, a.samples
+    FROM latest l
+    LEFT JOIN avg a
+      ON a.shop_id IS NOT DISTINCT FROM l.shop_id
+     AND a.bird_type_id IS NOT DISTINCT FROM l.bird_type_id
+    `,
+    [
+      pairs.map((p) => p.shopId),
+      pairs.map((p) => p.birdTypeId),
+    ]
+  );
+
+  for (const row of lastResult.rows) {
+    const key = marketKey(row.shop_id, row.bird_type_id);
+    const existing = out.get(key) ?? {
+      shopId: numOrNull(row.shop_id),
+      shopName: pairSet.get(key)?.shopId != null ? "" : "",
+      birdTypeId: numOrNull(row.bird_type_id),
+      birdType: "",
+      masterRate: null,
+      lastTripRate: null,
+      lastTripDate: null,
+      lastTripNo: null,
+      avgTripRate: null,
+      tripRateSamples: 0,
+    };
+    existing.lastTripRate = numOrNull(row.last_trip_rate);
+    existing.lastTripDate = dateOnly(row.last_trip_date);
+    existing.lastTripNo = row.last_trip_no == null ? null : str(row.last_trip_no);
+    existing.avgTripRate = numOrNull(row.avg_trip_rate);
+    existing.tripRateSamples = Number(row.samples ?? 0);
+    out.set(key, existing);
+  }
+
+  return out;
+}
+
+async function loadDeliveries(
+  client: Client,
+  tripId: number
+): Promise<RateEntryDelivery[]> {
+  const result = await client.query<DeliveryRow>(
+    `SELECT id, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
+            birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode
+     FROM trip_deliveries
+     WHERE trip_id = $1
+     ORDER BY serial_no NULLS LAST, id`,
+    [tripId]
+  );
+
+  const pairs = result.rows.map((r) => ({
+    shopId: numOrNull(r.shop_id),
+    birdTypeId: numOrNull(r.bird_type_id),
+  }));
+  const market = await loadMarketRates(client, pairs);
+
+  return result.rows.map((r) => {
+    const key = marketKey(numOrNull(r.shop_id), numOrNull(r.bird_type_id));
+    const rate = numOrNull(r.rate);
+    return {
+      id: num(r.id),
+      serialNo: numOrNull(r.serial_no),
+      boxNo: numOrNull(r.box_no),
+      shopId: numOrNull(r.shop_id),
+      shopName: str(r.shop_name),
+      birdTypeId: numOrNull(r.bird_type_id),
+      birdType: str(r.bird_type),
+      birds: num(r.birds),
+      weight: num(r.weight),
+      mortality: num(r.mortality),
+      mortKg: numOrNull(r.mort_kg),
+      rate,
+      amount: num(r.amount),
+      remarks: str(r.remarks),
+      deliveryMode: (str(r.delivery_mode) as "box" | "weight") || "box",
+      marketRate: market.get(key) ?? null,
+    };
+  });
+}
+
+function mapTrip(
+  row: Record<string, unknown>,
+  deliveries: RateEntryDelivery[]
+): RateEntryTrip {
+  const totalAmount = deliveries
+    .filter((d) => d.rate != null)
+    .reduce((sum, d) => sum + d.amount, 0);
+
+  return {
+    id: num(row.id),
+    tripNo: str(row.trip_no),
+    tripDate: dateOnly(row.trip_date) ?? "",
+    status: str(row.status) as RateEntryTrip["status"],
+    vehicleNo: row.vehicle_no == null ? null : str(row.vehicle_no),
+    driverName: row.driver_name == null ? null : str(row.driver_name),
+    supervisorName: row.supervisor_name == null ? null : str(row.supervisor_name),
+    sourceFarm: row.source_farm == null ? null : str(row.source_farm),
+    totalBirds: num(row.total_birds),
+    totalWeight: num(row.total_weight),
+    totalShops: num(row.total_shops),
+    rateLocked: Boolean(row.rate_completed),
+    rateLockedAt: row.rate_locked_at == null ? null : new Date(str(row.rate_locked_at)).toISOString(),
+    rateLockedBy: row.rate_locked_by == null ? null : str(row.rate_locked_by),
+    ratesEntered: deliveries.filter((d) => d.rate != null).length,
+    deliveriesCount: deliveries.length,
+    totalAmount: Number(totalAmount.toFixed(2)),
+    deliveries,
+  };
+}
+
+export const rateEntryService = {
+  /**
+   * Rate Entry work queue.
+   *
+   * Returns only trips that are eligible for rate entry (Completed, not
+   * deleted, not already rate-locked). The rule is enforced by
+   * ELIGIBLE_WHERE — there is no path for the client to widen it.
+   */
+  async list(
+    filters: {
+      fromDate?: string;
+      toDate?: string;
+      vehicleId?: number;
+      supervisorId?: number;
+      driverId?: number;
+      farmId?: number;
+      search?: string;
+      pagination?: PaginationParams | null;
+    } = {}
+  ): Promise<RateEntryTrip[] | PaginatedResult<RateEntryTrip>> {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+
+    if (filters.fromDate) {
+      params.push(filters.fromDate);
+      clauses.push(`t.trip_date >= $${params.length}`);
+    }
+    if (filters.toDate) {
+      params.push(filters.toDate);
+      clauses.push(`t.trip_date <= $${params.length}`);
+    }
+    if (filters.vehicleId) {
+      params.push(filters.vehicleId);
+      clauses.push(`t.vehicle_id = $${params.length}`);
+    }
+    if (filters.supervisorId) {
+      params.push(filters.supervisorId);
+      clauses.push(`t.supervisor_id = $${params.length}`);
+    }
+    if (filters.driverId) {
+      params.push(filters.driverId);
+      clauses.push(`t.driver_id = $${params.length}`);
+    }
+    if (filters.farmId) {
+      params.push(filters.farmId);
+      clauses.push(`t.source_farm_id = $${params.length}`);
+    }
+    if (filters.search) {
+      params.push(`%${filters.search}%`);
+      clauses.push(
+        `(t.trip_no ILIKE $${params.length}
+          OR t.vehicle_no ILIKE $${params.length}
+          OR t.driver_name ILIKE $${params.length}
+          OR t.supervisor_name ILIKE $${params.length}
+          OR t.source_farm ILIKE $${params.length})`
+      );
+    }
+
+    const extraWhere = clauses.length ? `AND ${clauses.join(" AND ")}` : "";
+    const baseWhere = ELIGIBLE_WHERE.trimEnd() + "\n  " + extraWhere;
+
+    return withTransaction(async (client) => {
+      if (filters.pagination) {
+        const countResult = await client.query<{ c: string }>(
+          `SELECT COUNT(*)::text AS c FROM trips t ${baseWhere}`,
+          params
+        );
+        const total = Number(countResult.rows[0]?.c ?? 0);
+        const pagedParams = [
+          ...params,
+          filters.pagination.limit,
+          filters.pagination.offset,
+        ];
+        const result = await client.query(
+          `SELECT t.* FROM trips t ${baseWhere}
+           ORDER BY t.trip_date DESC, t.id DESC
+           LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+          pagedParams
+        );
+
+        const items: RateEntryTrip[] = [];
+        for (const row of result.rows) {
+          const deliveries = await loadDeliveries(client, num(row.id));
+          items.push(mapTrip(row, deliveries));
+        }
+        return paginatedResult(items, total, filters.pagination);
+      }
+
+      const result = await client.query(
+        `SELECT t.* FROM trips t ${baseWhere}
+         ORDER BY t.trip_date DESC, t.id DESC`,
+        params
+      );
+      const items: RateEntryTrip[] = [];
+      for (const row of result.rows) {
+        const deliveries = await loadDeliveries(client, num(row.id));
+        items.push(mapTrip(row, deliveries));
+      }
+      return items;
+    });
+  },
+
+  /**
+   * Rate Entry detail.
+   *
+   * A locked trip is still reachable (read-only) so the UI can display the
+   * finalized rates, but save/lock endpoints reject it. Eligibility for the
+   * WORK QUEUE is enforced separately (list excludes locked trips).
+   */
+  async getById(id: number): Promise<RateEntryTrip> {
+    return withTransaction(async (client) => {
+      const result = await client.query(
+        `SELECT t.* FROM trips t
+         WHERE t.id = $1
+           AND t.status = 'Completed'
+           AND COALESCE(t.deleted, FALSE) = FALSE`,
+        [id]
+      );
+      if (!result.rowCount) {
+        throw new AppError(404, `Trip ${id} is not available for Rate Entry`);
+      }
+      const deliveries = await loadDeliveries(client, id);
+      return mapTrip(result.rows[0], deliveries);
+    });
+  },
+
+  /**
+   * Save (partial / draft) shop-wise rates.
+   *
+   * - The trip must be eligible (Completed, not deleted, not already locked).
+   * - Every deliveryId in the payload must belong to that trip.
+   * - amount is ALWAYS recomputed server-side (ROUND(weight * rate, 2)).
+   * - Does NOT lock the trip.
+   */
+  async save(tripId: number, body: unknown): Promise<RateEntryTrip> {
+    const data = parseBody(rateEntrySaveSchema, body);
+
+    return withTransaction(async (client) => {
+      try {
+        const eligible = await client.query(ELIGIBLE_BY_ID, [tripId]);
+        if (!eligible.rowCount) {
+          // Distinguish "locked" (409) from "not eligible" (404) for clearer UX.
+          const current = await client.query<{
+            status: string;
+            deleted: boolean;
+            rate_completed: boolean;
+          }>(
+            `SELECT status, COALESCE(deleted,FALSE) AS deleted,
+                    COALESCE(rate_completed,FALSE) AS rate_completed
+             FROM trips WHERE id = $1`,
+            [tripId]
+          );
+          if (!current.rowCount) {
+            throw new AppError(404, `Trip ${tripId} not found`);
+          }
+          const c = current.rows[0];
+          if (c.rate_completed) {
+            throw new AppError(409, `Trip ${tripId} is already rate-locked`);
+          }
+          throw new AppError(
+            422,
+            `Trip ${tripId} is not eligible for Rate Entry (must be Completed and not deleted)`
+          );
+        }
+
+        // Validate all delivery ids belong to this trip and capture weight.
+        const deliveryIds = data.rates.map((r) => r.deliveryId);
+        const existing = await client.query<{
+          id: number;
+          weight: number;
+        }>(
+          `SELECT id, weight FROM trip_deliveries
+           WHERE trip_id = $1 AND id = ANY($2::int[])`,
+          [tripId, deliveryIds]
+        );
+        const found = new Set(existing.rows.map((r) => num(r.id)));
+        const missing = deliveryIds.filter((id) => !found.has(id));
+        if (missing.length) {
+          throw new AppError(422, "Some deliveries do not belong to this trip", {
+            tripId,
+            missingDeliveryIds: missing,
+          });
+        }
+
+        const weightById = new Map<number, number>();
+        for (const r of existing.rows) weightById.set(num(r.id), num(r.weight));
+
+        for (const item of data.rates) {
+          const weight = weightById.get(item.deliveryId) ?? 0;
+          const amount = Number((weight * item.rate).toFixed(2));
+          await client.query(
+            `UPDATE trip_deliveries
+               SET rate = $2, amount = $3, updated_at = NOW()
+             WHERE id = $1 AND trip_id = $4`,
+            [item.deliveryId, item.rate, amount, tripId]
+          );
+        }
+
+        const trip = await client.query(`SELECT * FROM trips WHERE id = $1`, [
+          tripId,
+        ]);
+        const deliveries = await loadDeliveries(client, tripId);
+        return mapTrip(trip.rows[0], deliveries);
+      } catch (err) {
+        rethrowIfAppError(err);
+        throw err;
+      }
+    });
+  },
+
+  /**
+   * Save & Lock — finalize the trip's rates.
+   *
+   * After this call:
+   *   - trips.rate_completed = TRUE
+   *   - trips.rate_locked_at / rate_locked_by are stamped
+   *   - The DB trigger makes trip_deliveries.rate/amount immutable.
+   *   - Shop Sales and Collections read the finalized rates automatically.
+   *
+   * Every delivery on the trip MUST have a non-null, non-negative rate,
+   * either already saved or supplied in `rates`.
+   */
+  async lock(tripId: number, body: unknown): Promise<RateEntryTrip> {
+    const data = parseBody(rateEntryLockSchema, body);
+
+    return withTransaction(async (client) => {
+      try {
+        // Lock the trip row against concurrent Rate Entry saves.
+        const eligible = await client.query(
+          `SELECT * FROM trips
+           WHERE id = $1
+             AND status = 'Completed'
+             AND COALESCE(deleted, FALSE) = FALSE
+             AND COALESCE(rate_completed, FALSE) = FALSE
+           FOR UPDATE`,
+          [tripId]
+        );
+        if (!eligible.rowCount) {
+          const current = await client.query<{
+            status: string;
+            deleted: boolean;
+            rate_completed: boolean;
+          }>(
+            `SELECT status, COALESCE(deleted,FALSE) AS deleted,
+                    COALESCE(rate_completed,FALSE) AS rate_completed
+             FROM trips WHERE id = $1`,
+            [tripId]
+          );
+          if (!current.rowCount) {
+            throw new AppError(404, `Trip ${tripId} not found`);
+          }
+          const c = current.rows[0];
+          if (c.rate_completed) {
+            throw new AppError(409, `Trip ${tripId} is already rate-locked`);
+          }
+          throw new AppError(
+            422,
+            `Trip ${tripId} is not eligible for Rate Entry (must be Completed and not deleted)`
+          );
+        }
+
+        // If final rates are submitted along with the lock, apply them first.
+        if (data.rates && data.rates.length) {
+          const deliveryIds = data.rates.map((r) => r.deliveryId);
+          const existing = await client.query<{
+            id: number;
+            weight: number;
+          }>(
+            `SELECT id, weight FROM trip_deliveries
+             WHERE trip_id = $1 AND id = ANY($2::int[])`,
+            [tripId, deliveryIds]
+          );
+          const found = new Set(existing.rows.map((r) => num(r.id)));
+          const missing = deliveryIds.filter((id) => !found.has(id));
+          if (missing.length) {
+            throw new AppError(422, "Some deliveries do not belong to this trip", {
+              tripId,
+              missingDeliveryIds: missing,
+            });
+          }
+          const weightById = new Map<number, number>();
+          for (const r of existing.rows) {
+            weightById.set(num(r.id), num(r.weight));
+          }
+          for (const item of data.rates) {
+            const weight = weightById.get(item.deliveryId) ?? 0;
+            const amount = Number((weight * item.rate).toFixed(2));
+            await client.query(
+              `UPDATE trip_deliveries
+                 SET rate = $2, amount = $3, updated_at = NOW()
+               WHERE id = $1 AND trip_id = $4`,
+              [item.deliveryId, item.rate, amount, tripId]
+            );
+          }
+        }
+
+        // Final validation: every shop delivery must have a rate.
+        const missing = await client.query<{ id: number; shop_name: string }>(
+          `SELECT id, shop_name FROM trip_deliveries
+           WHERE trip_id = $1 AND rate IS NULL
+           ORDER BY serial_no NULLS LAST, id`,
+          [tripId]
+        );
+        if (missing.rowCount) {
+          throw new AppError(422, "Every shop delivery must have a rate before locking", {
+            tripId,
+            missingDeliveries: missing.rows.map((r) => ({
+              deliveryId: num(r.id),
+              shopName: str(r.shop_name),
+            })),
+          });
+        }
+
+        await client.query(
+          `UPDATE trips
+             SET rate_completed = TRUE,
+                 rate_locked_at = NOW(),
+                 rate_locked_by = COALESCE($2, rate_locked_by, 'system')
+           WHERE id = $1`,
+          [tripId, data.lockedBy ?? null]
+        );
+
+        const trip = await client.query(`SELECT * FROM trips WHERE id = $1`, [
+          tripId,
+        ]);
+        const deliveries = await loadDeliveries(client, tripId);
+        return mapTrip(trip.rows[0], deliveries);
+      } catch (err) {
+        rethrowIfAppError(err);
+        throw err;
+      }
+    });
+  },
+};
+
+// Also expose a non-transactional list count for potential future use.
+export async function countEligible(): Promise<number> {
+  const r = await query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM trips t ${ELIGIBLE_WHERE}`
+  );
+  return Number(r.rows[0]?.c ?? 0);
+}
