@@ -35,6 +35,10 @@ interface TripRow {
   status: string;
   deleted: boolean;
   approvedAt: string | null;
+  /** When Rate Entry actually locked this trip — the real anchor for the
+   * 10-day Shop Sales correction window (falls back to approvedAt for trips
+   * locked before this column was populated). */
+  rateLockedAt: string | null;
   tripDate: string;
   /** Authoritative bird/weight capacity Shop Sales must never exceed. */
   capacityBirds: number;
@@ -71,6 +75,7 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
   const tripForWindow = {
     status: tripStatus,
     deleted: tripDeleted,
+    rateLockedAt: isoOrNull(row.rate_locked_at),
     approvedAt,
     tripDate,
   };
@@ -109,7 +114,7 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
 const SALE_SELECT = `
   SELECT d.*,
          t.trip_no, t.trip_date, t.status AS trip_status, t.deleted AS trip_deleted,
-         t.approved_by, t.approved_at, t.vehicle_no, t.source_farm,
+         t.approved_by, t.approved_at, t.rate_locked_at, t.vehicle_no, t.source_farm,
          re.rate AS re_rate
   FROM trip_deliveries d
   INNER JOIN trips t ON t.id = d.trip_id
@@ -132,7 +137,7 @@ const SALE_SELECT = `
  */
 async function lockTrip(client: Client, tripId: number): Promise<TripRow> {
   const result = await client.query(
-    `SELECT id, trip_no, status, deleted, approved_at, trip_date,
+    `SELECT id, trip_no, status, deleted, approved_at, rate_locked_at, trip_date,
             farm_bird_count, farm_load_weight, total_birds, dc_weight
        FROM trips WHERE id = $1 FOR UPDATE`,
     [tripId]
@@ -149,6 +154,7 @@ async function lockTrip(client: Client, tripId: number): Promise<TripRow> {
     status: str(row.status),
     deleted: Boolean(row.deleted),
     approvedAt: isoOrNull(row.approved_at),
+    rateLockedAt: isoOrNull(row.rate_locked_at),
     tripDate: dateOnly(row.trip_date) ?? "",
     capacityBirds: farmBirdCount > 0 ? farmBirdCount : totalBirds,
     capacityWeight: farmLoadWeight > 0 ? farmLoadWeight : dcWeight,

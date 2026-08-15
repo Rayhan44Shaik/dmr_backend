@@ -108,14 +108,6 @@ export async function postJson(
   return { status: res.status, body: await res.json() };
 }
 
-export async function getJson(
-  baseUrl: string,
-  apiPath: string
-): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${baseUrl}${apiPath}`);
-  return { status: res.status, body: await res.json() };
-}
-
 export async function putJson(
   baseUrl: string,
   apiPath: string,
@@ -139,5 +131,13 @@ export async function patchJson(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+  return { status: res.status, body: await res.json() };
+}
+
+export async function getJson(
+  baseUrl: string,
+  apiPath: string
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${apiPath}`);
   return { status: res.status, body: await res.json() };
 }

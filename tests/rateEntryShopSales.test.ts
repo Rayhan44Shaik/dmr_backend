@@ -533,21 +533,32 @@ describe("10-day Shop Sales edit window", () => {
     });
     await postJson(baseUrl, `/api/operations/rate-entry/trip/${trip.id}/lock`, {});
 
-    // Backdate approved_at to just under 10 full days before "now" (a small
-    // safety margin below the exact boundary avoids test flakiness from the
-    // few milliseconds of request latency between computing "now" here and
-    // the server evaluating its own `new Date() <= expiresAt` check) — still
-    // inside the window per isTripEditable()'s inclusive `<=` comparison.
+    // The window anchor is rate_locked_at (when Shop Sales actually became
+    // available — see tripDeliverySync.ts editWindowAnchor), not approved_at.
+    // Backdate rate_locked_at to just under 10 full days before "now" (a
+    // small safety margin below the exact boundary avoids test flakiness
+    // from the few milliseconds of request latency between computing "now"
+    // here and the server evaluating its own `new Date() <= expiresAt`
+    // check) — still inside the window per isTripEditable()'s inclusive
+    // `<=` comparison. approved_at is also backdated so the fallback path
+    // is exercised identically for any legacy trip locked before
+    // rate_locked_at existed.
     const justUnderTenDays = new Date(
       Date.now() - (10 * 24 * 60 * 60 * 1000 - 60_000)
     ).toISOString();
-    await pool.query(`UPDATE trips SET approved_at = $2 WHERE id = $1`, [trip.id, justUnderTenDays]);
+    await pool.query(
+      `UPDATE trips SET approved_at = $2, rate_locked_at = $2 WHERE id = $1`,
+      [trip.id, justUnderTenDays]
+    );
     const atDay10 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 120 });
     assert.equal(atDay10.status, 200, "day 10 must still be editable (inclusive boundary)");
 
     // Backdate to 11 days ago — now past the window.
     const elevenDaysAgo = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trips SET approved_at = $2 WHERE id = $1`, [trip.id, elevenDaysAgo]);
+    await pool.query(
+      `UPDATE trips SET approved_at = $2, rate_locked_at = $2 WHERE id = $1`,
+      [trip.id, elevenDaysAgo]
+    );
     const atDay11 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 150 });
     assert.equal(atDay11.status, 409, "day 11 must be rejected");
 

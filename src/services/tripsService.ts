@@ -29,7 +29,7 @@ import {
   sumDieselFuel,
 } from "../utils/tripCalculations.js";
 import { loadDcPhoto, syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
-import { generateSaleNo } from "../utils/tripDeliverySync.js";
+import { assertWithinCapacity, generateSaleNo } from "../utils/tripDeliverySync.js";
 import {
   getLatestVehicleMeter,
   lockVehicleForMeterWrite,
@@ -602,11 +602,83 @@ async function replaceBoxes(client: Client, tripId: number, boxes: BoxDetail[] =
   }
 }
 
+/**
+ * Trip Entry Step 4 (Deliveries) capacity guard — backend-authoritative,
+ * mirrors the same rule already proven correct for Shop Sales edits
+ * (assertWithinCapacity / sumActiveDeliveries in tripDeliverySync.ts, and
+ * shopSalesService.ts's lockTrip()): the sum of every shop delivery's birds
+ * PLUS mortality must never exceed the trip's originally loaded birds, and
+ * the sum of every delivery's weight PLUS mortality-weight must never
+ * exceed the originally loaded weight. Birds and weight are independent —
+ * neither is derived from the other.
+ *
+ * replaceDeliveries() below is a full delete+reinsert of the whole delivery
+ * list in one call (not a single-row edit like Shop Sales), so there is no
+ * "existing minus self" to exclude — every row in the incoming `deliveries`
+ * array is summed against the trip's own capacity. The trip row is locked
+ * FOR UPDATE first (same pattern already proven correct under real
+ * concurrency for Shop Sales in shopSalesService.ts) so two concurrent Step
+ * 4 submissions for the same trip can never both race past capacity.
+ */
+async function assertDeliveriesWithinCapacity(
+  client: Client,
+  tripId: number,
+  deliveries: ShopDelivery[]
+): Promise<void> {
+  const tripRow = await client.query<{
+    farm_bird_count: number | null;
+    farm_load_weight: string | null;
+    total_birds: number | null;
+    dc_weight: string | null;
+  }>(
+    `SELECT farm_bird_count, farm_load_weight, total_birds, dc_weight
+       FROM trips WHERE id = $1 FOR UPDATE`,
+    [tripId]
+  );
+  if (!tripRow.rowCount) return; // caller already guarantees the trip exists
+  const row = tripRow.rows[0];
+  const farmBirdCount = num(row.farm_bird_count);
+  const farmLoadWeight = num(row.farm_load_weight);
+  const capacityBirds = farmBirdCount > 0 ? farmBirdCount : num(row.total_birds);
+  const capacityWeight = farmLoadWeight > 0 ? farmLoadWeight : num(row.dc_weight);
+
+  let totalBirds = 0;
+  let totalWeight = 0;
+  for (const d of deliveries) {
+    const birds = Number(d.birds ?? 0);
+    const weight = Number(d.weight ?? 0);
+    if (!Number.isInteger(birds) || birds < 0) {
+      throw new AppError(422, `Shop delivery birds must be a non-negative whole number (got ${d.birds}).`);
+    }
+    if (!Number.isFinite(weight) || weight < 0) {
+      throw new AppError(422, `Shop delivery weight must be a non-negative number (got ${d.weight}).`);
+    }
+    totalBirds += birds + Number(d.mortality ?? 0);
+    totalWeight += weight + Number(d.mortKg ?? 0);
+  }
+
+  assertWithinCapacity({
+    label: "birds",
+    available: capacityBirds,
+    alreadyAllocated: 0,
+    requested: totalBirds,
+  });
+  assertWithinCapacity({
+    label: "weight",
+    available: capacityWeight,
+    alreadyAllocated: 0,
+    requested: totalWeight,
+  });
+}
+
 async function replaceDeliveries(
   client: Client,
   tripId: number,
   deliveries: ShopDelivery[] = []
 ) {
+  if (deliveries.length > 0) {
+    await assertDeliveriesWithinCapacity(client, tripId, deliveries);
+  }
   await client.query(`DELETE FROM trip_deliveries WHERE trip_id = $1`, [tripId]);
   if (deliveries.length === 0) return;
 

@@ -15,6 +15,7 @@
     { "name": "Staff" },
     { "name": "Operations Dashboard" },
     { "name": "Operations Trips" },
+    { "name": "Rate Entry" },
     { "name": "Shop Rates" },
     { "name": "Shop Sales" },
     { "name": "Collections" },
@@ -201,6 +202,116 @@
         "responses": {
           "200": { "description": "Trip", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TripSummary" } } } },
           "404": { "description": "Not eligible / not found" }
+        }
+      }
+    },
+    "/api/operations/rate-entry": {
+      "get": {
+        "tags": ["Rate Entry"],
+        "summary": "List trips eligible for rate entry (Approved/Completed, not deleted, not already locked)",
+        "parameters": [
+          { "name": "fromDate", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "toDate", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "vehicleNo", "in": "query", "schema": { "type": "string" } },
+          { "name": "supervisorName", "in": "query", "schema": { "type": "string" } },
+          { "name": "search", "in": "query", "schema": { "type": "string" } },
+          { "name": "rateStatus", "in": "query", "schema": { "type": "string", "enum": ["Pending", "Entered"] } },
+          { "name": "page", "in": "query", "schema": { "type": "integer" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Eligible trips" } }
+      },
+      "post": {
+        "tags": ["Rate Entry"],
+        "summary": "Save (upsert) a trip's rate entry — does not lock the trip. Rate must be ₹50-₹300.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["tripId", "rate"],
+                "properties": {
+                  "tripId": { "type": "integer" },
+                  "rate": { "type": "number", "minimum": 50, "maximum": 300 },
+                  "deliveries": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["id", "rate"],
+                      "properties": {
+                        "id": { "type": "integer" },
+                        "rate": { "type": "number", "minimum": 50, "maximum": 300 }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Rate entry saved" },
+          "400": { "description": "Rate outside ₹50-₹300, or other validation error" },
+          "409": { "description": "Trip not eligible, or rate already locked" }
+        }
+      }
+    },
+    "/api/operations/rate-entry/trip/{tripId}": {
+      "get": {
+        "tags": ["Rate Entry"],
+        "summary": "Get the saved rate entry for a trip (if any)",
+        "parameters": [
+          { "name": "tripId", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": { "description": "Rate entry" },
+          "404": { "description": "No rate entered for this trip yet" }
+        }
+      }
+    },
+    "/api/operations/rate-entry/{id}": {
+      "get": {
+        "tags": ["Rate Entry"],
+        "summary": "Get a rate entry by its own id",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Rate entry" }, "404": { "description": "Not found" } }
+      },
+      "put": {
+        "tags": ["Rate Entry"],
+        "summary": "Edit a saved (unlocked) rate entry — rejected once locked. Rate must be ₹50-₹300.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": { "description": "Updated rate entry" },
+          "400": { "description": "Rate outside ₹50-₹300" },
+          "409": { "description": "Rate entry is locked" }
+        }
+      }
+    },
+    "/api/operations/rate-entry/trip/{tripId}/lock": {
+      "post": {
+        "tags": ["Rate Entry"],
+        "summary": "Explicit Save & Lock — the only way a trip's rate becomes eligible for Shop Sales. Locking does NOT freeze the rate; Shop Sales may still correct birds/weight/rate within the 10-day window.",
+        "parameters": [
+          { "name": "tripId", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "lockedBy": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Trip rates locked" },
+          "409": { "description": "Already locked, or no saved rates to lock" }
         }
       }
     },

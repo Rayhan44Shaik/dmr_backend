@@ -517,15 +517,26 @@ export const rateEntryService = {
           [existing.id, data.lockedBy ?? "system"]
         );
 
-        // Keep the legacy trips.rate_completed cache column in sync, in the
-        // same transaction, so it never drifts from the one authoritative
-        // signal (rate_entry.locked). This is the ONLY place that writes
-        // rate_completed = TRUE — no other module may set it independently
-        // (see collectionsService.ts and tripsService.save(), which no
-        // longer accept/apply it). Dashboard/Collections read rate_entry
-        // directly rather than trusting this column, but it's kept
-        // accurate regardless for any other/future consumer.
-        await client.query(`UPDATE trips SET rate_completed = TRUE WHERE id = $1`, [tripId]);
+        // Keep the legacy trips.rate_completed / rate_locked_at / rate_locked_by
+        // cache columns in sync, in the same transaction, so they never drift
+        // from the one authoritative signal (rate_entry.locked/.lockedAt).
+        // This is the ONLY place that writes rate_completed = TRUE — no other
+        // module may set it independently (see collectionsService.ts and
+        // tripsService.save(), which no longer accept/apply it). rate_locked_at
+        // is the real anchor for the 10-day Shop Sales correction window
+        // (tripDeliverySync.ts editWindowAnchor prefers it over approved_at) —
+        // stamping it here, at the moment Shop Sales actually becomes
+        // available, matches the business rule literally: LOCK -> Shop Sales
+        // available -> 10-day window starts now, not back when the trip was
+        // merely approved/completed.
+        await client.query(
+          `UPDATE trips
+             SET rate_completed = TRUE,
+                 rate_locked_at = NOW(),
+                 rate_locked_by = $2
+           WHERE id = $1`,
+          [tripId, data.lockedBy ?? "system"]
+        );
 
         const row = await client.query(
           `SELECT r.*, t.trip_no FROM rate_entry r JOIN trips t ON t.id = r.trip_id WHERE r.id = $1`,

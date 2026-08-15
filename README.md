@@ -130,6 +130,7 @@ Base path: `/api/operations`
 | Dashboard | `GET /dashboard` (Completed trips; Approved sales/collections/fuel) |
 | Trips | `GET/POST /trips`, `PUT /trips/:id`, `POST /trips/:id/steps/:step`, `PATCH /trips/:id/status`, `DELETE /trips/:id` |
 | Trip List | `GET /trip-list`, `GET /trip-list/:id` — read-only, completed/approved trips only |
+| Rate Entry | `GET /rate-entry`, `GET /rate-entry/trip/:tripId`, `GET/POST/PUT /rate-entry/:id`, `POST /rate-entry/trip/:tripId/lock` |
 | Shop Rates | `GET/POST /shop-rates`, `PUT/PATCH/DELETE /shop-rates/:id` |
 | Shop Sales | `GET/POST /shop-sales`, `PUT/PATCH/DELETE /shop-sales/:id` |
 | Collections | `GET/POST /collections`, `GET /collections/pending|register|running-balance` |
@@ -138,6 +139,55 @@ Base path: `/api/operations`
 Swagger UI: `GET /api/docs` · OpenAPI JSON: `GET /api/docs/openapi.json`
 
 Trip statuses (`trip_status`): Draft → Pending → Completed | Deleted (soft delete only).
+
+### Rate Entry (operational work queue)
+
+Rate Entry finalizes shop-wise rates on trips that are **Approved or
+Completed**. The authoritative lock record is a dedicated `rate_entry` table
+(one row per trip, FK to `trips.id`), with a legacy `trips.rate_completed`
+cache column kept in sync for any other consumer:
+
+```
+rate_entry.locked (authoritative)  ──sync──>  trips.rate_completed (cache)
+   └─ trip_deliveries.rate      ← actual rate entered per shop
+      trip_deliveries.amount    ← ROUND(weight * rate, 2), computed server-side
+```
+
+Eligibility is enforced in the SQL WHERE clause, never in the client:
+
+- `trips.status IN ('Approved', 'Completed')`
+- `trips.deleted = FALSE`
+- `rate_entry.locked = FALSE` (or no rate_entry row yet)
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/operations/rate-entry` | List eligible trips (server-side filters + pagination) |
+| `GET /api/operations/rate-entry/trip/:tripId` | The saved rate entry for a trip, if any |
+| `POST /api/operations/rate-entry` | Save (upsert) `{ tripId, rate, deliveries? }` — does not lock; rate must be ₹50–₹300 |
+| `PUT /api/operations/rate-entry/:id` | Edit a saved, unlocked rate entry — rejected once locked |
+| `POST /api/operations/rate-entry/trip/:tripId/lock` | Save & Lock — every delivery must have a rate; sets `rate_entry.locked=TRUE` and `trips.rate_completed=TRUE` |
+
+Once a trip is locked:
+
+- `rate_entry.locked = TRUE`, `locked_by` / `locked_at` are stamped, and
+  `trips.rate_completed = TRUE` / `rate_locked_at` / `rate_locked_by` are kept
+  in sync in the same transaction for any consumer that reads the trip row
+  directly.
+- **Locking is NOT rate immutability.** It only means the trip has moved from
+  Rate Entry into Shop Sales. A **10-day Shop Sales correction window** starts
+  at the lock timestamp.
+- **During the 10-day window**, Shop Sales may correct Birds, Weight, and Rate
+  (rate still constrained to ₹50–₹300). Amount is ALWAYS recomputed
+  server-side (`ROUND(weight * rate, 2)`); the client value is never trusted.
+- **After exactly 10 days**, Birds, Weight, Rate, Amount and delete become
+  PERMANENTLY blocked — enforced at the application layer
+  (`assertTripEditable`, `src/utils/tripDeliverySync.ts`) AND, as a
+  defense-in-depth backstop, by a PostgreSQL trigger
+  (`trg_trip_deliveries_rate_lock`, `sql/008_rate_entry_lock.sql`) that
+  rejects UPDATEs of those columns and DELETEs of locked delivery rows using
+  SERVER time — no client, service, or direct SQL bypass is possible.
+- A locked trip disappears from the Rate Entry work queue but remains
+  reachable read-only via `GET /rate-entry/:id` and in Trip List.
 
 ### Trip List (read-only historical view)
 

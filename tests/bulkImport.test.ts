@@ -26,10 +26,11 @@ await applySchema();
 const app: TestApp = await startApp({ DATABASE_URL: testDb.url });
 const baseUrl = app.baseUrl;
 
+const { pool } = await import("../src/config/db.js");
+
 after(async () => {
   await app.close();
   await testDb.close();
-  const { pool } = await import("../src/config/db.js");
   await pool.end();
 });
 
@@ -122,7 +123,10 @@ const suites: SuiteOptions[] = [
     invalidPhoneRow: { shopName: "Phone Test", phoneNumber: "not-a-phone" },
     invalidDateRow: null,
     dbViolationRow: { shopName: "X".repeat(300) }, // VARCHAR(200) → 22001
-    legacyRow: { shopName: "Legacy Shop", openingBalance: 9999, closingBalance: 8888 },
+    // openingBalance is a real, persisted shop column (masterValidation.ts) —
+    // use a field that is genuinely never persisted to test the "ignores
+    // unknown fields" contract.
+    legacyRow: { shopName: "Legacy Shop", closingBalance: 8888, oldSpreadsheetRef: "XYZ-1" },
     numericStringRow: null,
     numericStringExpect: () => {},
   },
@@ -158,7 +162,10 @@ const suites: SuiteOptions[] = [
     invalidPhoneRow: null,
     invalidDateRow: { vehicleNumber: "AP39DATE", insuranceExpiry: "not-a-date" },
     dbViolationRow: { vehicleNumber: "AP39OVER", purchaseAmount: 1e14 }, // NUMERIC(14,2) → 22003
-    legacyRow: { vehicleNumber: "AP39LEGACY", emiDay: 5, totalEMIs: 24 },
+    // emiDay/totalEMIs are real, persisted vehicle columns now — use fields
+    // that are genuinely never persisted to test the "ignores unknown
+    // fields" contract.
+    legacyRow: { vehicleNumber: "AP39LEGACY", oldFleetCode: "FC-1", odometerLegacy: 12345 },
     numericStringRow: { vehicleNumber: "AP39STR", noOfBoxes: "90", capacityKg: "7000.5" },
     numericStringExpect: (c) => {
       assert.equal(c.noOfBoxes, 90);
@@ -175,9 +182,12 @@ const suites: SuiteOptions[] = [
     requiredField: "employeeName",
     makeValid: (n) => ({
       employeeName: `Employee ${n}`,
-      department: "Fleet",
+      department: "Driver",
       role: "Driver",
-      phoneNumber: `98888000${String(n).padStart(2, "0")}`,
+      // Fixed-width template (7 + 3 digits = 10 total) — padStart(2, ...)
+      // silently produced an 11-digit number for any n >= 100 (test 12 uses
+      // n=100), failing the exactly-10-digits validation.
+      phoneNumber: `9888800${String(n).padStart(3, "0")}`,
       email: `emp${n}@example.com`,
       address: "Address",
       joiningDate: "2025-01-10",
@@ -209,7 +219,10 @@ const suites: SuiteOptions[] = [
       farmName: `Farm ${n}`,
       ownerName: `Owner ${n}`,
       supervisorName: `Supervisor ${n}`,
-      phoneNumber: `97777000${String(n).padStart(2, "0")}`,
+      // Fixed-width template (7 + 3 digits = 10 total) — padStart(2, ...)
+      // silently produced an 11-digit number for any n >= 100 (test 12 uses
+      // n=100), failing the exactly-10-digits validation.
+      phoneNumber: `9777700${String(n).padStart(3, "0")}`,
       village: "Village",
       address: "Address",
       capacity: 20000,
@@ -477,10 +490,20 @@ describe("existing singular master CRUD regression", () => {
       assert.equal(updatedBody.id, id);
       assert.equal(updatedBody[s.requiredField], updatedRow[s.requiredField]);
 
-      // delete
+      // delete — every master's singular DELETE is a soft delete
+      // (status -> 'Inactive'; see mastersService.ts deleteShop/deleteVehicle/
+      // deleteEmployee/deleteFarm/deleteBirdType), preserving the row for
+      // historical/referential integrity rather than removing it. The row
+      // count therefore stays 1, not 0; the delete is verified by re-reading
+      // the row's status.
       const deleted = await fetch(`${baseUrl}${s.singularPath}/${id}`, { method: "DELETE" });
       assert.equal(deleted.status, 200);
-      assert.equal(await countRows(s.table), 0);
+      assert.equal(await countRows(s.table), 1, "soft-delete preserves the row");
+      const statusCheck = await pool.query(
+        `SELECT status FROM ${s.table} WHERE id = $1`,
+        [id]
+      );
+      assert.equal(statusCheck.rows[0]?.status, "Inactive", "soft-deleted row must be Inactive");
     }
   });
 
