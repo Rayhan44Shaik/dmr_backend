@@ -23,12 +23,14 @@ import {
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
 await applySchema();
-const app: TestApp = await startApp();
+const app: TestApp = await startApp({ DATABASE_URL: testDb.url });
 const baseUrl = app.baseUrl;
 
 after(async () => {
   await app.close();
   await testDb.close();
+  const { pool } = await import("../src/config/db.js");
+  await pool.end();
 });
 
 beforeEach(async () => {

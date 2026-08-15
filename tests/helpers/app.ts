@@ -1,33 +1,96 @@
 /**
- * Starts the real Express app (src/index.ts) on an ephemeral port and exposes
- * an HTTP test client. Must be called AFTER process.env.DATABASE_URL is set
- * and the schema has been applied.
+ * Boots the production server (src/index.ts, unmodified) as a child process
+ * on an ephemeral port and exposes an HTTP test client.
+ *
+ * Spawning a child process keeps the production entry point untouched — tests
+ * talk to the exact same server the app runs in production.
  */
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { spawn, type ChildProcess } from "node:child_process";
+import net from "node:net";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 
 export interface TestApp {
   baseUrl: string;
   close: () => Promise<void>;
 }
 
-export async function startApp(): Promise<TestApp> {
-  const { app } = await import("../../src/index.js");
-  const server: Server = app.listen(0, "127.0.0.1");
-  await new Promise<void>((resolve, reject) => {
-    server.once("listening", resolve);
-    server.once("error", reject);
+function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const address = srv.address();
+      if (address === null || typeof address === "string") {
+        srv.close();
+        reject(new Error("could not allocate test port"));
+        return;
+      }
+      srv.close(() => resolve(address.port));
+    });
   });
-  const address = server.address() as AddressInfo;
+}
+
+export async function startApp(env: Record<string, string>): Promise<TestApp> {
+  const port = await getFreePort();
+
+  const child: ChildProcess = spawn(
+    process.execPath,
+    ["--import", "tsx", "src/index.ts"],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PORT: String(port),
+        CORS_ORIGIN: "*",
+        ...env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  // Wait for the health endpoint to come up (the server does
+  // `SELECT 1`-equivalent checks before listening).
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    if (child.exitCode !== null) {
+      throw new Error(`test server exited early (code ${child.exitCode}):\n${stderr}`);
+    }
+    try {
+      const res = await fetch(`${baseUrl}/api/health`);
+      if (res.ok) break;
+    } catch {
+      /* not up yet */
+    }
+    if (Date.now() > deadline) {
+      child.kill("SIGKILL");
+      throw new Error(`test server did not start within 30s:\n${stderr}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
 
   return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
+    baseUrl,
     close: async () => {
-      await new Promise<void>((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
-      });
-      const { pool } = await import("../../src/config/db.js");
-      await pool.end();
+      if (child.exitCode === null) {
+        child.kill("SIGTERM");
+        await Promise.race([
+          new Promise<void>((resolve) => child.once("exit", () => resolve())),
+          new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+        ]);
+      }
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+      }
     },
   };
 }
