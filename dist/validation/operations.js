@@ -30,6 +30,21 @@ export const shopRateBodySchema = z.object({
     status: opsStatusSchema.optional(),
     createdBy: z.string().optional(),
 });
+/**
+ * Shop Sales rate-edit range. Rate Entry's own "Save & Lock" flow gets a
+ * trip into Shop Sales, but locking is NOT rate immutability — within the
+ * 10-day Shop Sales edit window (tripDeliverySync.ts assertTripEditable),
+ * the shop-wise rate may still be corrected, subject to this same
+ * ₹50–₹300 range the Rate Entry UI has always used. After the window
+ * closes, assertTripEditable already rejects every field, rate included.
+ */
+export const MIN_SHOP_SALE_RATE = 50;
+export const MAX_SHOP_SALE_RATE = 300;
+export function assertShopSaleRateInRange(rate) {
+    if (rate < MIN_SHOP_SALE_RATE || rate > MAX_SHOP_SALE_RATE) {
+        throw new AppError(400, `Rate must be between ₹${MIN_SHOP_SALE_RATE} and ₹${MAX_SHOP_SALE_RATE} (got ₹${rate}).`);
+    }
+}
 export const shopSaleBodySchema = z.object({
     saleNo: z.string().optional(),
     // Derived from the trip (trips.trip_date) — never read from the client.

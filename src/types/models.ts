@@ -353,6 +353,14 @@ export interface SalaryRecord {
   presentDays?: number;
   leaveDays?: number;
   weeklyOffDays?: number;
+  /** True when every record for this payroll month is Paid with an expired
+   *  correction window (derived by the service at read time — never stored).
+   *  Closed months reject all mutations. */
+  monthClosed?: boolean;
+  /** Whole calendar days left in the 7-day correction window measured from
+   *  paid_at (0 when expired). null unless the record is Paid. Derived by the
+   *  service at read time so the UI never computes the window itself. */
+  correctionWindowDaysRemaining?: number | null;
 }
 
 export interface AdvanceLoan {

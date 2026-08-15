@@ -146,6 +146,37 @@ function correctionWindowExpired(paidAt: string | null | undefined): boolean {
   return ms + SALARY_CORRECTION_DAYS * 86_400_000 < Date.now();
 }
 
+/** Whole calendar days remaining in the 7-day correction window (0 when
+ *  expired, null when the record is not Paid / has no paid_at). */
+function correctionWindowDaysRemaining(paidAt: string | null | undefined): number | null {
+  if (!paidAt) return null;
+  const ms = new Date(paidAt).getTime();
+  if (!Number.isFinite(ms)) return null;
+  const remaining = Math.ceil(
+    (ms + SALARY_CORRECTION_DAYS * 86_400_000 - Date.now()) / 86_400_000
+  );
+  return remaining >= 0 ? remaining : 0;
+}
+
+/** Adds derived lifecycle flags so the UI can reflect the backend state
+ *  (closed month, correction-window countdown) without recomputing it.
+ *  `monthClosed` is evaluated once per distinct month, not per row. */
+async function enrichSalaryLifecycle(
+  records: SalaryRecord[]
+): Promise<SalaryRecord[]> {
+  const months = Array.from(new Set(records.map((r) => r.month)));
+  const closed = new Set<string>();
+  for (const m of months) {
+    if (await salaryMonthIsClosed(m)) closed.add(m);
+  }
+  return records.map((r) => ({
+    ...r,
+    monthClosed: closed.has(r.month),
+    correctionWindowDaysRemaining:
+      r.status === "Paid" ? correctionWindowDaysRemaining(r.paidAt) : null,
+  }));
+}
+
 export const staffService = {
   // ── Duty Planner ──────────────────────────────────────────────
   async listDuties(fromDate?: string, toDate?: string, department?: string) {
@@ -317,7 +348,7 @@ export const staffService = {
     );
     const records = result.rows.map(mapSalary);
     const months = Array.from(new Set(records.map((r) => r.month)));
-    return this.enrichAttendance(records, months);
+    return enrichSalaryLifecycle(await this.enrichAttendance(records, months));
   },
 
   async getEmployeeSalary(employeeId: number, month: string): Promise<SalaryRecord> {
@@ -329,7 +360,7 @@ export const staffService = {
     );
     if (!result.rowCount) throw new AppError(404, "Salary record not found for this employee and month");
     const records = await this.enrichAttendance([mapSalary(result.rows[0])], [month]);
-    return records[0];
+    return (await enrichSalaryLifecycle(records))[0];
   },
 
   /** Look up the DB employee (validates employeeId) and resolve the default

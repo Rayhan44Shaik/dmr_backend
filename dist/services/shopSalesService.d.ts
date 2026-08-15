@@ -17,16 +17,17 @@ export declare const shopSalesService: {
     getById(id: number): Promise<ShopSale>;
     create(body: unknown): Promise<ShopSale>;
     /**
-     * Reaching this function already requires the trip's Rate Entry to be
-     * locked (assertRateEntryLocked below) — so `rate`/`amount` are always
-     * the LOCKED price at this point, never an unpriced placeholder. Once
-     * locked, the price is immutable: Shop Sales may only correct
-     * birds/weight/mortality/remarks/bird type, never re-price a delivery or
-     * reassign it to a different shop/trip. A client that includes
-     * rate/amount/shopId/shopName/tripId in the request body is rejected
-     * outright (409) rather than having those fields silently dropped, so
-     * the immutability is an explicit, visible contract rather than a
-     * side-effect of which SQL columns happen to be in the UPDATE.
+     * Rate Entry LOCKED only means "this trip has moved from Rate Entry into
+     * Shop Sales" — it is NOT rate immutability. Within the 10-day Shop
+     * Sales edit window (assertTripEditable below — the same window that
+     * already gates birds/weight/delete), birds, weight, AND rate may all be
+     * corrected, each subject to its own validation (capacity for
+     * birds/weight, ₹50–₹300 for rate). Shop/trip reassignment remains
+     * permanently blocked — the data model has no safe way to reassign a
+     * delivery to a different shop/trip, independent of the edit window.
+     * Once the 10-day window closes, assertTripEditable rejects the whole
+     * update (birds, weight, rate, everything) — that is the real "Shop
+     * Sales trip locked" state, not rate_entry.locked.
      */
     update(id: number, body: unknown): Promise<ShopSale>;
     /**

@@ -195,19 +195,22 @@ describe("Shop Sales visibility vs Rate Entry lock", () => {
         assert.equal(created.amount, Number((40 * 55.5).toFixed(2)));
         assert.equal(created.status, "Approved");
         assert.equal(created.editable, true);
-        // Rate is immutable once Rate Entry is locked — Shop Sales may only
-        // correct birds/weight/mortality/remarks/bird type. Sending `rate` is
-        // rejected outright (409), not silently ignored.
-        await assert.rejects(() => shopSalesService.update(created.id, { birds: 25, weight: 50, rate: 60 }), (err) => err instanceof AppError && err.status === 409);
+        // Rate Entry LOCKED moves the trip into Shop Sales — it does NOT make
+        // the rate immutable. Within the 10-day edit window, birds/weight/rate
+        // may all be corrected together, subject to their own validation
+        // (capacity for birds/weight, ₹50–₹300 for rate).
         const updated = await shopSalesService.update(created.id, {
             birds: 25,
             weight: 50,
+            rate: 60,
         });
         assert.equal(updated.birds, 25);
         assert.equal(updated.weight, 50);
-        // rate stays the locked Rate Entry price — never client-supplied.
-        assert.equal(updated.rate, 55.5);
-        assert.equal(updated.amount, Number((50 * 55.5).toFixed(2)));
+        assert.equal(updated.rate, 60);
+        assert.equal(updated.amount, Number((50 * 60).toFixed(2)));
+        // Shop/trip reassignment remains permanently blocked, independent of
+        // the edit window.
+        await assert.rejects(() => shopSalesService.update(created.id, { shopId: shop.id }), (err) => err instanceof AppError && err.status === 409);
         const removed = await shopSalesService.softDelete(created.id, "test cleanup");
         assert.equal(removed.deleted, true);
         const list = (await shopSalesService.list({ shopId: shop.id }));

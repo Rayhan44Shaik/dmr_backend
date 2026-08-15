@@ -57,6 +57,17 @@ export declare const shopRateBodySchema: z.ZodObject<{
     remarks?: string | undefined;
     createdBy?: string | undefined;
 }>;
+/**
+ * Shop Sales rate-edit range. Rate Entry's own "Save & Lock" flow gets a
+ * trip into Shop Sales, but locking is NOT rate immutability — within the
+ * 10-day Shop Sales edit window (tripDeliverySync.ts assertTripEditable),
+ * the shop-wise rate may still be corrected, subject to this same
+ * ₹50–₹300 range the Rate Entry UI has always used. After the window
+ * closes, assertTripEditable already rejects every field, rate included.
+ */
+export declare const MIN_SHOP_SALE_RATE = 50;
+export declare const MAX_SHOP_SALE_RATE = 300;
+export declare function assertShopSaleRateInRange(rate: number): void;
 export declare const shopSaleBodySchema: z.ZodObject<{
     saleNo: z.ZodOptional<z.ZodString>;
     saleDate: z.ZodOptional<z.ZodString>;

@@ -51,6 +51,8 @@ async function seedMasters() {
     noOfBoxes: 85,
     birdCapacity: 5000,
     capacityKg: 6000,
+    engineNumber: "TLENG0001",
+    chassisNumber: "TLCHS0001",
     status: "Active",
   });
   const vehicle2 = await mastersService.upsertVehicle({
@@ -59,29 +61,64 @@ async function seedMasters() {
     noOfBoxes: 50,
     birdCapacity: 2300,
     capacityKg: 5000,
+    engineNumber: "TLENG0002",
+    chassisNumber: "TLCHS0002",
     status: "Active",
   });
   const driver = await mastersService.upsertEmployee({
     employeeName: "TL Driver",
-    department: "Fleet",
+    department: "Driver",
     role: "Driver",
     phoneNumber: "9000000001",
+    licenseNumber: "TLDL0001",
     salary: 18000,
     status: "Active",
   });
   const driver2 = await mastersService.upsertEmployee({
     employeeName: "TL Driver 2",
-    department: "Fleet",
+    department: "Driver",
     role: "Driver",
     phoneNumber: "9000000002",
+    licenseNumber: "TLDL0002",
     salary: 18000,
     status: "Active",
   });
   const supervisor = await mastersService.upsertEmployee({
     employeeName: "TL Supervisor",
-    department: "Ops",
+    department: "Supervisor",
     role: "Supervisor",
     phoneNumber: "9000000003",
+    salary: 24000,
+    status: "Active",
+  });
+  // Dedicated resources for the Draft-status fixture trip below: a trip left
+  // in Draft never releases its vehicle/driver/supervisor (see
+  // src/validation/tripResourceValidation.ts), so it must not share
+  // resources with any of the other (Pending/Completed) fixture trips.
+  const draftVehicle = await mastersService.upsertVehicle({
+    vehicleNumber: "AP39TL0003",
+    vehicleType: "Lorry",
+    noOfBoxes: 60,
+    birdCapacity: 3000,
+    capacityKg: 4000,
+    engineNumber: "TLENG0003",
+    chassisNumber: "TLCHS0003",
+    status: "Active",
+  });
+  const draftDriver = await mastersService.upsertEmployee({
+    employeeName: "TL Draft Driver",
+    department: "Driver",
+    role: "Driver",
+    phoneNumber: "9000000004",
+    licenseNumber: "TLDL0003",
+    salary: 18000,
+    status: "Active",
+  });
+  const draftSupervisor = await mastersService.upsertEmployee({
+    employeeName: "TL Draft Supervisor",
+    department: "Supervisor",
+    role: "Supervisor",
+    phoneNumber: "9000000005",
     salary: 24000,
     status: "Active",
   });
@@ -102,7 +139,18 @@ async function seedMasters() {
     status: "Active",
   });
 
-  return { vehicle, vehicle2, driver, driver2, supervisor, farm, birdType };
+  return {
+    vehicle,
+    vehicle2,
+    driver,
+    driver2,
+    supervisor,
+    draftVehicle,
+    draftDriver,
+    draftSupervisor,
+    farm,
+    birdType,
+  };
 }
 
 interface TripInput {
@@ -149,6 +197,8 @@ let completedB: Awaited<ReturnType<typeof makeTrip>>;
 let softDeletedTrip: Awaited<ReturnType<typeof makeTrip>>;
 let flagDeletedCompletedId: number;
 let statusDeletedId: number;
+let flagDeletedTripNo: string;
+let statusDeletedTripNo: string;
 
 before(async () => {
   m = await seedMasters();
@@ -158,6 +208,9 @@ before(async () => {
     tripDate: "2026-08-10",
     status: "Draft",
     submitted: false,
+    vehicleId: m.draftVehicle.id,
+    driverId: m.draftDriver.id,
+    supervisorId: m.draftSupervisor.id,
   });
   pendingTrip = await makeTrip(m, {
     tripNo: "TRP-TL-PENDING-001",
@@ -197,6 +250,7 @@ before(async () => {
     submitted: true,
   });
   flagDeletedCompletedId = flagOnly.id;
+  flagDeletedTripNo = flagOnly.tripNo;
   await pool.query(`UPDATE trips SET deleted = TRUE WHERE id = $1`, [flagOnly.id]);
 
   // Legacy inconsistent state 2: status 'Deleted', deleted flag left FALSE.
@@ -207,6 +261,7 @@ before(async () => {
     submitted: true,
   });
   statusDeletedId = statusOnly.id;
+  statusDeletedTripNo = statusOnly.tripNo;
   await pool.query(`UPDATE trips SET status = 'Deleted' WHERE id = $1`, [
     statusOnly.id,
   ]);
@@ -223,23 +278,23 @@ describe("Trip List eligibility", () => {
     assert.ok(Array.isArray(body.data), "response must be paginated { data, meta }");
 
     const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
-    assert.ok(tripNos.includes("TRP-TL-COMP-001"), "completed trip must appear");
-    assert.ok(tripNos.includes("TRP-TL-COMP-002"), "second completed trip must appear");
-    assert.ok(!tripNos.includes("TRP-TL-DRAFT-001"), "draft trip must NOT appear");
-    assert.ok(!tripNos.includes("TRP-TL-PENDING-001"), "pending trip must NOT appear");
+    assert.ok(tripNos.includes(completedA.tripNo), "completed trip must appear");
+    assert.ok(tripNos.includes(completedB.tripNo), "second completed trip must appear");
+    assert.ok(!tripNos.includes(draftTrip.tripNo), "draft trip must NOT appear");
+    assert.ok(!tripNos.includes(pendingTrip.tripNo), "pending trip must NOT appear");
   });
 
   it("excludes every deleted trip, including legacy inconsistent states", async () => {
     const { body } = await getJson(baseUrl, "/api/operations/trip-list");
     const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
 
-    assert.ok(!tripNos.includes("TRP-TL-DEL-001"), "soft-deleted trip must NOT appear");
+    assert.ok(!tripNos.includes(softDeletedTrip.tripNo), "soft-deleted trip must NOT appear");
     assert.ok(
-      !tripNos.includes("TRP-TL-DEL-002"),
+      !tripNos.includes(flagDeletedTripNo),
       "flag-deleted completed trip must NOT appear"
     );
     assert.ok(
-      !tripNos.includes("TRP-TL-DEL-003"),
+      !tripNos.includes(statusDeletedTripNo),
       "status-deleted trip must NOT appear"
     );
     assert.ok(
@@ -262,11 +317,11 @@ describe("Trip List eligibility", () => {
       const { status, body } = await getJson(app2.baseUrl, "/api/operations/trip-list");
       assert.equal(status, 200);
       const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
-      assert.ok(tripNos.includes("TRP-TL-COMP-001"));
-      assert.ok(!tripNos.includes("TRP-TL-DRAFT-001"));
-      assert.ok(!tripNos.includes("TRP-TL-DEL-001"));
-      assert.ok(!tripNos.includes("TRP-TL-DEL-002"));
-      assert.ok(!tripNos.includes("TRP-TL-DEL-003"));
+      assert.ok(tripNos.includes(completedA.tripNo));
+      assert.ok(!tripNos.includes(draftTrip.tripNo));
+      assert.ok(!tripNos.includes(softDeletedTrip.tripNo));
+      assert.ok(!tripNos.includes(flagDeletedTripNo));
+      assert.ok(!tripNos.includes(statusDeletedTripNo));
     } finally {
       await app2.close();
     }
@@ -281,22 +336,22 @@ describe("Trip List filters and pagination", () => {
   it("search never surfaces non-eligible trips", async () => {
     const draftSearch = await getJson(
       baseUrl,
-      "/api/operations/trip-list?search=TRP-TL-DRAFT-001"
+      `/api/operations/trip-list?search=${draftTrip.tripNo}`
     );
     assert.equal(draftSearch.body.data.length, 0, "searching a draft must return nothing");
 
     const deletedSearch = await getJson(
       baseUrl,
-      "/api/operations/trip-list?search=TRP-TL-DEL-001"
+      `/api/operations/trip-list?search=${softDeletedTrip.tripNo}`
     );
     assert.equal(deletedSearch.body.data.length, 0, "searching a deleted trip must return nothing");
 
     const hit = await getJson(
       baseUrl,
-      "/api/operations/trip-list?search=TRP-TL-COMP-001"
+      `/api/operations/trip-list?search=${completedA.tripNo}`
     );
     assert.equal(hit.body.data.length, 1);
-    assert.equal(hit.body.data[0].tripNo, "TRP-TL-COMP-001");
+    assert.equal(hit.body.data[0].tripNo, completedA.tripNo);
   });
 
   it("date-range filter is enforced server-side", async () => {
@@ -305,7 +360,7 @@ describe("Trip List filters and pagination", () => {
       "/api/operations/trip-list?fromDate=2026-08-13&toDate=2026-08-13"
     );
     const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
-    assert.deepEqual(tripNos, ["TRP-TL-COMP-002"]);
+    assert.deepEqual(tripNos, [completedB.tripNo]);
   });
 
   it("vehicle filter is enforced server-side", async () => {
@@ -314,7 +369,7 @@ describe("Trip List filters and pagination", () => {
       `/api/operations/trip-list?vehicleId=${m.vehicle2.id}`
     );
     const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
-    assert.deepEqual(tripNos, ["TRP-TL-COMP-002"]);
+    assert.deepEqual(tripNos, [completedB.tripNo]);
   });
 
   it("supervisor, driver and farm filters are enforced server-side", async () => {
@@ -334,7 +389,7 @@ describe("Trip List filters and pagination", () => {
     );
     assert.deepEqual(
       byDriver.body.data.map((t: { tripNo: string }) => t.tripNo),
-      ["TRP-TL-COMP-002"]
+      [completedB.tripNo]
     );
 
     const byFarm = await getJson(

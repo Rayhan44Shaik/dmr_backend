@@ -12,6 +12,7 @@ import {
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import { RATE_ENTRY_ELIGIBLE_STATUSES } from "../utils/tripDeliverySync.js";
 import {
+  assertShopSaleRateInRange,
   parseBody,
   rateEntryBodySchema,
   rateEntryLockSchema,
@@ -140,6 +141,7 @@ async function applyDeliveryRates(
         deliveryId: line.id,
       });
     }
+    assertShopSaleRateInRange(line.rate);
     const weight = num(row.weight);
     const amount = Number((weight * line.rate).toFixed(2));
     await client.query(
@@ -347,6 +349,7 @@ export const rateEntryService = {
    */
   async create(body: unknown) {
     const data = parseBody(rateEntryBodySchema, body);
+    assertShopSaleRateInRange(data.rate);
 
     return withTransaction(async (client) => {
       try {
@@ -414,6 +417,7 @@ export const rateEntryService = {
    * Rejected once the rate has been locked (409). */
   async update(id: number, body: unknown) {
     const data = parseBody(rateEntryUpdateSchema, body);
+    if (data.rate != null) assertShopSaleRateInRange(data.rate);
 
     return withTransaction(async (client) => {
       try {
