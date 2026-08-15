@@ -158,6 +158,52 @@
         "responses": { "200": { "description": "Updated" }, "400": { "description": "Invalid status" } }
       }
     },
+    "/api/operations/trip-list": {
+      "get": {
+        "tags": ["Operations Trips"],
+        "summary": "Trip List — read-only historical view of completed/approved trips only",
+        "description": "Returns ONLY trips with status='Completed' AND deleted=false. Draft, Pending, Cancelled and Deleted trips are excluded by the database query itself — never by the client. Read-only: no POST/PUT/DELETE/PATCH is defined for this resource.",
+        "parameters": [
+          { "name": "search", "in": "query", "schema": { "type": "string" }, "description": "Matches trip_no, vehicle_no, driver_name, supervisor_name, source_farm (case-insensitive)" },
+          { "name": "fromDate", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "toDate", "in": "query", "schema": { "type": "string", "format": "date" } },
+          { "name": "vehicleId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "supervisorId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "driverId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "farmId", "in": "query", "schema": { "type": "integer" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of completed/approved trips",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "type": "array", "items": { "$ref": "#/components/schemas/TripSummary" } },
+                    "meta": { "$ref": "#/components/schemas/PaginatedMeta" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/operations/trip-list/{id}": {
+      "get": {
+        "tags": ["Operations Trips"],
+        "summary": "Trip List detail — full completed/approved trip",
+        "description": "Returns the full hydrated trip ONLY when it is eligible (status='Completed' AND deleted=false). Draft, Pending and Deleted trips return 404.",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "responses": {
+          "200": { "description": "Trip", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TripSummary" } } } },
+          "404": { "description": "Not eligible / not found" }
+        }
+      }
+    },
     "/api/operations/shop-rates": {
       "get": {
         "tags": ["Shop Rates"],
@@ -288,6 +334,73 @@
           "todaysTrips": { "type": "number" },
           "weeklyTrips": { "type": "number" },
           "monthlyTrips": { "type": "number" }
+        }
+      },
+      "PaginatedMeta": {
+        "type": "object",
+        "properties": {
+          "total": { "type": "integer" },
+          "page": { "type": "integer" },
+          "limit": { "type": "integer" },
+          "totalPages": { "type": "integer" }
+        }
+      },
+      "TripSummary": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "tripNo": { "type": "string" },
+          "tripDate": { "type": "string", "format": "date" },
+          "status": { "type": "string", "enum": ["Completed"] },
+          "startTime": { "type": "string", "format": "date-time", "nullable": true },
+          "vehicleId": { "type": "integer", "nullable": true },
+          "vehicleNo": { "type": "string", "nullable": true },
+          "driverId": { "type": "integer", "nullable": true },
+          "driverName": { "type": "string", "nullable": true },
+          "supervisorId": { "type": "integer", "nullable": true },
+          "supervisorName": { "type": "string", "nullable": true },
+          "helpers": { "type": "array", "items": { "type": "string" } },
+          "loaders": { "type": "array", "items": { "type": "string" } },
+          "sourceFarmId": { "type": "integer", "nullable": true },
+          "sourceFarm": { "type": "string", "nullable": true },
+          "farmBirdType": { "type": "string", "nullable": true },
+          "farmBirdCount": { "type": "number", "nullable": true },
+          "farmLoadWeight": { "type": "number", "nullable": true },
+          "farmRate": { "type": "number", "nullable": true },
+          "farmAmount": { "type": "number", "nullable": true },
+          "dcWeight": { "type": "number" },
+          "totalBirds": { "type": "number" },
+          "boxes": { "type": "number" },
+          "avgWeight": { "type": "number" },
+          "boxDetails": { "type": "array", "items": { "type": "object" } },
+          "deliveries": { "type": "array", "items": { "type": "object" } },
+          "closingMeter": { "type": "number", "nullable": true },
+          "endMeter": { "type": "number", "nullable": true },
+          "endTime": { "type": "string", "format": "date-time", "nullable": true },
+          "fuel": { "type": "number" },
+          "expense": { "type": "number" },
+          "driverBata": { "type": "number" },
+          "helperBata": { "type": "number" },
+          "totalTripExpense": { "type": "number" },
+          "totalKm": { "type": "number" },
+          "totalShops": { "type": "number" },
+          "totalWeight": { "type": "number" },
+          "totalDeliveredWeight": { "type": "number" },
+          "totalBirdsDelivered": { "type": "number" },
+          "totalMortality": { "type": "number" },
+          "totalMortalityCount": { "type": "number" },
+          "totalMortalityWeight": { "type": "number" },
+          "weightLoss": { "type": "number" },
+          "survivalRate": { "type": "number" },
+          "lastShop": { "type": "string", "nullable": true },
+          "deleted": { "type": "boolean" },
+          "approvedBy": { "type": "string", "nullable": true },
+          "approvedAt": { "type": "string", "format": "date-time", "nullable": true },
+          "createdAt": { "type": "string", "format": "date-time", "nullable": true },
+          "updatedAt": { "type": "string", "format": "date-time", "nullable": true },
+          "resumeStep": { "type": "string", "nullable": true },
+          "resumeStepLabel": { "type": "string", "nullable": true },
+          "wizardProgress": { "type": "object" }
         }
       }
     }

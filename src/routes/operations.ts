@@ -133,6 +133,39 @@ operationsRouter.get(
   })
 );
 
+// ── Trip List (read-only, completed/approved-only historical view) ──
+// The eligibility rule (status='Completed' AND deleted=FALSE) is enforced in
+// the service query, never in the client. No write/status/delete routes exist
+// here on purpose: Trip List is a read-only historical record.
+operationsRouter.get(
+  "/trip-list",
+  asyncHandler(async (req, res) => {
+    const { params: pagination } = parsePagination(req.query);
+    res.json(
+      await tripsService.listCompleted({
+        fromDate:
+          typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        supervisorId: req.query.supervisorId
+          ? Number(req.query.supervisorId)
+          : undefined,
+        driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
+        farmId: req.query.farmId ? Number(req.query.farmId) : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
+        pagination: pagination ?? { page: 1, limit: 50, offset: 0 },
+      })
+    );
+  })
+);
+
+operationsRouter.get(
+  "/trip-list/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await tripsService.getCompletedById(Number(req.params.id)));
+  })
+);
+
 operationsRouter.get(
   "/rate-entry/trip/:tripId",
   asyncHandler(async (req, res) => {

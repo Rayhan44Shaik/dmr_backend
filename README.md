@@ -129,6 +129,7 @@ Base path: `/api/operations`
 |------|-----------|
 | Dashboard | `GET /dashboard` (Completed trips; Approved sales/collections/fuel) |
 | Trips | `GET/POST /trips`, `PUT /trips/:id`, `POST /trips/:id/steps/:step`, `PATCH /trips/:id/status`, `DELETE /trips/:id` |
+| Trip List | `GET /trip-list`, `GET /trip-list/:id` — read-only, completed/approved trips only |
 | Shop Rates | `GET/POST /shop-rates`, `PUT/PATCH/DELETE /shop-rates/:id` |
 | Shop Sales | `GET/POST /shop-sales`, `PUT/PATCH/DELETE /shop-sales/:id` |
 | Collections | `GET/POST /collections`, `GET /collections/pending|register|running-balance` |
@@ -137,6 +138,23 @@ Base path: `/api/operations`
 Swagger UI: `GET /api/docs` · OpenAPI JSON: `GET /api/docs/openapi.json`
 
 Trip statuses (`trip_status`): Draft → Pending → Completed | Deleted (soft delete only).
+
+### Trip List (read-only historical view)
+
+`GET /api/operations/trip-list` (list) and `GET /api/operations/trip-list/:id`
+(detail) return **only completed/approved trips** — the rule is enforced in the
+database query, never in the client:
+
+- `trips.status = 'Completed'` (the system's completed/approved state), AND
+- `trips.deleted = FALSE`
+
+Draft, Pending and Deleted trips are excluded by the backend itself. Deletion
+is stored permanently in PostgreSQL (`deleted = TRUE` + `status = 'Deleted'`),
+so a deleted trip never reappears — across refresh, re-login or backend
+restart. The endpoints are read-only: no approve/delete/edit actions exist.
+
+Search, date range, vehicle, supervisor, driver and farm filters plus
+pagination are supported server-side (see `docs/trip-list-api.md`).
 
 Shop sales/rates/collections are derived from `trip_deliveries` + `trips` (no separate tables). Fuel uses `fuel_expenses` (`Pending`/`Approved`).
 
