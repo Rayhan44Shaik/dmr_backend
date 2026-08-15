@@ -43,6 +43,8 @@ function mapLeave(row: Record<string, unknown>): LeaveRequest {
     createdAt: isoOrNull(row.created_at) ?? "",
     approvedBy: row.approved_by == null ? null : str(row.approved_by),
     approvedAt: isoOrNull(row.approved_at),
+    employeeNo: row.employee_no == null ? null : num(row.employee_no),
+    department: row.department == null ? null : str(row.department),
   };
 }
 
@@ -258,32 +260,164 @@ export const staffService = {
   },
 
   // ── Leave ─────────────────────────────────────────────────────
-  async listLeaves(status?: string) {
-    const result = status && status !== "All"
-      ? await query(
-          `SELECT * FROM leave_requests WHERE status = $1 ORDER BY created_at DESC`,
-          [status]
-        )
-      : await query(`SELECT * FROM leave_requests ORDER BY created_at DESC`);
-    return result.rows.map(mapLeave);
+
+  /** Inclusive calendar-day count for a [from, to] date range (from <= to). */
+  inclusiveDays(from: string, to: string): number {
+    const ms = new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime();
+    return Math.floor(ms / 86_400_000) + 1;
   },
 
-  async createLeave(body: Omit<LeaveRequest, "id" | "createdAt" | "status"> & { status?: LeaveRequest["status"] }) {
+  /** Last day of a YYYY-MM month as a YYYY-MM-DD string. */
+  lastDayOfMonth(month: string): string {
+    const [y, m] = month.split("-").map(Number);
+    const d = new Date(y, m, 0); // day 0 of the following month = last day of `m`
+    const p = (n: number) => (n < 10 ? `0${n}` : String(n));
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  },
+
+  async listLeaves(filters: {
+    status?: string;
+    month?: string;
+    employeeId?: number;
+    department?: string;
+    leaveType?: string;
+    fromDate?: string;
+    toDate?: string;
+    search?: string;
+    page?: number;
+    limit?: number;
+  } = {}) {
+    const {
+      status,
+      month,
+      employeeId,
+      department,
+      leaveType,
+      fromDate,
+      toDate,
+      search,
+      page = 1,
+      limit = 50,
+    } = filters;
+
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+
+    if (status && status !== "All") {
+      params.push(status);
+      clauses.push(`lr.status = $${params.length}`);
+    }
+    if (leaveType) {
+      params.push(leaveType);
+      clauses.push(`lr.leave_type = $${params.length}`);
+    }
+    if (employeeId) {
+      params.push(employeeId);
+      clauses.push(`lr.employee_id = $${params.length}`);
+    }
+    if (department) {
+      params.push(department);
+      clauses.push(`e.department = $${params.length}`);
+    }
+    if (fromDate) {
+      params.push(fromDate);
+      clauses.push(`lr.to_date >= $${params.length}`);
+    }
+    if (toDate) {
+      params.push(toDate);
+      clauses.push(`lr.from_date <= $${params.length}`);
+    }
+    if (month) {
+      params.push(`${month}-01`);
+      clauses.push(`lr.to_date >= $${params.length}`);
+      params.push(this.lastDayOfMonth(month));
+      clauses.push(`lr.from_date <= $${params.length}`);
+    }
+    if (search) {
+      params.push(`%${search}%`);
+      clauses.push(`(lr.employee_name ILIKE $${params.length} OR lr.reason ILIKE $${params.length})`);
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+    const countRes = await query(
+      `SELECT COUNT(*)::int AS total
+         FROM leave_requests lr
+         LEFT JOIN employees e ON e.id = lr.employee_id
+         ${where}`,
+      params
+    );
+    const total = num(countRes.rows[0]?.total);
+
+    const offset = (page - 1) * limit;
+    params.push(limit);
+    params.push(offset);
+
+    const result = await query(
+      `SELECT lr.*, e.employee_no AS employee_no, e.department AS department
+         FROM leave_requests lr
+         LEFT JOIN employees e ON e.id = lr.employee_id
+         ${where}
+         ORDER BY lr.created_at DESC
+         LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+
+    return {
+      items: result.rows.map(mapLeave),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  },
+
+  async createLeave(body: {
+    employeeId: number;
+    employeeName?: string;
+    type: LeaveRequest["type"];
+    fromDate: string;
+    toDate: string;
+    days?: number;
+    reason?: string | null;
+  }) {
+    const emp = await query(
+      `SELECT id, employee_no, employee_name, department FROM employees WHERE id = $1`,
+      [body.employeeId]
+    );
+    if (!emp.rows.length) {
+      throw new AppError(422, `Employee ${body.employeeId} does not exist.`);
+    }
+    const employee = emp.rows[0];
+    const days = body.days ?? this.inclusiveDays(body.fromDate, body.toDate);
+
     const result = await query(
       `INSERT INTO leave_requests (
          employee_id, employee_name, leave_type, from_date, to_date, days, status, reason
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,'Pending',$7)
+       RETURNING id`,
       [
         body.employeeId,
-        body.employeeName,
+        str(employee.employee_name),
         body.type,
         body.fromDate,
         body.toDate,
-        body.days,
-        body.status ?? "Pending",
+        days,
         body.reason ?? null,
       ]
     );
+    return this.getLeaveById(str(result.rows[0].id));
+  },
+
+  async getLeaveById(id: string) {
+    const result = await query(
+      `SELECT lr.*, e.employee_no AS employee_no, e.department AS department
+         FROM leave_requests lr
+         LEFT JOIN employees e ON e.id = lr.employee_id
+         WHERE lr.id = $1`,
+      [id]
+    );
+    if (!result.rows.length) throw new AppError(404, "Leave request not found");
     return mapLeave(result.rows[0]);
   },
 
@@ -298,11 +432,117 @@ export const staffService = {
          approved_by = CASE WHEN $2 = 'Approved' THEN $3 ELSE approved_by END,
          approved_at = CASE WHEN $2 = 'Approved' THEN NOW() ELSE approved_at END,
          rejection_reason = CASE WHEN $2 = 'Rejected' THEN $4 ELSE rejection_reason END
-       WHERE id = $1 RETURNING *`,
+       WHERE id = $1 RETURNING id`,
       [id, status, opts.approvedBy ?? null, opts.rejectionReason ?? null]
     );
     if (!result.rowCount) throw new AppError(404, "Leave request not found");
-    return mapLeave(result.rows[0]);
+    return this.getLeaveById(id);
+  },
+
+  async deleteLeave(id: string) {
+    if (!/^[0-9a-fA-F-]{36}$/.test(id)) {
+      throw new AppError(400, `Invalid leave id: "${id}"`);
+    }
+    const found = await query(`SELECT status FROM leave_requests WHERE id = $1`, [id]);
+    if (!found.rows.length) throw new AppError(404, "Leave request not found");
+
+    const status = str(found.rows[0].status);
+    if (status === "Approved") {
+      throw new AppError(
+        409,
+        "Approved leave cannot be deleted — it is already reflected in duty, attendance and salary."
+      );
+    }
+    if (status === "Rejected") {
+      throw new AppError(409, "Rejected leave cannot be deleted.");
+    }
+
+    const del = await query(`DELETE FROM leave_requests WHERE id = $1 RETURNING id`, [id]);
+    if (!del.rowCount) throw new AppError(404, "Leave request not found");
+    return { id, deleted: true };
+  },
+
+  /** Authoritative employee-level leave report for a month.
+   *  approvedLeaveDays counts DISTINCT approved calendar dates within the month
+   *  (inclusive from_date..to_date), cross-month leave split per month — exactly
+   *  the same calendar-day rule getAttendanceSummary uses, so the Leave Report
+   *  can never disagree with Salary leaveDays. */
+  async getLeaveReport(filters: { month: string; department?: string; employeeId?: number }) {
+    const { month, department, employeeId } = filters;
+    const monthStart = `${month}-01`;
+    const monthEnd = this.lastDayOfMonth(month);
+
+    const empWhere: string[] = [];
+    const empParams: unknown[] = [];
+    if (department) {
+      empParams.push(department);
+      empWhere.push(`department = $${empParams.length}`);
+    }
+    if (employeeId) {
+      empParams.push(employeeId);
+      empWhere.push(`id = $${empParams.length}`);
+    }
+    const empSql =
+      empWhere.length
+        ? `SELECT id, employee_no, employee_name, department FROM employees WHERE ${empWhere.join(" AND ")} ORDER BY employee_no`
+        : `SELECT id, employee_no, employee_name, department FROM employees ORDER BY employee_no`;
+    const empRes = await query(empSql, empParams);
+
+    const leaves = await query(
+      `SELECT employee_id, leave_type, from_date, to_date, status
+         FROM leave_requests
+         WHERE status IN ('Pending','Approved','Rejected')
+           AND from_date <= $1 AND to_date >= $2`,
+      [monthEnd, monthStart]
+    );
+
+    const STATUSES = ["Pending", "Approved", "Rejected"] as const;
+    type DayIndex = {
+      dates: Record<(typeof STATUSES)[number], Set<string>>;
+      types: Record<(typeof STATUSES)[number], Set<string>>;
+    };
+    const idx = new Map<number, DayIndex>();
+    for (const l of leaves.rows) {
+      const id = num(l.employee_id);
+      const status = str(l.status) as (typeof STATUSES)[number];
+      if (!STATUSES.includes(status)) continue;
+      const type = str(l.leave_type);
+      let d = new Date((dateOnly(l.from_date) ?? "") + "T00:00:00Z");
+      const dend = new Date((dateOnly(l.to_date) ?? "") + "T00:00:00Z");
+      while (d <= dend) {
+        const ds = d.toISOString().slice(0, 10);
+        if (ds.startsWith(month)) {
+          let rec = idx.get(id);
+          if (!rec) {
+            rec = { dates: { Pending: new Set(), Approved: new Set(), Rejected: new Set() }, types: { Pending: new Set(), Approved: new Set(), Rejected: new Set() } };
+            idx.set(id, rec);
+          }
+          rec.dates[status].add(ds);
+          rec.types[status].add(type);
+        }
+        d.setUTCDate(d.getUTCDate() + 1);
+      }
+    }
+
+    return {
+      month,
+      items: empRes.rows.map((e) => {
+        const id = num(e.id);
+        const rec = idx.get(id);
+        const approvedDates = rec ? Array.from(rec.dates.Approved).sort() : [];
+        return {
+          employeeId: id,
+          employeeNo: num(e.employee_no),
+          employeeName: str(e.employee_name),
+          department: str(e.department),
+          approvedLeaveDays: approvedDates.length,
+          pendingLeaveDays: rec ? rec.dates.Pending.size : 0,
+          rejectedLeaveDays: rec ? rec.dates.Rejected.size : 0,
+          leaveDates: approvedDates,
+          leaveTypes: rec ? Array.from(rec.types.Approved) : [],
+        };
+      }),
+    };
   },
 
   // ── Salary ────────────────────────────────────────────────────

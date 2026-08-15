@@ -13,6 +13,18 @@ import type {
   SalaryGenerateBody,
   SalaryListQuery,
 } from "../validation/salary.js";
+import {
+  leaveCreateSchema,
+  leaveListQuerySchema,
+  leaveReportQuerySchema,
+  leaveStatusSchema,
+} from "../validation/leave.js";
+import type {
+  LeaveCreateBody,
+  LeaveListQuery,
+  LeaveReportQuery,
+  LeaveStatusBody,
+} from "../validation/leave.js";
 
 export const staffRouter = Router();
 
@@ -53,32 +65,46 @@ staffRouter.delete(
 
 // Leave
 staffRouter.get(
+  "/leaves/report",
+  asyncHandler(async (req, res) => {
+    const query = parseBody(leaveReportQuerySchema, req.query) as LeaveReportQuery;
+    res.json(await staffService.getLeaveReport(query));
+  })
+);
+
+staffRouter.get(
   "/leaves",
   asyncHandler(async (req, res) => {
-    res.json(
-      await staffService.listLeaves(
-        typeof req.query.status === "string" ? req.query.status : undefined
-      )
-    );
+    const query = parseBody(leaveListQuerySchema, req.query) as LeaveListQuery;
+    res.json(await staffService.listLeaves(query));
   })
 );
 
 staffRouter.post(
   "/leaves",
   asyncHandler(async (req, res) => {
-    res.status(201).json(await staffService.createLeave(req.body));
+    const body = parseBody(leaveCreateSchema, req.body) as LeaveCreateBody;
+    res.status(201).json(await staffService.createLeave(body));
   })
 );
 
 staffRouter.patch(
   "/leaves/:id/status",
   asyncHandler(async (req, res) => {
+    const body = parseBody(leaveStatusSchema, req.body) as LeaveStatusBody;
     res.json(
-      await staffService.updateLeaveStatus(req.params.id, req.body.status, {
-        approvedBy: req.body.approvedBy,
-        rejectionReason: req.body.rejectionReason,
+      await staffService.updateLeaveStatus(req.params.id, body.status, {
+        approvedBy: body.approvedBy,
+        rejectionReason: body.rejectionReason,
       })
     );
+  })
+);
+
+staffRouter.delete(
+  "/leaves/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await staffService.deleteLeave(req.params.id));
   })
 );
 

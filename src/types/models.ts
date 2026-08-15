@@ -316,6 +316,9 @@ export interface LeaveRequest {
   createdAt: string;
   approvedBy?: string | null;
   approvedAt?: string | null;
+  /** Joined from employees for reporting/table display (never stored on leave). */
+  employeeNo?: number | null;
+  department?: string | null;
 }
 
 export interface SalaryRecord {
