@@ -10,8 +10,7 @@ mastersRouter.get("/employees", asyncHandler(async (req, res) => {
     res.json(await mastersService.listEmployees(department));
 }));
 mastersRouter.post("/employees/bulk", asyncHandler(async (req, res) => {
-    const created = await mastersService.bulkCreateEmployees(req.body);
-    res.status(201).json(created);
+    res.status(201).json(await mastersBulkService.importEmployees(req.body));
 }));
 mastersRouter.post("/employees", asyncHandler(async (req, res) => {
     res.status(201).json(await mastersService.upsertEmployee(req.body));
@@ -32,8 +31,7 @@ mastersRouter.get("/vehicles", asyncHandler(async (_req, res) => {
     res.json(await mastersService.listVehicles());
 }));
 mastersRouter.post("/vehicles/bulk", asyncHandler(async (req, res) => {
-    const created = await mastersService.bulkCreateVehicles(req.body);
-    res.status(201).json(created);
+    res.status(201).json(await mastersBulkService.importVehicles(req.body));
 }));
 mastersRouter.post("/vehicles", asyncHandler(async (req, res) => {
     res.status(201).json(await mastersService.upsertVehicle(req.body));
@@ -54,8 +52,7 @@ mastersRouter.get("/farms", asyncHandler(async (_req, res) => {
     res.json(await mastersService.listFarms());
 }));
 mastersRouter.post("/farms/bulk", asyncHandler(async (req, res) => {
-    const created = await mastersService.bulkCreateFarms(req.body);
-    res.status(201).json(created);
+    res.status(201).json(await mastersBulkService.importFarms(req.body));
 }));
 mastersRouter.post("/farms", asyncHandler(async (req, res) => {
     res.status(201).json(await mastersService.upsertFarm(req.body));
@@ -119,8 +116,7 @@ mastersRouter.get("/bird-types", asyncHandler(async (_req, res) => {
     res.json(await mastersService.listBirdTypes());
 }));
 mastersRouter.post("/bird-types/bulk", asyncHandler(async (req, res) => {
-    const created = await mastersService.bulkCreateBirdTypes(req.body);
-    res.status(201).json(created);
+    res.status(201).json(await mastersBulkService.importBirdTypes(req.body));
 }));
 mastersRouter.post("/bird-types", asyncHandler(async (req, res) => {
     res.status(201).json(await mastersService.upsertBirdType(req.body));

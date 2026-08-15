@@ -1,5 +1,6 @@
-import { query } from "../config/db.js";
+import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
+import { rethrowIfAppError } from "../utils/pgErrors.js";
 import type {
   AdvanceLoan,
   AttendanceRecord,
@@ -8,6 +9,10 @@ import type {
   SalaryRecord,
 } from "../types/models.js";
 import { dateOnly, isoOrNull, num, numOrNull, str } from "../utils/coerce.js";
+import { salaryCalculationService } from "./salaryCalculationService.js";
+import { dutyPlannerService } from "./dutyPlannerService.js";
+import { paymentsService } from "./paymentsService.js";
+import { parseBody, salaryCreateSchema, salaryPaySchema, salaryUpdateSchema } from "../validation/salary.js";
 
 function mapDuty(row: Record<string, unknown>): DutyAssignment {
   return {
@@ -47,6 +52,7 @@ function mapSalary(row: Record<string, unknown>): SalaryRecord {
     employeeId: num(row.employee_id),
     employeeName: str(row.employee_name),
     department: str(row.department),
+    month: str(row.month),
     basicSalary: num(row.basic_salary),
     overtime: num(row.overtime),
     incentives: num(row.incentives),
@@ -62,7 +68,8 @@ function mapSalary(row: Record<string, unknown>): SalaryRecord {
     netSalary: num(row.net_salary),
     status: str(row.status) as SalaryRecord["status"],
     paymentDate: dateOnly(row.payment_date),
-    month: str(row.month),
+    paymentRef: row.payment_ref == null ? null : str(row.payment_ref),
+    paidAt: isoOrNull(row.paid_at),
     createdAt: isoOrNull(row.created_at) ?? "",
   };
 }
@@ -227,7 +234,31 @@ export const staffService = {
   },
 
   // ── Salary ────────────────────────────────────────────────────
-  async listSalaries(month?: string, department?: string) {
+
+  /** Enrich salary rows with attendance figures derived from the authoritative
+   *  Duty Planner data (duty_assignments + approved leave) at read time. These
+   *  figures are never stored on the salary row — no duty data is duplicated. */
+  async enrichAttendance(records: SalaryRecord[], months: string[]): Promise<SalaryRecord[]> {
+    const attByMonth = new Map<string, Array<Record<string, unknown>>>();
+    for (const m of months) {
+      const summary = await dutyPlannerService.getAttendanceSummary(m);
+      attByMonth.set(m, summary.rows as Array<Record<string, unknown>>);
+    }
+    return records.map((r) => {
+      const rows = attByMonth.get(r.month) ?? [];
+      const match = rows.find((x) => num(x.employeeId) === r.employeeId);
+      if (!match) return r;
+      return {
+        ...r,
+        workingDays: num(match.workingDays),
+        presentDays: num(match.presentCount),
+        leaveDays: num(match.leaveCount),
+        weeklyOffDays: num(match.weeklyOffCount),
+      };
+    });
+  },
+
+  async listSalaries(month?: string, department?: string): Promise<SalaryRecord[]> {
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (month) {
@@ -243,75 +274,381 @@ export const staffService = {
       `SELECT * FROM salary_records ${where} ORDER BY employee_name`,
       params
     );
-    return result.rows.map(mapSalary);
+    const records = result.rows.map(mapSalary);
+    const months = Array.from(new Set(records.map((r) => r.month)));
+    return this.enrichAttendance(records, months);
   },
 
-  async upsertSalary(body: Partial<SalaryRecord> & { employeeId: number; month: string; employeeName: string }) {
-    const gross =
-      body.totalGross ??
-      num(body.basicSalary) +
-        num(body.overtime) +
-        num(body.incentives) +
-        num(body.fuelAllowance) +
-        num(body.nightAllowance);
-    const deductions =
-      body.totalDeductions ??
-      num(body.leaveDeduction) +
-        num(body.advanceRecovery) +
-        num(body.loanEMI) +
-        num(body.latePenalty) +
-        num(body.otherDeductions);
-    const net = body.netSalary ?? gross - deductions;
+  async getEmployeeSalary(employeeId: number, month: string): Promise<SalaryRecord> {
+    const emp = await query("SELECT id FROM employees WHERE id = $1", [employeeId]);
+    if (!emp.rowCount) throw new AppError(404, "Employee not found");
+    const result = await query(
+      `SELECT * FROM salary_records WHERE employee_id = $1 AND month = $2`,
+      [employeeId, month]
+    );
+    if (!result.rowCount) throw new AppError(404, "Salary record not found for this employee and month");
+    const records = await this.enrichAttendance([mapSalary(result.rows[0])], [month]);
+    return records[0];
+  },
+
+  /** Look up the DB employee (validates employeeId) and resolve the default
+   *  basicSalary from the Employee Master when the client did not supply one. */
+  async resolveEmployeeBase(employeeId: number): Promise<{ name: string; department: string; baseSalary: number }> {
+    const result = await query(
+      "SELECT id, employee_name, department, salary FROM employees WHERE id = $1",
+      [employeeId]
+    );
+    if (!result.rowCount) throw new AppError(404, "Employee not found");
+    const row = result.rows[0];
+    return {
+      name: str(row.employee_name),
+      department: str(row.department),
+      baseSalary: num(row.salary),
+    };
+  },
+
+  async createSalary(body: unknown): Promise<SalaryRecord> {
+    const data = parseBody(salaryCreateSchema, body);
+    const emp = await this.resolveEmployeeBase(data.employeeId);
+
+    const dup = await query(
+      "SELECT id FROM salary_records WHERE employee_id = $1 AND month = $2",
+      [data.employeeId, data.month]
+    );
+    if (dup.rowCount) {
+      throw new AppError(409, "Salary record already exists for this employee and month");
+    }
+
+    const totals = salaryCalculationService.calculateTotals({
+      basicSalary: data.basicSalary ?? emp.baseSalary,
+      overtime: data.overtime ?? 0,
+      incentives: data.incentives ?? 0,
+      fuelAllowance: data.fuelAllowance ?? 0,
+      nightAllowance: data.nightAllowance ?? 0,
+      leaveDeduction: data.leaveDeduction ?? 0,
+      advanceRecovery: data.advanceRecovery ?? 0,
+      loanEMI: data.loanEMI ?? 0,
+      latePenalty: data.latePenalty ?? 0,
+      otherDeductions: data.otherDeductions ?? 0,
+    });
 
     const result = await query(
       `INSERT INTO salary_records (
          employee_id, employee_name, department, month, basic_salary, overtime,
          incentives, fuel_allowance, night_allowance, total_gross, leave_deduction,
          advance_recovery, loan_emi, late_penalty, other_deductions, total_deductions,
-         net_salary, status, payment_date
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-       ON CONFLICT (employee_id, month) DO UPDATE SET
-         employee_name = EXCLUDED.employee_name,
-         department = EXCLUDED.department,
-         basic_salary = EXCLUDED.basic_salary,
-         overtime = EXCLUDED.overtime,
-         incentives = EXCLUDED.incentives,
-         fuel_allowance = EXCLUDED.fuel_allowance,
-         night_allowance = EXCLUDED.night_allowance,
-         total_gross = EXCLUDED.total_gross,
-         leave_deduction = EXCLUDED.leave_deduction,
-         advance_recovery = EXCLUDED.advance_recovery,
-         loan_emi = EXCLUDED.loan_emi,
-         late_penalty = EXCLUDED.late_penalty,
-         other_deductions = EXCLUDED.other_deductions,
-         total_deductions = EXCLUDED.total_deductions,
-         net_salary = EXCLUDED.net_salary,
-         status = EXCLUDED.status,
-         payment_date = EXCLUDED.payment_date
+         net_salary, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'Pending')
        RETURNING *`,
       [
-        body.employeeId,
-        body.employeeName,
-        body.department ?? "",
-        body.month,
-        body.basicSalary ?? 0,
-        body.overtime ?? 0,
-        body.incentives ?? 0,
-        body.fuelAllowance ?? 0,
-        body.nightAllowance ?? 0,
-        gross,
-        body.leaveDeduction ?? 0,
-        body.advanceRecovery ?? 0,
-        body.loanEMI ?? 0,
-        body.latePenalty ?? 0,
-        body.otherDeductions ?? 0,
-        deductions,
-        net,
-        body.status ?? "Pending",
-        body.paymentDate || null,
+        data.employeeId,
+        emp.name,
+        emp.department,
+        data.month,
+        data.basicSalary ?? emp.baseSalary,
+        data.overtime ?? 0,
+        data.incentives ?? 0,
+        data.fuelAllowance ?? 0,
+        data.nightAllowance ?? 0,
+        totals.totalGross,
+        data.leaveDeduction ?? 0,
+        data.advanceRecovery ?? 0,
+        data.loanEMI ?? 0,
+        data.latePenalty ?? 0,
+        data.otherDeductions ?? 0,
+        totals.totalDeductions,
+        totals.netSalary,
       ]
     );
     return mapSalary(result.rows[0]);
+  },
+
+  /** PUT /salaries/:id — only Pending records are editable; totals are always
+   *  recomputed on the backend from the supplied components. */
+  async updateSalaryById(id: string, body: unknown): Promise<SalaryRecord> {
+    const data = parseBody(salaryUpdateSchema, body);
+    const existing = await query("SELECT * FROM salary_records WHERE id = $1", [id]);
+    if (!existing.rowCount) throw new AppError(404, "Salary record not found");
+    const row = existing.rows[0];
+    if (row.status === "Paid") {
+      throw new AppError(409, "Paid salary records cannot be edited");
+    }
+
+    const totals = salaryCalculationService.calculateTotals({
+      basicSalary: data.basicSalary ?? num(row.basic_salary),
+      overtime: data.overtime ?? num(row.overtime),
+      incentives: data.incentives ?? num(row.incentives),
+      fuelAllowance: data.fuelAllowance ?? num(row.fuel_allowance),
+      nightAllowance: data.nightAllowance ?? num(row.night_allowance),
+      leaveDeduction: data.leaveDeduction ?? num(row.leave_deduction),
+      advanceRecovery: data.advanceRecovery ?? num(row.advance_recovery),
+      loanEMI: data.loanEMI ?? num(row.loan_emi),
+      latePenalty: data.latePenalty ?? num(row.late_penalty),
+      otherDeductions: data.otherDeductions ?? num(row.other_deductions),
+    });
+
+    const result = await query(
+      `UPDATE salary_records SET
+         basic_salary = $2, overtime = $3, incentives = $4,
+         fuel_allowance = $5, night_allowance = $6, total_gross = $7,
+         leave_deduction = $8, advance_recovery = $9, loan_emi = $10,
+         late_penalty = $11, other_deductions = $12, total_deductions = $13,
+         net_salary = $14
+       WHERE id = $1 AND status = 'Pending'
+       RETURNING *`,
+      [
+        id,
+        data.basicSalary ?? num(row.basic_salary),
+        data.overtime ?? num(row.overtime),
+        data.incentives ?? num(row.incentives),
+        data.fuelAllowance ?? num(row.fuel_allowance),
+        data.nightAllowance ?? num(row.night_allowance),
+        totals.totalGross,
+        data.leaveDeduction ?? num(row.leave_deduction),
+        data.advanceRecovery ?? num(row.advance_recovery),
+        data.loanEMI ?? num(row.loan_emi),
+        data.latePenalty ?? num(row.late_penalty),
+        data.otherDeductions ?? num(row.other_deductions),
+        totals.totalDeductions,
+        totals.netSalary,
+      ]
+    );
+    if (!result.rowCount) throw new AppError(409, "Salary record is not in a Pending state and cannot be edited");
+    const records = await this.enrichAttendance([mapSalary(result.rows[0])], [str(row.month)]);
+    return records[0];
+  },
+
+  /**
+   * Backward-compatible upsert (POST /salaries + PUT /salaries + seed script):
+   * create when no row exists for (employee_id, month); update when the existing
+   * row is Pending; reject financial edits on a Paid row. employeeName /
+   * department / status / totalGross / netSalary supplied by the caller are
+   * never trusted — name/department come from the Employee Master and ALL
+   * totals are recomputed by the authoritative calculation engine.
+   */
+  async upsertSalary(body: unknown): Promise<SalaryRecord> {
+    const data = parseBody(salaryCreateSchema, body);
+    const existing = await query(
+      "SELECT id, status, month FROM salary_records WHERE employee_id = $1 AND month = $2",
+      [data.employeeId, data.month]
+    );
+    if (existing.rowCount) {
+      const row = existing.rows[0];
+      if (row.status === "Paid") {
+        throw new AppError(409, "Paid salary records cannot be edited");
+      }
+      return this.updateSalaryById(str(row.id), body);
+    }
+    return this.createSalary(body);
+  },
+
+  /** Pending → Paid. The ONLY legal transition to Paid: creates the Accounts
+   *  payment inside the same transaction, receives the payment number, locks
+   *  the salary row, verifies it is Pending with no payment_ref, and writes the
+   *  payment linkage. Any failure rolls everything back — payment and counter
+   *  increment included — leaving the salary Pending. */
+  async paySalary(id: string, body: unknown): Promise<SalaryRecord> {
+    const data = parseBody(salaryPaySchema, body);
+
+    return withTransaction(async (client) => {
+      try {
+        // Row lock serializes concurrent pay requests — the second one blocks
+        // here until the first commits and then sees status = Paid → 409.
+        const locked = await client.query(
+          "SELECT * FROM salary_records WHERE id = $1 FOR UPDATE",
+          [id]
+        );
+        if (!locked.rowCount) throw new AppError(404, "Salary record not found");
+        const row = locked.rows[0];
+
+        if (row.status !== "Pending") {
+          throw new AppError(409, "Salary is not Pending — it cannot be paid again");
+        }
+        if (row.payment_ref != null) {
+          throw new AppError(409, "Duplicate payment — this salary already has a payment reference");
+        }
+        if (num(row.net_salary) <= 0) {
+          throw new AppError(422, "Cannot pay a salary with zero or negative net amount");
+        }
+
+        // Create the Accounts Payment on the SAME transaction/connection so the
+        // payment + its number-counter increment commit atomically with the
+        // salary transition (or roll back together).
+        const payment = await paymentsService.create(
+          {
+            paymentDate: data.paymentDate,
+            paymentType: "Salary Payment",
+            paidTo: str(row.employee_name),
+            amount: num(row.net_salary),
+            paymentMode: data.paymentMode,
+            category: "Salary",
+            status: "Paid",
+            createdBy: data.paidBy ?? "system",
+          },
+          client
+        );
+
+        const updated = await client.query(
+          `UPDATE salary_records SET
+             status = 'Paid', payment_ref = $2, payment_date = $3, paid_at = NOW()
+           WHERE id = $1 AND status = 'Pending' AND payment_ref IS NULL
+           RETURNING *`,
+          [id, payment.paymentNo, data.paymentDate]
+        );
+        if (!updated.rowCount) {
+          // Concurrency safety net — the row changed under us despite the lock.
+          throw new AppError(409, "Salary payment could not be applied");
+        }
+        const records = await this.enrichAttendance([mapSalary(updated.rows[0])], [str(row.month)]);
+        return records[0];
+      } catch (err) {
+        // Roll back everything (payment + salary remain untouched).
+        rethrowIfAppError(err);
+        throw err;
+      }
+    });
+  },
+
+  /** PATCH /salaries/:id/status. Only target "Pending" is possible (validated
+   *  in the route); this is an idempotent no-op that never reaches "Paid" —
+   *  Pending → Paid is reserved for paySalary(). */
+  async updateSalaryStatus(id: string): Promise<SalaryRecord> {
+    const existing = await query("SELECT * FROM salary_records WHERE id = $1", [id]);
+    if (!existing.rowCount) throw new AppError(404, "Salary record not found");
+    const row = existing.rows[0];
+    if (row.status === "Paid") {
+      throw new AppError(409, "Paid salary cannot be moved back to Pending");
+    }
+    const records = await this.enrichAttendance([mapSalary(row)], [str(row.month)]);
+    return records[0];
+  },
+
+  async deleteSalary(id: string): Promise<{ id: string; deleted: boolean }> {
+    const existing = await query("SELECT status FROM salary_records WHERE id = $1", [id]);
+    if (!existing.rowCount) throw new AppError(404, "Salary record not found");
+    if (existing.rows[0].status === "Paid") {
+      throw new AppError(409, "Paid salary records cannot be deleted");
+    }
+    await query("DELETE FROM salary_records WHERE id = $1 AND status = 'Pending'", [id]);
+    return { id, deleted: true };
+  },
+
+  /** Applicable active advances for a salary month, keyed by employee. Only
+   *  advances active by the last day of the salary month with a positive
+   *  monthly deduction are considered. Recovery is capped at remaining_balance
+   *  (never negative, never exceeding the balance). */
+  async activeAdvanceRecovery(month: string): Promise<Map<number, { advanceRecovery: number; loanEMI: number }>> {
+    const monthEnd = `${month}-31`;
+    const result = await query(
+      `SELECT employee_id, loan_type, monthly_deduction, remaining_balance
+       FROM advance_loans
+       WHERE status = 'Active' AND monthly_deduction > 0 AND issued_date <= $1::date`,
+      [monthEnd]
+    );
+    const byEmp = new Map<number, { advanceRecovery: number; loanEMI: number }>();
+    for (const row of result.rows) {
+      const employeeId = num(row.employee_id);
+      const entry = byEmp.get(employeeId) ?? { advanceRecovery: 0, loanEMI: 0 };
+      const amount = Math.min(num(row.monthly_deduction), num(row.remaining_balance));
+      if (amount > 0) {
+        if (str(row.loan_type) === "Advance") entry.advanceRecovery += amount;
+        else entry.loanEMI += amount;
+      }
+      byEmp.set(employeeId, entry);
+    }
+    return byEmp;
+  },
+
+  /** Bulk generation. Creates salary rows only for employees that do not yet
+   *  have a record for the month (UNIQUE(employee_id, month) is the final DB
+   *  guard — the INSERT also uses ON CONFLICT DO NOTHING so re-runs are safe
+   *  and idempotent). Runs transactionally; a failure rolls back the whole
+   *  batch so no partial month is ever produced. */
+  async generateForMonth(month: string, department?: string): Promise<{
+    month: string;
+    department: string | null;
+    requested: number;
+    generated: number;
+    skippedExisting: number;
+  }> {
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      throw new AppError(400, "month must be in YYYY-MM format");
+    }
+
+    const empClauses = ["status IN ('Active','Inactive','Suspended')"];
+    const empParams: unknown[] = [];
+    if (department) {
+      empParams.push(department);
+      empClauses.push(`department = $${empParams.length}`);
+    }
+    const employees = await query(
+      `SELECT * FROM employees WHERE ${empClauses.join(" AND ")} ORDER BY id`,
+      empParams
+    );
+
+    const existingRows = await query(
+      "SELECT employee_id FROM salary_records WHERE month = $1",
+      [month]
+    );
+    const existingSet = new Set(existingRows.rows.map((r) => num(r.employee_id)));
+
+    const recovery = await this.activeAdvanceRecovery(month);
+
+    let generated = 0;
+    await withTransaction(async (client) => {
+      for (const emp of employees.rows) {
+        const employeeId = num(emp.id);
+        if (existingSet.has(employeeId)) continue;
+        const rec = recovery.get(employeeId) ?? { advanceRecovery: 0, loanEMI: 0 };
+
+        const totals = salaryCalculationService.calculateTotals({
+          basicSalary: num(emp.salary),
+          overtime: 0,
+          incentives: 0,
+          fuelAllowance: 0,
+          nightAllowance: 0,
+          leaveDeduction: 0,
+          advanceRecovery: rec.advanceRecovery,
+          loanEMI: rec.loanEMI,
+          latePenalty: 0,
+          otherDeductions: 0,
+        });
+
+        const inserted = await client.query(
+          `INSERT INTO salary_records (
+             employee_id, employee_name, department, month, basic_salary, overtime,
+             incentives, fuel_allowance, night_allowance, total_gross, leave_deduction,
+             advance_recovery, loan_emi, late_penalty, other_deductions, total_deductions,
+             net_salary, status
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'Pending')
+           ON CONFLICT (employee_id, month) DO NOTHING`,
+          [
+            employeeId,
+            str(emp.employee_name),
+            str(emp.department),
+            month,
+            num(emp.salary),
+            0, 0, 0, 0,
+            totals.totalGross,
+            0,
+            rec.advanceRecovery,
+            rec.loanEMI,
+            0, 0,
+            totals.totalDeductions,
+            totals.netSalary,
+          ]
+        );
+        generated += inserted.rowCount ?? 0;
+      }
+    });
+
+    return {
+      month,
+      department: department ?? null,
+      requested: employees.rows.length,
+      generated,
+      skippedExisting: employees.rows.length - generated,
+    };
   },
 
   // ── Advance / Loan ────────────────────────────────────────────

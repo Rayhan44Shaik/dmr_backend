@@ -3,7 +3,7 @@ import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import type { ShopSale } from "../types/operations.js";
 import { dateOnly, isoOrNull, num, str } from "../utils/coerce.js";
-import { assertBirdTypeExists, assertShopExists } from "../utils/fkValidation.js";
+import { assertBirdTypeExists, assertShopActive } from "../utils/fkValidation.js";
 import {
   paginatedResult,
   type PaginatedResult,
@@ -45,14 +45,6 @@ function tripToOpsStatus(tripStatus: string, deleted: boolean): ShopSale["status
   if (deleted || tripStatus === "Deleted") return "Deleted";
   if (tripStatus === "Completed") return "Approved";
   if (tripStatus === "Pending") return "Pending Approval";
-  return "Draft";
-}
-
-function opsToTripStatus(status: string): string {
-  if (status === "Approved") return "Completed";
-  if (status === "Pending Approval") return "Pending";
-  if (status === "Deleted") return "Deleted";
-  if (status === "Rejected") return "Draft";
   return "Draft";
 }
 
@@ -308,7 +300,7 @@ export const shopSalesService = {
         if (data.shopId == null) {
           throw new AppError(400, "shopId is required to create a Shop Sale");
         }
-        await assertShopExists(data.shopId, client);
+        await assertShopActive(data.shopId, client);
         if (data.birdTypeId != null) await assertBirdTypeExists(data.birdTypeId, client);
 
         const birds = data.birds ?? 0;
@@ -318,21 +310,30 @@ export const shopSalesService = {
         // starts at 0 mort_kg (only Trip Step 4 ever sets it).
         const mortalityWeight = 0;
 
-        // Duplicate-submission guard: a network retry or accidental
-        // double-click resubmitting the exact same create request must not
-        // silently produce two Shop Sale rows for the same delivery.
+        // Duplicate-submission guard: a network retry, accidental
+        // double-click, or a genuinely repeated create for the exact same
+        // (trip, shop, birds, weight) must not silently produce a second
+        // Shop Sale row. This pre-check gives a friendly error; the real,
+        // concurrency-safe guarantee is the unique partial index
+        // idx_trip_deliveries_no_dup_sale (029_shop_sales_duplicate_guard.sql)
+        // — two requests racing each other both pass this SELECT, but only
+        // one INSERT can win, and the loser's 23505 is mapped to 409 by
+        // rethrowIfAppError/mapPgError below. No time window: unlike the
+        // old 5-second check, a duplicate is rejected no matter how much
+        // time has passed since the original.
         const duplicate = await client.query(
           `SELECT id FROM trip_deliveries
             WHERE trip_id = $1 AND shop_id = $2 AND birds = $3 AND weight = $4
-              AND deleted = FALSE AND created_at > NOW() - INTERVAL '5 seconds'
+              AND deleted = FALSE
             LIMIT 1`,
           [trip.id, data.shopId, birds, weight]
         );
         if (duplicate.rowCount) {
           throw new AppError(
             409,
-            `A matching Shop Sale was just created for this shop (id ${duplicate.rows[0].id}) — ` +
-              `not creating a duplicate. Refresh and edit the existing sale instead.`
+            `A matching Shop Sale already exists for this shop (id ${duplicate.rows[0].id}) — ` +
+              `not creating a duplicate. Edit the existing sale instead, or use a different ` +
+              `birds/weight value if this is a genuinely separate delivery.`
           );
         }
 
@@ -399,8 +400,33 @@ export const shopSalesService = {
     });
   },
 
+  /**
+   * Reaching this function already requires the trip's Rate Entry to be
+   * locked (assertRateEntryLocked below) — so `rate`/`amount` are always
+   * the LOCKED price at this point, never an unpriced placeholder. Once
+   * locked, the price is immutable: Shop Sales may only correct
+   * birds/weight/mortality/remarks/bird type, never re-price a delivery or
+   * reassign it to a different shop/trip. A client that includes
+   * rate/amount/shopId/shopName/tripId in the request body is rejected
+   * outright (409) rather than having those fields silently dropped, so
+   * the immutability is an explicit, visible contract rather than a
+   * side-effect of which SQL columns happen to be in the UPDATE.
+   */
   async update(id: number, body: unknown) {
     const data = parseBody(shopSaleBodySchema.partial(), body);
+
+    const lockedFields = (
+      ["rate", "amount", "shopId", "shopName", "tripId"] as const
+    ).filter((field) => data[field] !== undefined);
+    if (lockedFields.length) {
+      throw new AppError(
+        409,
+        `Cannot modify ${lockedFields.join(", ")} on a Shop Sale — the shop, trip, and rate are ` +
+          `locked once Rate Entry has been locked. Only birds, weight, mortality, bird type, and ` +
+          `remarks may be corrected.`,
+        { lockedFields }
+      );
+    }
 
     return withTransaction(async (client) => {
       try {
@@ -427,7 +453,10 @@ export const shopSalesService = {
 
         const birds = data.birds ?? num(current.birds);
         const weight = data.weight ?? num(current.weight);
-        const rate = data.rate ?? Number(current.rate ?? 0);
+        // rate is never client-supplied here (rejected above) — always the
+        // currently-locked price, recomputing amount only for the possibly
+        // edited weight.
+        const rate = Number(current.rate ?? 0);
         const mortalityCount = data.mortality ?? num(current.mortality);
         // mort_kg isn't editable via Shop Sales — carry the row's existing
         // value forward into the capacity check unchanged.
@@ -450,10 +479,8 @@ export const shopSalesService = {
           requested: weight + mortalityWeight,
         });
 
-        // amount is always server-computed — client-supplied amount is
-        // never read. shopId/shopName are intentionally not accepted here:
-        // the data model has no safe way to reassign a delivery to a
-        // different shop, so Shop is immutable once created.
+        // amount is always server-computed from the locked rate — client-
+        // supplied amount is never read.
         const amount = Number((weight * rate).toFixed(2));
 
         const result = await client.query(
@@ -492,46 +519,38 @@ export const shopSalesService = {
     });
   },
 
+  /**
+   * Historically this endpoint mutated the *parent trip's* status
+   * (Draft/Pending/Completed/Deleted) based on an ops-facing status value —
+   * completely bypassing the validated trip status-transition table
+   * (assertTripStatusTransition) and the wizard-completion gate
+   * (assertTripReadyForCompletion) that the real trip status endpoint
+   * (tripsService.updateStatus) enforces. That let a direct API call flip
+   * an incomplete trip straight to "Completed". A Shop Sale has no
+   * independent status of its own (Shop Sales is a projection of
+   * trip_deliveries — see shopSalesService module comment) beyond whether
+   * the row itself is soft-deleted, so this endpoint now only supports
+   * that one real transition — soft-delete — under the exact same guards
+   * softDelete() already uses (Rate Entry must be locked, trip must be
+   * editable/Approved-or-Completed). Every other status value is rejected;
+   * trip status must be changed through tripsService.updateStatus, never
+   * through Shop Sales.
+   */
   async updateStatus(id: number, body: unknown) {
     const status = String((body as { status?: string })?.status ?? "");
     assertOpsStatus(status);
-    const tripStatus = opsToTripStatus(status);
-    const patch = body as { approvedBy?: string; reason?: string };
+    const patch = body as { reason?: string };
 
-    return withTransaction(async (client) => {
-      const tripId = await getDeliveryTripId(client, id);
-      const trip = await lockTrip(client, tripId);
-      assertTripEditable(trip);
-      // NOTE: unlike create/update/softDelete, this legacy endpoint is not
-      // gated on trip.status === 'Completed' — its "Completed"/other
-      // branches exist specifically to transition a trip INTO those
-      // statuses, so requiring Completed first would make that impossible.
-      // See audit report: this endpoint is unused by the current frontend
-      // and mutates the parent Trip's status rather than sale data.
+    if (status !== "Deleted") {
+      throw new AppError(
+        409,
+        `Shop Sales cannot set status to "${status}" — a Shop Sale has no independent status ` +
+          `beyond deleted/active. Trip status can only be changed via the Trip status API, ` +
+          `never through Shop Sales.`
+      );
+    }
 
-      if (tripStatus === "Deleted") {
-        await client.query(
-          `UPDATE trip_deliveries SET deleted = TRUE, deleted_at = NOW(), deleted_reason = $2 WHERE id = $1`,
-          [id, patch.reason ?? null]
-        );
-        await recalcTripDeliveryTotals(client, trip.id);
-      } else if (tripStatus === "Completed") {
-        await client.query(
-          `UPDATE trips SET status = 'Completed', deleted = FALSE,
-             approved_by = COALESCE($2, approved_by), approved_at = NOW()
-           WHERE id = $1`,
-          [tripId, patch.approvedBy ?? "system"]
-        );
-      } else {
-        await client.query(`UPDATE trips SET status = $2::trip_status, deleted = FALSE WHERE id = $1`, [
-          tripId,
-          tripStatus,
-        ]);
-      }
-
-      const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [id]);
-      return mapDeliverySale(row.rows[0]);
-    });
+    return this.softDelete(id, patch.reason);
   },
 
   /** Soft-delete only — birds/weight/rate/amount are preserved for the

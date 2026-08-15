@@ -197,9 +197,12 @@ describe("rateEntryService", () => {
         try {
             const shop = await makeShop(f, "Shop E");
             const tripId = await makeTrip(f, { tripNo: `RT-${uniqueInt()}`, status: "Completed" });
-            // Two shops, only one gets a rate.
+            // Two deliveries to the same shop, only one gets a rate. Different
+            // weight so the two rows don't collide with the
+            // idx_trip_deliveries_no_dup_sale unique constraint (trip_id,
+            // shop_id, birds, weight) — a real second delivery to the same shop.
             const d1 = await addDelivery(tripId, { shopId: shop.id, shopName: "Shop E", birds: 50, weight: 100 });
-            await addDelivery(tripId, { shopId: shop.id, shopName: "Shop E-2", birds: 50, weight: 100 });
+            await addDelivery(tripId, { shopId: shop.id, shopName: "Shop E-2", birds: 50, weight: 120 });
             await rateEntryService.create({ tripId, rate: 55, deliveries: [{ id: d1, rate: 55 }] });
             await assert.rejects(() => rateEntryService.lock(tripId, { lockedBy: "tester" }), (err) => err instanceof AppError && err.status === 409);
         }

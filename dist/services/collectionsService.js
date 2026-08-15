@@ -1,28 +1,37 @@
-import { query, withTransaction } from "../config/db.js";
+import { query } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
-import { assertShopExists, assertTripExists } from "../utils/fkValidation.js";
 import { paginatedResult, } from "../utils/pagination.js";
-import { rethrowIfAppError } from "../utils/pgErrors.js";
-import { assertOpsStatus, collectionBodySchema, parseBody, } from "../validation/operations.js";
 /**
- * Collections are derived from trip_deliveries on completed trips.
- * - amount_due = delivery.amount
- * - amount_collected = amount when trip.rate_completed, else 0
- * No collections table.
+ * Collections are a read-only, derived view over trip_deliveries — there is
+ * no collections table.
+ *   - amount_due   = delivery.amount
+ *   - amount_collected = amount_due once the trip's Rate Entry is LOCKED,
+ *     else 0.
+ *
+ * The single authoritative "is this delivery's amount finalized/collectible"
+ * signal is rate_entry.locked (joined below as `re.locked`) — never
+ * trips.rate_completed directly. This module used to write trips.rate_completed
+ * (and even promote trips.status) itself, independently of Rate Entry —
+ * that let a Collection be "recorded" for a trip that never went through
+ * Rate Entry at all, and left Dashboard/Collections permanently
+ * disagreeing with Shop Sales about which trips were rate-complete. That
+ * write path has been removed entirely (see create/update/updateStatus
+ * below): Collections can now only ever read the Rate Entry lock state,
+ * never independently declare it.
  */
 function mapCollection(row) {
     const amountDue = num(row.amount);
-    const rateCompleted = Boolean(row.rate_completed);
-    const amountCollected = rateCompleted ? amountDue : 0;
+    const rateLocked = Boolean(row.re_locked);
+    const amountCollected = rateLocked ? amountDue : 0;
     const tripStatus = str(row.trip_status);
     const deleted = Boolean(row.trip_deleted);
     let status = "Draft";
     if (deleted || tripStatus === "Deleted")
         status = "Deleted";
-    else if (tripStatus === "Completed" && rateCompleted)
+    else if ((tripStatus === "Completed" || tripStatus === "Approved") && rateLocked)
         status = "Approved";
-    else if (tripStatus === "Completed")
+    else if (tripStatus === "Completed" || tripStatus === "Approved")
         status = "Pending Approval";
     else if (tripStatus === "Pending")
         status = "Pending Approval";
@@ -50,10 +59,17 @@ function mapCollection(row) {
 }
 const COL_SELECT = `
   SELECT d.*, t.trip_date, t.trip_no, t.status AS trip_status,
-         t.deleted AS trip_deleted, t.rate_completed, t.approved_by, t.approved_at
+         t.deleted AS trip_deleted, t.approved_by, t.approved_at,
+         re.locked AS re_locked
   FROM trip_deliveries d
   INNER JOIN trips t ON t.id = d.trip_id
+  LEFT JOIN rate_entry re ON re.trip_id = t.id
 `;
+/** Shared "is this trip's Rate Entry locked" predicate, correlated against
+ * the `t` alias used throughout this file's queries — kept in one place so
+ * every filter (list/pending/register/runningBalance) reads the exact same
+ * authoritative signal as Shop Sales does. */
+const RATE_LOCKED_EXISTS = `EXISTS (SELECT 1 FROM rate_entry re WHERE re.trip_id = t.id AND re.locked = TRUE)`;
 export const collectionsService = {
     async list(filters = {}) {
         const clauses = [];
@@ -75,10 +91,10 @@ export const collectionsService = {
             clauses.push(`t.trip_date <= $${params.length}`);
         }
         if (filters.status === "Approved") {
-            clauses.push(`t.status = 'Completed' AND t.rate_completed = TRUE`);
+            clauses.push(`t.status IN ('Approved', 'Completed') AND ${RATE_LOCKED_EXISTS}`);
         }
         else if (filters.status === "Pending Approval") {
-            clauses.push(`t.status IN ('Pending', 'Completed') AND COALESCE(t.rate_completed, FALSE) = FALSE`);
+            clauses.push(`t.status IN ('Pending', 'Approved', 'Completed') AND NOT ${RATE_LOCKED_EXISTS}`);
         }
         else if (filters.status === "Draft") {
             clauses.push(`t.status = 'Draft'`);
@@ -109,8 +125,8 @@ export const collectionsService = {
         }
         const result = await query(`${COL_SELECT}
        WHERE COALESCE(t.deleted, FALSE) = FALSE
-         AND t.status = 'Completed'
-         AND COALESCE(t.rate_completed, FALSE) = FALSE
+         AND t.status IN ('Approved', 'Completed')
+         AND NOT ${RATE_LOCKED_EXISTS}
          AND COALESCE(d.amount, 0) > 0
          ${shopClause}
        ORDER BY t.trip_date DESC, d.id DESC`, params);
@@ -134,13 +150,14 @@ export const collectionsService = {
          d.shop_id,
          COALESCE(d.shop_name, s.shop_name, '') AS shop_name,
          COALESCE(SUM(d.amount), 0) AS total_sales,
-         COALESCE(SUM(d.amount) FILTER (WHERE t.rate_completed = TRUE), 0) AS total_collected,
-         COALESCE(SUM(d.amount) FILTER (WHERE COALESCE(t.rate_completed, FALSE) = FALSE), 0)
+         COALESCE(SUM(d.amount) FILTER (WHERE re.locked = TRUE), 0) AS total_collected,
+         COALESCE(SUM(d.amount) FILTER (WHERE COALESCE(re.locked, FALSE) = FALSE), 0)
            AS pending_amount
        FROM trip_deliveries d
        INNER JOIN trips t ON t.id = d.trip_id
        LEFT JOIN shops s ON s.id = d.shop_id
-       WHERE t.status = 'Completed'
+       LEFT JOIN rate_entry re ON re.trip_id = t.id
+       WHERE t.status IN ('Approved', 'Completed')
          AND COALESCE(t.deleted, FALSE) = FALSE
          ${shopFilter}
        GROUP BY d.shop_id, COALESCE(d.shop_name, s.shop_name, '')
@@ -164,110 +181,33 @@ export const collectionsService = {
             throw new AppError(404, "Collection not found");
         return mapCollection(result.rows[0]);
     },
-    async create(body) {
-        const data = parseBody(collectionBodySchema, body);
-        if (!data.tripId && !data.saleId) {
-            throw new AppError(400, "tripId or saleId (trip_deliveries.id) is required — collections are derived from deliveries");
-        }
-        return withTransaction(async (client) => {
-            try {
-                let tripId = data.tripId ?? null;
-                let deliveryId = data.saleId ?? null;
-                if (data.saleId) {
-                    const delivery = await client.query(`SELECT trip_id FROM trip_deliveries WHERE id = $1`, [data.saleId]);
-                    if (!delivery.rowCount)
-                        throw new AppError(404, "Delivery/sale not found");
-                    tripId = num(delivery.rows[0].trip_id);
-                    deliveryId = data.saleId;
-                }
-                else {
-                    await assertTripExists(tripId, client);
-                }
-                if (data.shopId != null)
-                    await assertShopExists(data.shopId, client);
-                const collected = data.amountCollected ?? 0;
-                const due = data.amountDue ?? 0;
-                const rateCompleted = due > 0 ? collected >= due : collected > 0;
-                await client.query(`UPDATE trips SET rate_completed = $2, status = CASE
-             WHEN status = 'Draft' THEN 'Pending'::trip_status
-             ELSE status
-           END
-           WHERE id = $1`, [tripId, rateCompleted]);
-                if (deliveryId) {
-                    const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [deliveryId]);
-                    return mapCollection(row.rows[0]);
-                }
-                const first = await client.query(`SELECT id FROM trip_deliveries WHERE trip_id = $1 ORDER BY id LIMIT 1`, [tripId]);
-                if (!first.rowCount) {
-                    throw new AppError(404, "No trip deliveries found for collection");
-                }
-                const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [
-                    first.rows[0].id,
-                ]);
-                return mapCollection(row.rows[0]);
-            }
-            catch (err) {
-                rethrowIfAppError(err);
-                throw err;
-            }
-        });
+    /**
+     * Collections has no state of its own to write — "collected" is derived
+     * entirely from rate_entry.locked (see mapCollection above). Previously
+     * this endpoint set trips.rate_completed directly (and even promoted
+     * trips.status Draft→Pending) based on a client-supplied amountCollected,
+     * completely bypassing Rate Entry — a trip could be marked "collected"
+     * having never been through Rate Entry or Shop Sales at all. That
+     * workflow is removed: use Rate Entry's save/lock endpoints to make a
+     * trip's amount collectible; Collections only reports on that state.
+     */
+    async create(_body) {
+        throw new AppError(409, "Collections status is derived automatically from Rate Entry (lock the trip's Rate Entry " +
+            "to make it collectible) and can no longer be set independently. There is no separate " +
+            "Collection record to create.");
     },
-    async update(id, body) {
-        const data = parseBody(collectionBodySchema.partial(), body);
-        return withTransaction(async (client) => {
-            const delivery = await client.query(`SELECT trip_id FROM trip_deliveries WHERE id = $1`, [id]);
-            if (!delivery.rowCount)
-                throw new AppError(404, "Collection not found");
-            const tripId = num(delivery.rows[0].trip_id);
-            if (data.shopId != null)
-                await assertShopExists(data.shopId, client);
-            if (data.amountDue != null || data.shopId != null || data.shopName != null) {
-                await client.query(`UPDATE trip_deliveries SET
-             amount = COALESCE($2, amount),
-             shop_id = COALESCE($3, shop_id),
-             shop_name = COALESCE($4, shop_name)
-           WHERE id = $1`, [id, data.amountDue ?? null, data.shopId ?? null, data.shopName ?? null]);
-            }
-            if (data.amountCollected != null || data.amountDue != null) {
-                const currentRow = await client.query(`${COL_SELECT} WHERE d.id = $1`, [id]);
-                const current = mapCollection(currentRow.rows[0]);
-                const due = data.amountDue ?? current.amountDue;
-                const collected = data.amountCollected ?? current.amountCollected;
-                await client.query(`UPDATE trips SET rate_completed = $2 WHERE id = $1`, [
-                    tripId,
-                    due > 0 && collected >= due,
-                ]);
-            }
-            const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [id]);
-            return mapCollection(row.rows[0]);
-        });
+    /** See create() — Collections has no independently-writable state. */
+    async update(_id, _body) {
+        throw new AppError(409, "Collections status is derived automatically from Rate Entry and cannot be modified " +
+            "directly. Use the Rate Entry or Shop Sales APIs to change the underlying data.");
     },
-    async updateStatus(id, body) {
-        const status = String(body?.status ?? "");
-        assertOpsStatus(status);
-        const patch = body;
-        return withTransaction(async (client) => {
-            const delivery = await client.query(`SELECT trip_id FROM trip_deliveries WHERE id = $1`, [id]);
-            if (!delivery.rowCount)
-                throw new AppError(404, "Collection not found");
-            const tripId = num(delivery.rows[0].trip_id);
-            if (status === "Approved") {
-                await client.query(`UPDATE trips SET status = 'Completed', rate_completed = TRUE, deleted = FALSE,
-             approved_by = COALESCE($2, approved_by), approved_at = NOW()
-           WHERE id = $1`, [tripId, patch.approvedBy ?? "system"]);
-            }
-            else if (status === "Pending Approval") {
-                await client.query(`UPDATE trips SET status = 'Pending', rate_completed = FALSE, deleted = FALSE WHERE id = $1`, [tripId]);
-            }
-            else if (status === "Deleted") {
-                await client.query(`UPDATE trips SET status = 'Deleted', deleted = TRUE, deleted_reason = $2 WHERE id = $1`, [tripId, patch.reason ?? null]);
-            }
-            else {
-                await client.query(`UPDATE trips SET status = 'Draft', rate_completed = FALSE, deleted = FALSE WHERE id = $1`, [tripId]);
-            }
-            const row = await client.query(`${COL_SELECT} WHERE d.id = $1`, [id]);
-            return mapCollection(row.rows[0]);
-        });
+    /** See create() — Collections has no independently-writable status,
+     * including "Deleted": a delivery/sale can only be soft-deleted through
+     * the Shop Sales API, and a trip's status can only be changed through
+     * the Trip status API. */
+    async updateStatus(_id, _body) {
+        throw new AppError(409, "Collection status cannot be set directly — it is derived from Rate Entry lock state. " +
+            "To delete a sale, use the Shop Sales API; to change trip status, use the Trip status API.");
     },
     async softDelete(id, reason) {
         return this.updateStatus(id, { status: "Deleted", reason });

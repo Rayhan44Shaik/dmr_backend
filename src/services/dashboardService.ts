@@ -28,14 +28,19 @@ export const dashboardService = {
            AND COALESCE(t.deleted, FALSE) = FALSE
        ),
        delivery_totals AS (
+         -- Authoritative "is this trip's rate locked" signal is
+         -- rate_entry.locked, never trips.rate_completed directly — joining
+         -- here instead of trusting the (best-effort-synced) cache column
+         -- guarantees this can never disagree with Rate Entry/Shop Sales.
          SELECT
            COALESCE(SUM(d.amount), 0) AS total_sales,
-           COALESCE(SUM(d.amount) FILTER (WHERE ct.rate_completed = TRUE), 0) AS total_collections,
-           COALESCE(SUM(d.amount) FILTER (WHERE COALESCE(ct.rate_completed, FALSE) = FALSE), 0)
+           COALESCE(SUM(d.amount) FILTER (WHERE re.locked = TRUE), 0) AS total_collections,
+           COALESCE(SUM(d.amount) FILTER (WHERE COALESCE(re.locked, FALSE) = FALSE), 0)
              AS pending_collections,
            COALESCE(SUM(d.weight), 0) AS delivery_weight
          FROM trip_deliveries d
          INNER JOIN completed_trips ct ON ct.id = d.trip_id
+         LEFT JOIN rate_entry re ON re.trip_id = ct.id
        ),
        trip_kpis AS (
          SELECT

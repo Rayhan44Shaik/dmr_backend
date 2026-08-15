@@ -4,6 +4,12 @@ export declare function assertEmployeeExists(id: number | null | undefined, labe
 export declare function assertVehicleExists(id: number | null | undefined, client?: Client | null): Promise<void>;
 export declare function assertFarmExists(id: number | null | undefined, client?: Client | null): Promise<void>;
 export declare function assertShopExists(id: number | null | undefined, client?: Client | null): Promise<void>;
+/** Stricter than assertShopExists: also rejects a soft-deleted (Inactive)
+ * shop. Use this wherever a NEW transactional record (e.g. a Shop Sale) is
+ * being created against a shop — existing historical records that already
+ * reference a since-deactivated shop must keep working, but new activity
+ * against an inactive shop should not be possible. */
+export declare function assertShopActive(id: number | null | undefined, client?: Client | null): Promise<void>;
 export declare function assertBirdTypeExists(id: number | null | undefined, client?: Client | null): Promise<void>;
 export declare function assertTripExists(id: number | null | undefined, client?: Client | null): Promise<void>;
 export declare function validateTripForeignKeys(body: {

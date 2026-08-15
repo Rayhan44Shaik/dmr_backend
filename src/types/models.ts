@@ -323,6 +323,7 @@ export interface SalaryRecord {
   employeeId: number;
   employeeName: string;
   department: string;
+  month: string;
   basicSalary: number;
   overtime: number;
   incentives: number;
@@ -338,8 +339,17 @@ export interface SalaryRecord {
   netSalary: number;
   status: "Pending" | "Paid";
   paymentDate?: string | null;
-  month: string;
+  /** Accounts payment number (PAY-...) written by the payment operation. */
+  paymentRef?: string | null;
+  /** TIMESTAMPTZ of the Pending → Paid transition (payment operation). */
+  paidAt?: string | null;
   createdAt: string;
+  /** Derived at read time from the authoritative Duty Planner attendance
+   *  summary (duty_assignments + approved leave) — never stored. */
+  workingDays?: number;
+  presentDays?: number;
+  leaveDays?: number;
+  weeklyOffDays?: number;
 }
 
 export interface AdvanceLoan {

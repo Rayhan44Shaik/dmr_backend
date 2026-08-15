@@ -35,6 +35,25 @@ export async function assertShopExists(id, client = null) {
         throw new AppError(422, "Shop not found", { shopId: id });
     }
 }
+/** Stricter than assertShopExists: also rejects a soft-deleted (Inactive)
+ * shop. Use this wherever a NEW transactional record (e.g. a Shop Sale) is
+ * being created against a shop — existing historical records that already
+ * reference a since-deactivated shop must keep working, but new activity
+ * against an inactive shop should not be possible. */
+export async function assertShopActive(id, client = null) {
+    if (id == null)
+        return;
+    const sql = `SELECT status FROM shops WHERE id = $1`;
+    const result = client ? await client.query(sql, [id]) : await query(sql, [id]);
+    if (!result.rowCount) {
+        throw new AppError(422, "Shop not found", { shopId: id });
+    }
+    if (result.rows[0].status !== "Active") {
+        throw new AppError(422, "Shop is inactive and cannot be used for a new Shop Sale", {
+            shopId: id,
+        });
+    }
+}
 export async function assertBirdTypeExists(id, client = null) {
     if (id == null)
         return;

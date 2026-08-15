@@ -1,5 +1,11 @@
 import type pg from "pg";
 type Client = pg.PoolClient;
+/** Trip statuses finalized enough to receive/carry a Rate Entry and, once
+ * locked, to be Shop-Sales-eligible. Single shared source — Rate Entry
+ * eligibility (rateEntryService.ts) and Shop Sales eligibility (below) must
+ * never drift apart, since a trip that can be rate-locked but can't reach
+ * Shop Sales afterwards would be a dead end. */
+export declare const RATE_ENTRY_ELIGIBLE_STATUSES: readonly ["Approved", "Completed"];
 export declare function editWindowExpiresAt(trip: {
     approvedAt?: string | null;
     tripDate: string;
@@ -25,7 +31,9 @@ export declare function assertTripEditable(trip: {
  * Draft/Pending trips must only be mutated through Trip Entry Step 4
  * (replaceDeliveries), never through this API. Deleted trips are already
  * rejected by assertTripEditable; this additionally rejects any trip that
- * simply hasn't reached Completed yet. */
+ * hasn't reached a finalized status yet. Uses the same
+ * RATE_ENTRY_ELIGIBLE_STATUSES as Rate Entry — a trip whose rate can be
+ * locked must always be able to reach Shop Sales afterwards. */
 export declare function assertTripCompletedForShopSales(trip: {
     tripNo?: string;
     status: string;

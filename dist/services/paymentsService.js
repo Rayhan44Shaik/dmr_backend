@@ -116,12 +116,19 @@ export const paymentsService = {
             throw new AppError(404, "Payment not found");
         return mapPayment(result.rows[0]);
     },
-    async create(body) {
+    /**
+     * Create an Accounts Payment. When `client` is provided (salary payment
+     * integration), the insert + number-counter increment run on that consumer's
+     * open transaction — atomicity with the caller (salary Pending → Paid) is
+     * the caller's responsibility. Without a client the create opens its own
+     * transaction as before.
+     */
+    async create(body, client) {
         const data = parseBody(paymentBodySchema, body);
-        return withTransaction(async (client) => {
+        const run = async (c) => {
             try {
-                const paymentNo = await generatePaymentNo(client, data.paymentDate);
-                const result = await client.query(`INSERT INTO payments (
+                const paymentNo = await generatePaymentNo(c, data.paymentDate);
+                const result = await c.query(`INSERT INTO payments (
              payment_no, payment_date, payment_type, paid_to, amount,
              payment_mode, reference_no, remarks, category, status, created_by
            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
@@ -139,14 +146,17 @@ export const paymentsService = {
                     data.createdBy ?? "",
                 ]);
                 const paymentId = num(result.rows[0].id);
-                const full = await client.query(`${PAYMENT_SELECT} WHERE p.id = $1`, [paymentId]);
+                const full = await c.query(`${PAYMENT_SELECT} WHERE p.id = $1`, [paymentId]);
                 return mapPayment(full.rows[0]);
             }
             catch (err) {
                 rethrowIfAppError(err);
                 throw err;
             }
-        });
+        };
+        if (client)
+            return run(client);
+        return withTransaction((c) => run(c));
     },
     async update(id, body) {
         const data = parseBody(paymentUpdateSchema, body);

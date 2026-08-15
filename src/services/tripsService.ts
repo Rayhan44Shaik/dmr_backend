@@ -1363,7 +1363,12 @@ export const tripsService = {
             body.weightLoss ?? null,
             body.survivalRate ?? null,
             body.lastShop ?? null,
-            body.rateCompleted ?? null,
+            // rate_completed is never accepted from the client here — it is
+            // exclusively written by rateEntryService.lock() (in sync with
+            // rate_entry.locked), so a generic trip save can never
+            // independently declare a trip "rate complete". Always passing
+            // null preserves the existing DB value via the COALESCE below.
+            null,
             body.deleted ?? null,
             body.deletedReason ?? null,
             body.approvedBy ?? null,

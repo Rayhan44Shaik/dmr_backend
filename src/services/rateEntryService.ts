@@ -10,6 +10,7 @@ import {
   type PaginationParams,
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
+import { RATE_ENTRY_ELIGIBLE_STATUSES } from "../utils/tripDeliverySync.js";
 import {
   parseBody,
   rateEntryBodySchema,
@@ -18,11 +19,6 @@ import {
 } from "../validation/operations.js";
 
 type Client = pg.PoolClient;
-
-/** Trip statuses eligible to receive/carry a Rate Entry. Both are treated
- * as "finalized" — Draft/Pending trips are still in progress and must never
- * surface here. */
-const RATE_ENTRY_ELIGIBLE_STATUSES = ["Approved", "Completed"] as const;
 
 interface TripLockRow {
   id: number;
@@ -516,6 +512,16 @@ export const rateEntryService = {
            WHERE id = $1`,
           [existing.id, data.lockedBy ?? "system"]
         );
+
+        // Keep the legacy trips.rate_completed cache column in sync, in the
+        // same transaction, so it never drifts from the one authoritative
+        // signal (rate_entry.locked). This is the ONLY place that writes
+        // rate_completed = TRUE — no other module may set it independently
+        // (see collectionsService.ts and tripsService.save(), which no
+        // longer accept/apply it). Dashboard/Collections read rate_entry
+        // directly rather than trusting this column, but it's kept
+        // accurate regardless for any other/future consumer.
+        await client.query(`UPDATE trips SET rate_completed = TRUE WHERE id = $1`, [tripId]);
 
         const row = await client.query(
           `SELECT r.*, t.trip_no FROM rate_entry r JOIN trips t ON t.id = r.trip_id WHERE r.id = $1`,

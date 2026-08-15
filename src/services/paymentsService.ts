@@ -188,13 +188,20 @@ export const paymentsService = {
     return mapPayment(result.rows[0]);
   },
 
-  async create(body: unknown): Promise<Payment> {
+  /**
+   * Create an Accounts Payment. When `client` is provided (salary payment
+   * integration), the insert + number-counter increment run on that consumer's
+   * open transaction — atomicity with the caller (salary Pending → Paid) is
+   * the caller's responsibility. Without a client the create opens its own
+   * transaction as before.
+   */
+  async create(body: unknown, client?: Client): Promise<Payment> {
     const data = parseBody(paymentBodySchema, body) as PaymentBody;
 
-    return withTransaction(async (client) => {
+    const run = async (c: Client) => {
       try {
-        const paymentNo = await generatePaymentNo(client, data.paymentDate);
-        const result = await client.query(
+        const paymentNo = await generatePaymentNo(c, data.paymentDate);
+        const result = await c.query(
           `INSERT INTO payments (
              payment_no, payment_date, payment_type, paid_to, amount,
              payment_mode, reference_no, remarks, category, status, created_by
@@ -216,13 +223,16 @@ export const paymentsService = {
         );
 
         const paymentId = num(result.rows[0].id);
-        const full = await client.query(`${PAYMENT_SELECT} WHERE p.id = $1`, [paymentId]);
+        const full = await c.query(`${PAYMENT_SELECT} WHERE p.id = $1`, [paymentId]);
         return mapPayment(full.rows[0]);
       } catch (err) {
         rethrowIfAppError(err);
         throw err;
       }
-    });
+    };
+
+    if (client) return run(client);
+    return withTransaction((c) => run(c));
   },
 
   async update(id: number, body: unknown): Promise<Payment> {

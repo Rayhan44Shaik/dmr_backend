@@ -4,6 +4,7 @@ import { pool } from "../../config/db.js";
 import { AppError } from "../../middleware/errorHandler.js";
 import { shopSalesService } from "../shopSalesService.js";
 import { rateEntryService } from "../rateEntryService.js";
+import { collectionsService } from "../collectionsService.js";
 /**
  * Integration tests against the real PostgreSQL database (the backend has no
  * separate test harness — these run with the project's `tsx` + Node's
@@ -77,6 +78,14 @@ async function makeCompletedTrip(f, opts) {
         opts.weight,
     ]);
     return { tripId, tripNo: opts.tripNo, deliveryId: d.rows[0].id };
+}
+/** Adds one more delivery row to an existing trip (e.g. one created by
+ * makeCompletedTrip), for tests that need a second/extra shop delivery. */
+async function addDelivery(tripId, opts) {
+    const d = await pool.query(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate)
+     VALUES ($1, $2, $3, $4, $5, $6, NULL)
+     RETURNING id`, [tripId, `SALE-${Date.now()}-${Math.floor(Math.random() * 100000)}`, opts.shopId, opts.shopName, opts.birds, opts.weight]);
+    return d.rows[0].id;
 }
 async function assertAppErrorStatus(promise, status) {
     await assert.rejects(promise, (err) => {
@@ -186,15 +195,19 @@ describe("Shop Sales visibility vs Rate Entry lock", () => {
         assert.equal(created.amount, Number((40 * 55.5).toFixed(2)));
         assert.equal(created.status, "Approved");
         assert.equal(created.editable, true);
+        // Rate is immutable once Rate Entry is locked — Shop Sales may only
+        // correct birds/weight/mortality/remarks/bird type. Sending `rate` is
+        // rejected outright (409), not silently ignored.
+        await assert.rejects(() => shopSalesService.update(created.id, { birds: 25, weight: 50, rate: 60 }), (err) => err instanceof AppError && err.status === 409);
         const updated = await shopSalesService.update(created.id, {
             birds: 25,
             weight: 50,
-            rate: 60,
         });
         assert.equal(updated.birds, 25);
         assert.equal(updated.weight, 50);
-        assert.equal(updated.rate, 60);
-        assert.equal(updated.amount, Number((50 * 60).toFixed(2)));
+        // rate stays the locked Rate Entry price — never client-supplied.
+        assert.equal(updated.rate, 55.5);
+        assert.equal(updated.amount, Number((50 * 55.5).toFixed(2)));
         const removed = await shopSalesService.softDelete(created.id, "test cleanup");
         assert.equal(removed.deleted, true);
         const list = (await shopSalesService.list({ shopId: shop.id }));
@@ -287,6 +300,319 @@ describe("Existing Rate Entry behavior", () => {
         // Save/update are rejected once locked — no silent overwrite.
         await assertAppErrorStatus(rateEntryService.create({ tripId: trip.tripId, rate: 99 }), 409);
         await assertAppErrorStatus(rateEntryService.update(saved.id, { rate: 99 }), 409);
+    });
+});
+describe("Phase A/B backend integrity", () => {
+    test("A/B. Draft and Pending trips are rejected from Shop Sales create", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-shop");
+        const draftTripId = await pool
+            .query(`INSERT INTO trips (trip_no, trip_date, status, deleted) VALUES ($1, CURRENT_DATE, 'Draft', FALSE) RETURNING id`, [`T-DRAFT-${uniqueInt()}`])
+            .then((r) => r.rows[0].id);
+        f.tripIds.push(draftTripId);
+        const pendingTripId = await pool
+            .query(`INSERT INTO trips (trip_no, trip_date, status, deleted) VALUES ($1, CURRENT_DATE, 'Pending', FALSE) RETURNING id`, [`T-PEND-${uniqueInt()}`])
+            .then((r) => r.rows[0].id);
+        f.tripIds.push(pendingTripId);
+        await assertAppErrorStatus(shopSalesService.create({ tripId: draftTripId, shopId: shop.id, birds: 10, weight: 20 }), 409);
+        await assertAppErrorStatus(shopSalesService.create({ tripId: pendingTripId, shopId: shop.id, birds: 10, weight: 20 }), 409);
+    });
+    test("C. Approved trip without a locked rate is rejected from Shop Sales", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-approved-shop");
+        const tripId = await pool
+            .query(`INSERT INTO trips (trip_no, trip_date, status, deleted, total_birds, dc_weight)
+         VALUES ($1, CURRENT_DATE, 'Approved', FALSE, 1000, 2000) RETURNING id`, [`T-APPR-${uniqueInt()}`])
+            .then((r) => r.rows[0].id);
+        f.tripIds.push(tripId);
+        await assertAppErrorStatus(shopSalesService.create({ tripId, shopId: shop.id, birds: 10, weight: 20 }), 409);
+        // ...but once Rate Entry is saved AND locked, an Approved (not just
+        // Completed) trip becomes eligible too — matching Rate Entry's own
+        // eligibility (Approved or Completed).
+        const d = await addDelivery(tripId, { shopId: shop.id, shopName: "phase-ab-approved-shop", birds: 100, weight: 200 });
+        await rateEntryService.create({ tripId, rate: 70, deliveries: [{ id: d, rate: 70 }] });
+        await rateEntryService.lock(tripId, { lockedBy: "tester" });
+        const sale = await shopSalesService.getById(d);
+        assert.equal(sale.tripId, tripId);
+    });
+    test("G. Deleted trip is rejected from Shop Sales even with a locked rate on record", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-deleted-shop");
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-DEL-${uniqueInt()}`,
+            shopId: shop.id,
+            shopName: "phase-ab-deleted-shop",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await rateEntryService.create({ tripId: trip.tripId, rate: 65, deliveries: [{ id: trip.deliveryId, rate: 65 }] });
+        await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
+        // Confirm it's reachable before deletion.
+        assert.ok(await shopSalesService.getById(trip.deliveryId));
+        await pool.query(`UPDATE trips SET deleted = TRUE, status = 'Deleted' WHERE id = $1`, [trip.tripId]);
+        await assertAppErrorStatus(shopSalesService.update(trip.deliveryId, { weight: 999 }), 409);
+        await assertAppErrorStatus(shopSalesService.create({ tripId: trip.tripId, shopId: shop.id, birds: 5, weight: 5 }), 409);
+    });
+    test("H. Invalid/nonexistent trip is rejected (404)", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-notrip-shop");
+        await assert.rejects(() => shopSalesService.create({ tripId: 999999999, shopId: shop.id, birds: 10, weight: 20 }), (err) => err instanceof AppError && err.status === 404);
+    });
+    test("I. Inactive shop is rejected from new Shop Sales creation", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-inactive-shop");
+        await pool.query(`UPDATE shops SET status = 'Inactive' WHERE id = $1`, [shop.id]);
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-INACT-${uniqueInt()}`,
+            shopId: null,
+            shopName: "",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await rateEntryService.create({ tripId: trip.tripId, rate: 50, deliveries: [{ id: trip.deliveryId, rate: 50 }] });
+        await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
+        await assert.rejects(() => shopSalesService.create({ tripId: trip.tripId, shopId: shop.id, birds: 10, weight: 20 }), (err) => err instanceof AppError && err.status === 422);
+    });
+    test("J. A delivery id belonging to a different trip cannot be rated as part of this trip's save", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-wrongtrip-shop");
+        const tripA = await makeCompletedTrip(f, {
+            tripNo: `T-WRONGA-${uniqueInt()}`,
+            shopId: shop.id,
+            shopName: "phase-ab-wrongtrip-shop",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        const tripBId = await pool
+            .query(`INSERT INTO trips (trip_no, trip_date, status, deleted) VALUES ($1, CURRENT_DATE, 'Completed', FALSE) RETURNING id`, [`T-WRONGB-${uniqueInt()}`])
+            .then((r) => r.rows[0].id);
+        f.tripIds.push(tripBId);
+        // tripA's delivery id supplied while saving rates for tripB — must be rejected.
+        await assert.rejects(() => rateEntryService.create({ tripId: tripBId, rate: 50, deliveries: [{ id: tripA.deliveryId, rate: 50 }] }), (err) => err instanceof AppError && err.status === 422);
+    });
+    test("K. Duplicate Shop Sales create is rejected — no duplicate row created", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-dup-shop");
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-DUP-${uniqueInt()}`,
+            shopId: null,
+            shopName: "",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await rateEntryService.create({ tripId: trip.tripId, rate: 50, deliveries: [{ id: trip.deliveryId, rate: 50 }] });
+        await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
+        const first = await shopSalesService.create({
+            tripId: trip.tripId,
+            shopId: shop.id,
+            shopName: "phase-ab-dup-shop",
+            birds: 30,
+            weight: 60,
+        });
+        assert.ok(first.id > 0);
+        await assertAppErrorStatus(shopSalesService.create({
+            tripId: trip.tripId,
+            shopId: shop.id,
+            shopName: "phase-ab-dup-shop",
+            birds: 30,
+            weight: 60,
+        }), 409);
+        const list = (await shopSalesService.list({ shopId: shop.id }));
+        assert.equal(list.filter((s) => s.tripId === trip.tripId).length, 1, "exactly one sale, not two");
+    });
+    test("M/N/O. Locked amount/shop/trip reassignment via update() is rejected (409)", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-immutable-shop");
+        const otherShop = await makeShop(f, "phase-ab-other-shop");
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-IMMUT-${uniqueInt()}`,
+            shopId: shop.id,
+            shopName: "phase-ab-immutable-shop",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await rateEntryService.create({ tripId: trip.tripId, rate: 45, deliveries: [{ id: trip.deliveryId, rate: 45 }] });
+        await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
+        await assertAppErrorStatus(shopSalesService.update(trip.deliveryId, { amount: 99999 }), 409);
+        await assertAppErrorStatus(shopSalesService.update(trip.deliveryId, { shopId: otherShop.id }), 409);
+        await assertAppErrorStatus(shopSalesService.update(trip.deliveryId, { shopName: "renamed" }), 409);
+        await assertAppErrorStatus(shopSalesService.update(trip.deliveryId, { tripId: trip.tripId }), 409);
+        // Confirm nothing actually changed.
+        const unchanged = await shopSalesService.getById(trip.deliveryId);
+        assert.equal(unchanged.shopId, shop.id);
+        assert.equal(unchanged.rate, 45);
+    });
+    test("P/Q. Invalid and negative rate are rejected on Rate Entry save", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-badrate-shop");
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-BADRATE-${uniqueInt()}`,
+            shopId: shop.id,
+            shopName: "phase-ab-badrate-shop",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await assert.rejects(() => rateEntryService.create({ tripId: trip.tripId, rate: -10, deliveries: [{ id: trip.deliveryId, rate: -10 }] }), (err) => err instanceof AppError && (err.status === 400 || err.status === 409));
+        await assert.rejects(() => rateEntryService.create({ tripId: trip.tripId, rate: 0, deliveries: [{ id: trip.deliveryId, rate: 0 }] }), (err) => err instanceof AppError && err.status === 400);
+    });
+    test("R/S. Invalid and negative weight are rejected on Shop Sales create", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-badweight-shop");
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-BADWT-${uniqueInt()}`,
+            shopId: null,
+            shopName: "",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await rateEntryService.create({ tripId: trip.tripId, rate: 50, deliveries: [{ id: trip.deliveryId, rate: 50 }] });
+        await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
+        await assert.rejects(() => shopSalesService.create({ tripId: trip.tripId, shopId: shop.id, birds: 10, weight: -5 }), (err) => err instanceof AppError && err.status === 400);
+    });
+    test("T. Client-supplied amount is ignored — server always recomputes weight x rate", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-amount-shop");
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-AMT-${uniqueInt()}`,
+            shopId: null,
+            shopName: "",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await rateEntryService.create({ tripId: trip.tripId, rate: 50, deliveries: [{ id: trip.deliveryId, rate: 50 }] });
+        await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
+        const sale = await shopSalesService.create({
+            tripId: trip.tripId,
+            shopId: shop.id,
+            birds: 10,
+            weight: 33.5,
+            rate: 50,
+            amount: 999999, // deliberately wrong — must be ignored
+        });
+        assert.equal(sale.amount, Number((33.5 * 50).toFixed(2)));
+    });
+    test("U. Concurrent Rate Lock attempts on the same trip: exactly one succeeds", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-concurrent-lock-shop");
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-CLOCK-${uniqueInt()}`,
+            shopId: shop.id,
+            shopName: "phase-ab-concurrent-lock-shop",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await rateEntryService.create({ tripId: trip.tripId, rate: 50, deliveries: [{ id: trip.deliveryId, rate: 50 }] });
+        const results = await Promise.allSettled([
+            rateEntryService.lock(trip.tripId, { lockedBy: "userA" }),
+            rateEntryService.lock(trip.tripId, { lockedBy: "userB" }),
+        ]);
+        const fulfilled = results.filter((r) => r.status === "fulfilled");
+        const rejected = results.filter((r) => r.status === "rejected");
+        assert.equal(fulfilled.length, 1, "exactly one concurrent lock should succeed");
+        assert.equal(rejected.length, 1, "the other concurrent lock should be rejected");
+        const finalState = await rateEntryService.getByTripId(trip.tripId);
+        assert.equal(finalState?.locked, true);
+    });
+    test("V. Concurrent identical Shop Sales creates: exactly one succeeds", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-concurrent-sale-shop");
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-CSALE-${uniqueInt()}`,
+            shopId: null,
+            shopName: "",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await rateEntryService.create({ tripId: trip.tripId, rate: 50, deliveries: [{ id: trip.deliveryId, rate: 50 }] });
+        await rateEntryService.lock(trip.tripId, { lockedBy: "tester" });
+        const payload = { tripId: trip.tripId, shopId: shop.id, birds: 15, weight: 25 };
+        const results = await Promise.allSettled([
+            shopSalesService.create(payload),
+            shopSalesService.create(payload),
+        ]);
+        const fulfilled = results.filter((r) => r.status === "fulfilled");
+        assert.equal(fulfilled.length, 1, "exactly one of two concurrent identical creates should succeed");
+        const list = (await shopSalesService.list({ shopId: shop.id }));
+        assert.equal(list.filter((s) => s.tripId === trip.tripId && s.birds === 15 && s.weight === 25).length, 1, "the unique index must prevent a duplicate row even under a real race");
+    });
+    test("W/X. Shop Sales status-bypass attempt cannot change trip status or bypass the lock gate", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const shop = await makeShop(f, "phase-ab-bypass-shop");
+        // An incomplete (Draft) trip that never submitted the wizard steps.
+        const tripId = await pool
+            .query(`INSERT INTO trips (trip_no, trip_date, status, deleted) VALUES ($1, CURRENT_DATE, 'Draft', FALSE) RETURNING id`, [`T-BYPASS-${uniqueInt()}`])
+            .then((r) => r.rows[0].id);
+        f.tripIds.push(tripId);
+        const deliveryId = await addDelivery(tripId, { shopId: shop.id, shopName: "phase-ab-bypass-shop", birds: 10, weight: 20 });
+        // Attempting to force-approve via the Shop Sales status endpoint must
+        // be rejected — it must NOT be able to flip the trip to Completed,
+        // bypassing assertTripReadyForCompletion.
+        await assertAppErrorStatus(shopSalesService.updateStatus(deliveryId, { status: "Approved" }), 409);
+        await assertAppErrorStatus(shopSalesService.updateStatus(deliveryId, { status: "Pending Approval" }), 409);
+        const tripRow = await pool.query(`SELECT status FROM trips WHERE id = $1`, [tripId]);
+        assert.equal(tripRow.rows[0].status, "Draft", "trip status must be untouched by the bypass attempt");
+        // Only "Deleted" is a legitimate Shop Sales status action, and even
+        // that still goes through the same guards as softDelete() (Rate Entry
+        // must be locked) — a Draft trip's delivery cannot be "deleted" this
+        // way either, since assertTripCompletedForShopSales/assertRateEntryLocked
+        // still apply.
+        await assertAppErrorStatus(shopSalesService.updateStatus(deliveryId, { status: "Deleted" }), 409);
+    });
+});
+describe("Collections cannot independently declare a trip rate-complete", () => {
+    test("Y. Collections create/update/updateStatus all reject — no independent write path to rate state", async (t) => {
+        const f = newFixture();
+        t.after(() => cleanup(f));
+        const trip = await makeCompletedTrip(f, {
+            tripNo: `T-COLBYPASS-${uniqueInt()}`,
+            shopId: null,
+            shopName: "",
+            birdTypeId: null,
+            birdType: "",
+            birds: 100,
+            weight: 200,
+        });
+        await assertAppErrorStatus(collectionsService.create({ tripId: trip.tripId, amountDue: 1000, amountCollected: 1000 }), 409);
+        await assertAppErrorStatus(collectionsService.update(trip.deliveryId, { amountCollected: 1000 }), 409);
+        await assertAppErrorStatus(collectionsService.updateStatus(trip.deliveryId, { status: "Approved" }), 409);
+        // Confirm the trip's rate_completed truly never flipped via any of the above.
+        const row = await pool.query(`SELECT rate_completed, status FROM trips WHERE id = $1`, [trip.tripId]);
+        assert.equal(row.rows[0].rate_completed, false);
+        assert.equal(row.rows[0].status, "Completed", "trip status must be untouched by the Collections bypass attempt");
     });
 });
 //# sourceMappingURL=shopSalesService.test.js.map

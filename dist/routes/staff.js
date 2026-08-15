@@ -1,7 +1,8 @@
 import { Router } from "express";
-import { asyncHandler } from "../middleware/errorHandler.js";
+import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { staffService } from "../services/staffService.js";
 import { dutyPlannerService } from "../services/dutyPlannerService.js";
+import { parseBody, salaryGenerateSchema, salaryListQuerySchema, salaryStatusPatchSchema, } from "../validation/salary.js";
 export const staffRouter = Router();
 // Duty Planner
 staffRouter.get("/duties", asyncHandler(async (req, res) => {
@@ -31,13 +32,48 @@ staffRouter.patch("/leaves/:id/status", asyncHandler(async (req, res) => {
 }));
 // Salary
 staffRouter.get("/salaries", asyncHandler(async (req, res) => {
-    res.json(await staffService.listSalaries(typeof req.query.month === "string" ? req.query.month : undefined, typeof req.query.department === "string" ? req.query.department : undefined));
+    const { month, department } = parseBody(salaryListQuerySchema, req.query);
+    res.json(await staffService.listSalaries(month, department));
+}));
+// Bulk generate for a month (idempotent, transactional). Registered before
+// any /:id route so "generate" is never parsed as an id.
+staffRouter.post("/salaries/generate", asyncHandler(async (req, res) => {
+    const body = parseBody(salaryGenerateSchema, req.body);
+    res.json(await staffService.generateForMonth(body.month, body.department));
 }));
 staffRouter.post("/salaries", asyncHandler(async (req, res) => {
-    res.status(201).json(await staffService.upsertSalary(req.body));
+    res.status(201).json(await staffService.createSalary(req.body));
 }));
 staffRouter.put("/salaries", asyncHandler(async (req, res) => {
     res.json(await staffService.upsertSalary(req.body));
+}));
+staffRouter.patch("/salaries/:id/status", asyncHandler(async (req, res) => {
+    // Only { status: "Pending" } is accepted here; Pending → Paid is reserved
+    // exclusively for POST /salaries/:id/pay.
+    parseBody(salaryStatusPatchSchema, req.body);
+    res.json(await staffService.updateSalaryStatus(req.params.id));
+}));
+// Dedicated payment operation — Pending → Paid + Accounts payment, atomic.
+staffRouter.post("/salaries/:id/pay", asyncHandler(async (req, res) => {
+    res.json(await staffService.paySalary(req.params.id, req.body));
+}));
+staffRouter.put("/salaries/:id", asyncHandler(async (req, res) => {
+    res.json(await staffService.updateSalaryById(req.params.id, req.body));
+}));
+staffRouter.delete("/salaries/:id", asyncHandler(async (req, res) => {
+    res.json(await staffService.deleteSalary(req.params.id));
+}));
+// Per-employee register row: GET /api/staff/salaries/:employeeId?month=YYYY-MM
+staffRouter.get("/salaries/:employeeId", asyncHandler(async (req, res) => {
+    const employeeId = Number(req.params.employeeId);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) {
+        throw new AppError(400, `Invalid employee id: "${req.params.employeeId}"`);
+    }
+    const month = typeof req.query.month === "string" ? req.query.month : new Date().toISOString().slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+        throw new AppError(400, "month must be in YYYY-MM format");
+    }
+    res.json(await staffService.getEmployeeSalary(employeeId, month));
 }));
 // Advance / Loan
 staffRouter.get("/advances", asyncHandler(async (req, res) => {

@@ -5,6 +5,13 @@ type Client = pg.PoolClient;
 
 const EDIT_WINDOW_DAYS = 10;
 
+/** Trip statuses finalized enough to receive/carry a Rate Entry and, once
+ * locked, to be Shop-Sales-eligible. Single shared source — Rate Entry
+ * eligibility (rateEntryService.ts) and Shop Sales eligibility (below) must
+ * never drift apart, since a trip that can be rate-locked but can't reach
+ * Shop Sales afterwards would be a dead end. */
+export const RATE_ENTRY_ELIGIBLE_STATUSES = ["Approved", "Completed"] as const;
+
 /** Anchor date for the 10-day edit window: when the trip was completed
  * (approved_at), falling back to the trip date for older/legacy rows that
  * predate approved_at being populated. */
@@ -60,13 +67,15 @@ export function assertTripEditable(trip: {
  * Draft/Pending trips must only be mutated through Trip Entry Step 4
  * (replaceDeliveries), never through this API. Deleted trips are already
  * rejected by assertTripEditable; this additionally rejects any trip that
- * simply hasn't reached Completed yet. */
+ * hasn't reached a finalized status yet. Uses the same
+ * RATE_ENTRY_ELIGIBLE_STATUSES as Rate Entry — a trip whose rate can be
+ * locked must always be able to reach Shop Sales afterwards. */
 export function assertTripCompletedForShopSales(trip: { tripNo?: string; status: string }): void {
-  if (trip.status !== "Completed") {
+  if (!RATE_ENTRY_ELIGIBLE_STATUSES.includes(trip.status as (typeof RATE_ENTRY_ELIGIBLE_STATUSES)[number])) {
     throw new AppError(
       409,
-      `Trip ${trip.tripNo ?? ""} is not Completed (status: ${trip.status}). ` +
-        `Shop Sales can only be created, edited, or deleted on a Completed trip.`.replace(/\s+/g, " ")
+      `Trip ${trip.tripNo ?? ""} is not Approved/Completed (status: ${trip.status}). ` +
+        `Shop Sales can only be created, edited, or deleted once the trip is Approved or Completed.`.replace(/\s+/g, " ")
     );
   }
 }
