@@ -13,11 +13,21 @@ import {
   type PaginationParams,
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
+import { evaluateRateLock } from "../utils/rateLock.js";
 import {
   assertOpsStatus,
   parseBody,
   shopSaleBodySchema,
 } from "../validation/operations.js";
+
+/**
+ * Authoritative amount calculation for a shop sale / trip delivery.
+ * The client-supplied amount is never trusted; the server always recomputes
+ * from weight * rate. Existing project convention is ROUND to 2 decimals.
+ */
+function computeAmount(weight: number, rate: number): number {
+  return Number((Number(weight) * Number(rate)).toFixed(2));
+}
 
 /** Map trip_status → ops-facing status for API contract */
 function tripToOpsStatus(tripStatus: string, deleted: boolean): ShopSale["status"] {
@@ -38,6 +48,13 @@ function opsToTripStatus(status: string): string {
 function mapDeliverySale(row: Record<string, unknown>): ShopSale {
   const tripStatus = str(row.trip_status);
   const deleted = Boolean(row.trip_deleted);
+  const rateCompleted = Boolean(row.rate_completed);
+  const rateLockedAt =
+    row.rate_locked_at == null ? null : new Date(str(row.rate_locked_at));
+  const lock = evaluateRateLock({
+    rate_completed: rateCompleted,
+    rate_locked_at: rateLockedAt,
+  });
   return {
     id: num(row.id),
     saleNo: `TD-${num(row.id)}`,
@@ -60,16 +77,25 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
     approvedAt: row.approved_at == null ? null : str(row.approved_at),
     createdAt: row.created_at == null ? null : str(row.created_at),
     updatedAt: row.updated_at == null ? null : str(row.updated_at),
+    rateCompleted,
+    rateLockedAt: lock.rateLockedAt,
+    rateLockedBy: row.rate_locked_by == null ? null : str(row.rate_locked_by),
+    correctionWindowExpired: lock.correctionWindowExpired,
+    correctionWindowClosesAt: lock.correctionWindowClosesAt,
   };
 }
 
 const SALE_SELECT = `
   SELECT d.*,
          t.trip_date, t.status AS trip_status, t.deleted AS trip_deleted,
-         t.deleted_reason, t.approved_by, t.approved_at
+         t.deleted_reason, t.approved_by, t.approved_at,
+         t.rate_completed, t.rate_locked_at, t.rate_locked_by
   FROM trip_deliveries d
   INNER JOIN trips t ON t.id = d.trip_id
 `;
+
+/** Fields a Shop Sales user may correct within the 10-day window. */
+const PROTECTED_FIELDS = ["birds", "weight", "rate", "amount"] as const;
 
 /**
  * Shop sales backed by trip_deliveries (+ parent trips).
@@ -160,7 +186,8 @@ export const shopSalesService = {
         const birds = data.birds ?? 0;
         const weight = data.weight ?? 0;
         const rate = data.rate ?? 0;
-        const amount = data.amount ?? Number((weight * rate).toFixed(2));
+        // Amount is ALWAYS computed server-side — the client value is ignored.
+        const amount = computeAmount(weight, rate);
 
         const result = await client.query(
           `INSERT INTO trip_deliveries (
@@ -195,25 +222,45 @@ export const shopSalesService = {
   async update(id: number, body: unknown) {
     const data = parseBody(shopSaleBodySchema.partial(), body);
 
-    // If the parent trip is rate-locked, Rate Entry owns rate/amount and they
-    // are immutable. The DB trigger would reject this anyway — surface a clear
-    // 409 before attempting the write.
-    if (data.rate !== undefined || data.amount !== undefined || data.weight !== undefined) {
-      const parent = await query<{ rate_completed: boolean }>(
-        `SELECT COALESCE(t.rate_completed, FALSE) AS rate_completed
-         FROM trip_deliveries d
-         INNER JOIN trips t ON t.id = d.trip_id
-         WHERE d.id = $1`,
-        [id]
+    // Load the current delivery + parent lock state so we can:
+    //   1. enforce the 10-day correction window on protected fields
+    //   2. always recompute amount from authoritative weight/rate
+    const current = await query(
+      `${SALE_SELECT} WHERE d.id = $1`,
+      [id]
+    );
+    if (!current.rowCount) throw new AppError(404, "Shop sale not found");
+    const cur = current.rows[0];
+
+    const lock = evaluateRateLock({
+      rate_completed: cur.rate_completed,
+      rate_locked_at: cur.rate_locked_at == null ? null : new Date(str(cur.rate_locked_at)),
+    });
+
+    const touchesProtected = PROTECTED_FIELDS.some(
+      (f) => (data as Record<string, unknown>)[f] !== undefined
+    );
+
+    if (lock.rateCompleted && touchesProtected && lock.correctionWindowExpired) {
+      throw new AppError(
+        409,
+        "Rate correction window expired — editing locked after 10 days",
+        {
+          tripId: num(cur.trip_id),
+          rateLockedAt: lock.rateLockedAt,
+          correctionWindowClosesAt: lock.correctionWindowClosesAt,
+        }
       );
-      if (!parent.rowCount) throw new AppError(404, "Shop sale not found");
-      if (parent.rows[0].rate_completed) {
-        throw new AppError(
-          409,
-          "Cannot modify weight/rate/amount — trip rates are locked by Rate Entry"
-        );
-      }
     }
+
+    // Authoritative values for recomputing amount: fall back to the currently
+    // persisted value for any field the client did not send. This lets the
+    // client send a partial Shop Sales edit (e.g. only rate) and still get a
+    // correctly recomputed amount.
+    const effectiveWeight = data.weight ?? num(cur.weight);
+    const effectiveRate = data.rate ?? num(cur.rate);
+    // The client amount is NEVER authoritative.
+    const nextAmount = computeAmount(effectiveWeight, effectiveRate);
 
     const result = await query(
       `UPDATE trip_deliveries SET
@@ -224,7 +271,7 @@ export const shopSalesService = {
          birds = COALESCE($6, birds),
          weight = COALESCE($7, weight),
          rate = COALESCE($8, rate),
-         amount = COALESCE($9, amount),
+         amount = $9,
          mortality = COALESCE($10, mortality),
          remarks = COALESCE($11, remarks)
        WHERE id = $1
@@ -238,7 +285,7 @@ export const shopSalesService = {
         data.birds ?? null,
         data.weight ?? null,
         data.rate ?? null,
-        data.amount ?? null,
+        nextAmount,
         data.mortality ?? null,
         data.remarks ?? null,
       ]
@@ -262,16 +309,24 @@ export const shopSalesService = {
       const tripId = num(delivery.rows[0].trip_id);
 
       if (tripStatus === "Deleted") {
-        // Refuse to zero a delivery that belongs to a rate-locked trip.
-        const locked = await client.query<{ rate_completed: boolean }>(
-          `SELECT COALESCE(rate_completed, FALSE) AS rate_completed
+        // A delivery may be zeroed/deleted only before Rate Entry locks it.
+        // Once rate_completed=TRUE, the DB trigger forbids row DELETE and the
+        // protected fields are immutable after the 10-day correction window.
+        const locked = await client.query<{
+          rate_completed: boolean;
+          rate_locked_at: Date | null;
+        }>(
+          `SELECT COALESCE(rate_completed, FALSE) AS rate_completed,
+                  rate_locked_at
            FROM trips WHERE id = $1`,
           [tripId]
         );
         if (locked.rowCount && locked.rows[0].rate_completed) {
+          // Deleting/zeroing a delivery is never allowed after Rate Entry
+          // lock — Shop Sales corrects fields in place within the window.
           throw new AppError(
             409,
-            "Cannot delete a shop sale whose trip rates are locked by Rate Entry"
+            "Cannot delete a shop sale after Rate Entry has finalized the trip; correct it within the 10-day window instead"
           );
         }
         await client.query(

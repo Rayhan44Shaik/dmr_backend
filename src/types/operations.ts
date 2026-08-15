@@ -78,6 +78,17 @@ export interface ShopSale {
   createdBy?: string;
   createdAt?: string | null;
   updatedAt?: string | null;
+  /** Rate Entry lock state (null/absent for pre-Rate-Entry sales). */
+  rateCompleted?: boolean;
+  rateLockedAt?: string | null;
+  rateLockedBy?: string | null;
+  /**
+   * True when the 10-day Shop Sales correction window has permanently closed.
+   * Frontend should disable Birds/Weight/Rate/Amount editing when true.
+   */
+  correctionWindowExpired?: boolean;
+  /** ISO timestamp at which the correction window closes. */
+  correctionWindowClosesAt?: string | null;
 }
 
 export interface Collection {

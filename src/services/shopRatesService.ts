@@ -12,6 +12,7 @@ import {
   type PaginationParams,
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
+import { evaluateRateLock } from "../utils/rateLock.js";
 import {
   assertOpsStatus,
   parseBody,
@@ -192,18 +193,34 @@ export const shopRatesService = {
     const data = parseBody(shopRateBodySchema.partial(), body);
 
     if (data.rate !== undefined) {
-      const parent = await query<{ rate_completed: boolean }>(
-        `SELECT COALESCE(t.rate_completed, FALSE) AS rate_completed
+      // Shop Rates edits the same trip_deliveries.rate column as Shop Sales.
+      // The same 10-day correction window applies: allowed while the window
+      // is open, permanently rejected once it has closed. The DB trigger is
+      // the final enforcer.
+      const parent = await query<{
+        rate_completed: boolean;
+        rate_locked_at: Date | null;
+      }>(
+        `SELECT COALESCE(t.rate_completed, FALSE) AS rate_completed,
+                t.rate_locked_at
          FROM trip_deliveries d
          INNER JOIN trips t ON t.id = d.trip_id
          WHERE d.id = $1`,
         [id]
       );
       if (!parent.rowCount) throw new AppError(404, "Shop rate not found");
-      if (parent.rows[0].rate_completed) {
+      const lock = evaluateRateLock({
+        rate_completed: parent.rows[0].rate_completed,
+        rate_locked_at: parent.rows[0].rate_locked_at,
+      });
+      if (lock.rateCompleted && lock.correctionWindowExpired) {
         throw new AppError(
           409,
-          "Cannot modify rate — trip rates are locked by Rate Entry"
+          "Rate correction window expired — editing locked after 10 days",
+          {
+            rateLockedAt: lock.rateLockedAt,
+            correctionWindowClosesAt: lock.correctionWindowClosesAt,
+          }
         );
       }
     }
@@ -260,15 +277,33 @@ export const shopRatesService = {
           [tripId]
         );
       } else if (status === "Deleted") {
-        const locked = await client.query<{ rate_completed: boolean }>(
-          `SELECT COALESCE(rate_completed, FALSE) AS rate_completed FROM trips WHERE id = $1`,
+        // Clearing the rate is a mutation of trip_deliveries.rate. It is
+        // allowed before Rate Entry lock and during the correction window,
+        // but permanently rejected once the 10-day window has closed.
+        const locked = await client.query<{
+          rate_completed: boolean;
+          rate_locked_at: Date | null;
+        }>(
+          `SELECT COALESCE(rate_completed, FALSE) AS rate_completed,
+                  rate_locked_at
+           FROM trips WHERE id = $1`,
           [tripId]
         );
-        if (locked.rowCount && locked.rows[0].rate_completed) {
-          throw new AppError(
-            409,
-            "Cannot clear a rate whose trip is locked by Rate Entry"
-          );
+        if (locked.rowCount) {
+          const lock = evaluateRateLock({
+            rate_completed: locked.rows[0].rate_completed,
+            rate_locked_at: locked.rows[0].rate_locked_at,
+          });
+          if (lock.rateCompleted && lock.correctionWindowExpired) {
+            throw new AppError(
+              409,
+              "Rate correction window expired — editing locked after 10 days",
+              {
+                rateLockedAt: lock.rateLockedAt,
+                correctionWindowClosesAt: lock.correctionWindowClosesAt,
+              }
+            );
+          }
         }
         await client.query(`UPDATE trip_deliveries SET rate = NULL WHERE id = $1`, [id]);
       } else if (status === "Draft" || status === "Rejected") {

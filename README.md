@@ -171,13 +171,33 @@ Eligibility is enforced in the SQL WHERE clause, never in the client:
 Once a trip is locked:
 
 - `trips.rate_completed = TRUE`, `rate_locked_at` / `rate_locked_by` are stamped.
-- A PostgreSQL trigger (`trg_trip_deliveries_rate_lock`) rejects any UPDATE of
-  `rate`/`amount` or DELETE of the delivery row. Trip autosave, Shop Sales,
-  Shop Rates and Collections also refuse to mutate those values.
-- Shop Sales automatically reads the finalized rate/amount (it queries
-  `trip_deliveries` on completed trips).
+- A **10-day Shop Sales correction window** starts at `rate_locked_at`.
+  `rate_completed = TRUE` does NOT mean "immediately immutable" — it means
+  "Rate Entry finalized and the correction window is running".
+- **During the 10-day window** (`rate_locked_at <= NOW() < rate_locked_at + 10 days`),
+  Shop Sales may correct Birds, Weight, and Rate. Amount is ALWAYS recomputed
+  server-side (`ROUND(weight * rate, 2)`); the client value is never trusted.
+- **After exactly 10 days**, Birds, Weight, Rate and Amount become PERMANENTLY
+  immutable. A PostgreSQL trigger (`trg_trip_deliveries_rate_lock`) rejects
+  UPDATEs of those columns and DELETEs of locked delivery rows using SERVER
+  time — no client, service, or direct SQL bypass is possible.
+- Trip Entry's wholesale delivery replacement stays blocked after lock (Trip
+  Entry ownership is separate from Shop Sales correction ownership); the
+  service layers in Shop Sales / Shop Rates mirror the window for friendly
+  409 responses before the DB guard fires.
+- Shop Sales reads the finalized rate/amount from `trip_deliveries` on
+  completed trips (no business-logic change).
 - A locked trip remains visible in Trip List and via `GET /rate-entry/:id`
   (read-only) but disappears from the Rate Entry work queue.
+- Collections can never flip `rate_completed` back to FALSE (payment state is
+  independent of the Rate Entry lock / correction window).
+
+`GET /shop-sales/:id` (and list responses) include `rateCompleted`,
+`rateLockedAt`, `rateLockedBy`, `correctionWindowExpired`, and
+`correctionWindowClosesAt` so the frontend can disable the Birds/Weight/Rate/
+Amount edit controls after the window, showing e.g.
+"Rate correction window expired — editing locked after 10 days." The UI
+restriction is advisory only; the backend/database remains authoritative.
 
 ### Trip List (read-only historical view)
 
