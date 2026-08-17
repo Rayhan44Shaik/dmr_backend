@@ -68,6 +68,7 @@ export interface Shop {
   address?: string | null;
   status: ActiveStatus;
   openingBalance: number;
+  currentBalance: number;
 }
 
 export interface Bank {
@@ -125,6 +126,7 @@ export interface BoxDetail {
   boxNo: number;
   birds: number;
   weight: number;
+  avgWeight?: number | null;
 }
 
 export interface ShopDelivery {
@@ -148,6 +150,8 @@ export interface ShopDelivery {
   farmWeight?: number | null;
   perBoxData?: BoxDetail[];
   autoCaptureTime?: string | null;
+  /** Stable client-generated idempotency key (Step 4 per-shop save). */
+  clientKey?: string | null;
 }
 
 export interface DieselEntry {
@@ -177,7 +181,7 @@ export interface Trip {
   helpers: string[];
   loaders: string[];
   openingMeter: number | null;
-  advanceAmount: number;
+  advanceAmount: number | null;
   startStepSubmitted: boolean;
   startStepSubmittedAt: string | null;
 
@@ -195,6 +199,11 @@ export interface Trip {
   farmLoadWeight?: number | null;
   farmRate?: number | null;
   farmAmount?: number | null;
+  farmCompletedTrips?: number | null;
+  farmGpsLat?: number | null;
+  farmGpsLon?: number | null;
+  farmGpsAccuracy?: number | null;
+  farmGpsTime?: string | null;
   farmStepSubmitted: boolean;
   farmStepSubmittedAt: string | null;
 
@@ -205,6 +214,7 @@ export interface Trip {
   pickupLoadTime: string | null;
   boxDetails: BoxDetail[];
   dcPhotoKey?: string | null;
+  dcPhotoKey2?: string | null;
   pickupStepSubmitted: boolean;
   pickupStepSubmittedAt: string | null;
 

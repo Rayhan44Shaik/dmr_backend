@@ -172,7 +172,7 @@ async function makeLockedTrip(
   const deliveryB = await addDelivery(trip.id, m.shopB.id, m.shopB.shopName, opts.birdsB, opts.weightB);
   // Mimic real Trip Entry: keep the trip summary KPIs in sync with the
   // seeded deliveries (as tripsService.replaceDeliveries does).
-  await recalcTripDeliveryTotals(pool, trip.id);
+  await recalcTripDeliveryTotals(pool as never, trip.id);
   const rateA = opts.rateA ?? 100;
   const rateB = opts.rateB ?? 100;
   const saved = await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {

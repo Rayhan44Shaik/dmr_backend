@@ -56,6 +56,20 @@ tripsRouter.post(
   })
 );
 
+/**
+ * Available masters for Step 1 dropdowns (vehicles/drivers/supervisors/
+ * helpers/loaders not occupied by an active trip). Optional ?tripId= excludes
+ * the current trip's own resources during edit. Keep before GET /:id so
+ * "available-resources" is not interpreted as an id.
+ */
+tripsRouter.get(
+  "/available-resources",
+  asyncHandler(async (req, res) => {
+    const tripId = req.query.tripId ? Number(req.query.tripId) : undefined;
+    res.json(await tripsService.availableResources(tripId));
+  })
+);
+
 tripsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
@@ -96,6 +110,20 @@ tripsRouter.post(
         req.body
       )
     );
+  })
+);
+
+/**
+ * Step 4 per-shop persistence — idempotent Save Progress / single-shop save.
+ * Upserts the submitted shop deliveries by client_key (falling back to server
+ * id), never wipes shops not in the payload, never submits Step 4 and never
+ * captures the official Step 4 timestamp. Final submit stays on the steps
+ * endpoint above.
+ */
+tripsRouter.put(
+  "/:id/deliveries",
+  asyncHandler(async (req, res) => {
+    res.json(await tripsService.saveDeliveries(Number(req.params.id), req.body));
   })
 );
 

@@ -17,10 +17,10 @@ const deliverySchema = z.object({
   shopName: z.string().optional(),
   birdTypeId: z.coerce.number().int().nullable().optional(),
   birdType: z.string().optional(),
-  birds: z.coerce.number().int().nonnegative().optional(),
-  weight: z.coerce.number().nonnegative().optional(),
-  mortality: z.coerce.number().int().nonnegative().optional(),
-  mortKg: z.coerce.number().nonnegative().nullable().optional(),
+  birds: z.coerce.number().int().nonnegative("Bird count cannot be negative").optional(),
+  weight: z.coerce.number().nonnegative("Weight cannot be negative").optional(),
+  mortality: z.coerce.number().int().nonnegative("Mortality cannot be negative").optional(),
+  mortKg: z.coerce.number().nonnegative("Mortality weight cannot be negative").nullable().optional(),
   rate: z.coerce.number().nonnegative().nullable().optional(),
   amount: z.coerce.number().nonnegative().optional(),
   remarks: z.string().optional(),
@@ -31,6 +31,23 @@ const deliverySchema = z.object({
   perBoxData: z.array(boxDetailSchema).optional(),
   autoCaptureTime: z.string().nullable().optional(),
 });
+
+// Used by the Step 4 per-shop persistence endpoint (PUT /trips/:id/deliveries).
+// Permissive like the autosave deliverySchema (Save Progress must never run
+// final-submit validation) but still type/safety-checked: non-negative numbers,
+// valid delivery mode, and a bounded array so a malicious payload cannot send
+// thousands of rows. `clientKey` carries the frontend's stable idempotency key.
+const deliverySaveSchema = z
+  .object({
+    deliveries: z
+      .array(
+        deliverySchema.extend({
+          clientKey: z.string().max(120).nullable().optional(),
+        })
+      )
+      .max(200),
+  })
+  .passthrough();
 
 const dieselEntrySchema = z.object({
   rowIndex: z.coerce.number().int().nonnegative(),
@@ -72,8 +89,17 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
       vehicleId: z.coerce.number({ required_error: "Vehicle is required" }).int(),
       driverId: z.coerce.number({ required_error: "Driver is required" }).int(),
       supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int(),
-      openingMeter: z.coerce.number({ required_error: "Opening meter is required" }).nonnegative(),
-      advanceAmount: z.coerce.number().nonnegative().optional(),
+      // Starting Meter / Advance are OPTIONAL. Empty/blank/null must pass through
+      // as null so the backend meter validator is skipped (and the value is
+      // persisted as NULL). A non-null value is still checked as a number.
+      openingMeter: z.preprocess(
+        (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+        z.number().nonnegative().nullable().optional()
+      ),
+      advanceAmount: z.preprocess(
+        (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+        z.number().nonnegative().nullable().optional()
+      ),
       startTime: z.string().optional(),
     })
     .passthrough(),
@@ -81,23 +107,56 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
     .object({
       sourceFarmId: z.coerce.number().int(),
       destMeter: z.coerce.number().nonnegative(),
-      reachedTime: z.string().optional(),
-      pickupTolls: z.coerce.number().nonnegative().optional(),
+      // reached_time is never sent by the frontend (backend captures it) — but
+      // tolerate a null in case a legacy client sends one.
+      reachedTime: z.string().nullable().optional(),
+      // Tolls may legitimately be 0. Negative values are normalized to 0.
+      pickupTolls: z.preprocess(
+        (v) => (v == null || v === "" ? undefined : Math.max(0, Number(v))),
+        z.coerce.number().nonnegative().optional()
+      ),
+      // Avg Bird Weight is a Step 2 mandatory submit field (matches the UI).
+      avgBirdWeight: z.coerce.number().positive(),
       farmBirdTypeId: z.coerce.number().int().optional(),
-      farmBirdCount: z.coerce.number().int().positive().optional(),
-      farmLoadWeight: z.coerce.number().positive().optional(),
-      farmRate: z.coerce.number().nonnegative().optional(),
+      farmBirdCount: z.coerce.number().int().nonnegative().nullable().optional(),
+      farmLoadWeight: z.coerce.number().nonnegative().nullable().optional(),
+      // GPS — optional capture; ranges validated below when supplied.
+      farmGpsLat: z.coerce.number().nullable().optional(),
+      farmGpsLon: z.coerce.number().nullable().optional(),
+      farmGpsAccuracy: z.coerce.number().nonnegative().nullable().optional(),
+      farmGpsTime: z.string().nullable().optional(),
     })
-    .passthrough(),
+    .passthrough()
+    .refine(
+      (data) => {
+        if (data.farmGpsLat != null && (data.farmGpsLat < -90 || data.farmGpsLat > 90)) return false;
+        if (data.farmGpsLon != null && (data.farmGpsLon < -180 || data.farmGpsLon > 180)) return false;
+        return true;
+      },
+      { message: "Invalid GPS coordinates", path: ["farmGpsLat"] }
+    ),
   pickup: z
     .object({
-      dcWeight: z.coerce.number().positive(),
-      totalBirds: z.coerce.number().int().positive(),
-      boxes: z.coerce.number().int().positive(),
+      // Totals are OPTIONAL from the client — the backend derives and persists
+      // them from the submitted box rows (authoritative).
+      dcWeight: z.coerce.number().positive().optional(),
+      totalBirds: z.coerce.number().int().positive().optional(),
+      boxes: z.coerce.number().int().positive().optional(),
       boxDetails: z.array(boxDetailSchema).min(1),
       dcPhotoKey: z.string().min(1, "DC Photo is required."),
+      dcPhotoKey2: z.string().optional(),
     })
-    .passthrough(),
+    .passthrough()
+    .refine(
+      (data) => {
+        const photoCount = (data.dcPhotoKey ? 1 : 0) + (data.dcPhotoKey2 ? 1 : 0);
+        return photoCount >= 1 && photoCount <= 2;
+      },
+      {
+        message: "Step 3 requires between 1 and 2 photos.",
+        path: ["dcPhotoKey"],
+      }
+    ),
   deliveries: z
     .object({
       deliveries: z.array(
@@ -108,7 +167,22 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
         })
       ).min(1, "At least one delivery is required"),
     })
-    .passthrough(),
+    .passthrough()
+    .refine(
+      (data) =>
+        Array.isArray(data.deliveries) &&
+        data.deliveries.every(
+          (d: Record<string, unknown>) =>
+            Number(d.birds) > 0 &&
+            Number(d.weight) > 0 &&
+            Number(d.mortality) >= 0
+        ),
+      {
+        message:
+          "Every shop delivery must have delivered birds and delivered weight greater than zero before submitting.",
+        path: ["deliveries"],
+      }
+    ),
   expenses: z
     .object({
       closingMeter: z.coerce.number().nonnegative().optional(),
@@ -128,6 +202,16 @@ export function parseTripAutosave(body: unknown) {
     throw new AppError(400, "Invalid trip payload", result.error.flatten());
   }
   return result.data;
+}
+
+export function parseDeliverySave(body: unknown) {
+  const result = deliverySaveSchema.safeParse(body);
+  if (!result.success) {
+    const flattened = result.error.flatten();
+    const firstMessage = firstValidationMessage(result, "deliveries");
+    throw new AppError(400, firstMessage ?? "Invalid delivery payload", flattened);
+  }
+  return result.data as { deliveries: Array<Record<string, unknown>> };
 }
 
 export function validateStepSubmit(step: TripWizardStep, body: unknown) {

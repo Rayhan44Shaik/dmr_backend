@@ -559,3 +559,147 @@ describe("10-day Shop Sales edit window", () => {
     assert.equal(Number(row.rows[0].rate), 120, "value must remain at its last valid (day-10) edit");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 6. Backend soft-delete permanent-lock guard
+//
+// DELETE /api/operations/shop-sales/:id must be rejected by the service layer
+// whenever the trip's Rate Entry is locked, mirroring the authoritative
+// PostgreSQL trigger trg_trip_deliveries_rate_lock (a delivery on a
+// rate-locked trip may never be removed — the 10-day window only ever permits
+// in-place edits of birds/weight/rate/amount). The service soft-deletes via
+// UPDATE (deleted = TRUE), which would otherwise bypass the trigger's DELETE
+// arm; this pass closes that gap with an explicit 409.
+// ---------------------------------------------------------------------------
+
+describe("Shop Sales soft-delete is permanently rejected once Rate Entry is locked", () => {
+  /** Lock rate entry, then backdate trips.rate_locked_at (and approved_at so
+   * both window anchors agree) to `now - ageOffsetMs`. */
+  async function lockAndAge(trip: { id: number }, deliveryId: number, ageOffsetMs: number) {
+    await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [{ deliveryId, rate: 100 }],
+    });
+    await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
+    if (ageOffsetMs !== 0) {
+      const backdated = new Date(Date.now() - ageOffsetMs).toISOString();
+      await pool.query(`UPDATE trips SET approved_at = $2, rate_locked_at = $2 WHERE id = $1`, [
+        trip.id,
+        backdated,
+      ]);
+    }
+  }
+
+  it("A. locked, within the correction window (day 0): DELETE is rejected and delivery stays active", async () => {
+    const m = await seedMasters();
+    const trip = await makeCompletedTrip(m, {
+      tripNo: "RS-DEL-A",
+      tripDate: "2026-07-10",
+      totalBirds: 500,
+      dcWeight: 900,
+    });
+    const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
+    await lockAndAge(trip, dA, 0);
+
+    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    assert.equal(del.status, 409, "DELETE inside the correction window must be rejected");
+
+    const row = await pool.query(`SELECT deleted FROM trip_deliveries WHERE id = $1`, [dA]);
+    assert.equal(row.rows[0].deleted, false, "delivery must remain active after the rejected DELETE");
+  });
+
+  it("B. locked exactly 10 days (inclusive boundary): DELETE is rejected with 409", async () => {
+    const m = await seedMasters();
+    const trip = await makeCompletedTrip(m, {
+      tripNo: "RS-DEL-B",
+      tripDate: "2026-07-10",
+      totalBirds: 500,
+      dcWeight: 900,
+    });
+    const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
+    // Just under exactly 10 days (by a few seconds) so the trip is still within
+    // the inclusive window for the edit path — but DELETE must be rejected
+    // regardless, proving the permanent-lock rule is not edge-sensitive.
+    await lockAndAge(trip, dA, 10 * 24 * 60 * 60 * 1000 - 60_000);
+
+    const lockFs = await getJson(baseUrl, "/api/operations/shop-sales");
+    assert.ok(
+      lockFs.body.some((s: { id: number }) => s.id === dA),
+      "day-10 trip must still be visible/active in Shop Sales"
+    );
+
+    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    assert.equal(del.status, 409, "DELETE at exactly 10 days must be rejected with 409");
+
+    const row = await pool.query(`SELECT deleted FROM trip_deliveries WHERE id = $1`, [dA]);
+    assert.equal(row.rows[0].deleted, false);
+  });
+
+  it("C. locked 11 days: DELETE is rejected with 409", async () => {
+    const m = await seedMasters();
+    const trip = await makeCompletedTrip(m, {
+      tripNo: "RS-DEL-C",
+      tripDate: "2026-07-10",
+      totalBirds: 500,
+      dcWeight: 900,
+    });
+    const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
+    await lockAndAge(trip, dA, 11 * 24 * 60 * 60 * 1000);
+
+    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    assert.equal(del.status, 409, "DELETE at 11 days must be rejected with 409");
+
+    const row = await pool.query(`SELECT deleted FROM trip_deliveries WHERE id = $1`, [dA]);
+    assert.equal(row.rows[0].deleted, false);
+  });
+
+  it("D. delivery remains active after a rejected DELETE (in-window case)", async () => {
+    const m = await seedMasters();
+    const trip = await makeCompletedTrip(m, {
+      tripNo: "RS-DEL-D",
+      tripDate: "2026-07-10",
+      totalBirds: 500,
+      dcWeight: 900,
+    });
+    const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
+    await lockAndAge(trip, dA, 5 * 24 * 60 * 60 * 1000);
+
+    await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    const row = await pool.query(
+      `SELECT deleted, birds, weight FROM trip_deliveries WHERE id = $1`,
+      [dA]
+    );
+    assert.equal(row.rows[0].deleted, false, "rejected DELETE must not have partially applied");
+    assert.equal(Number(row.rows[0].birds), 200, "birds must be untouched");
+    assert.equal(Number(row.rows[0].weight), 350, "weight must be untouched");
+  });
+
+  it("E. normal existing Shop Sales behavior is unchanged: create/list/update still work within the window", async () => {
+    const m = await seedMasters();
+    const trip = await makeCompletedTrip(m, {
+      tripNo: "RS-DEL-E",
+      tripDate: "2026-07-10",
+      totalBirds: 500,
+      dcWeight: 900,
+    });
+    const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
+    await lockAndAge(trip, dA, 0);
+
+    const created = await postJson(baseUrl, "/api/operations/shop-sales", {
+      tripId: trip.id,
+      shopId: m.shopB.id,
+      birds: 100,
+      weight: 150,
+      rate: 100,
+    });
+    assert.equal(created.status, 201, "creating a Shop Sale inside the window must still succeed");
+
+    const edited = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { birds: 210 });
+    assert.equal(edited.status, 200, "in-window field edits must still be allowed");
+
+    const list = await getJson(baseUrl, "/api/operations/shop-sales");
+    assert.ok(
+      list.body.some((s: { id: number }) => s.id === dA),
+      "delivery must still appear in the Shop Sales list"
+    );
+  });
+});

@@ -33,6 +33,10 @@ export interface TripResourceInput {
 /** Trips that still occupy their resources = Draft (Steps 1–5 in progress). */
 const OCCUPIED_STATUS = "Draft";
 const SOFT_DELETED_EXCLUSION = "t.deleted = FALSE";
+// A trip only OCCUPIES its resources after Step 1 is actually submitted. A bare
+// Draft row created by an autosave/draft endpoint (start_step_submitted = FALSE)
+// must NOT lock a vehicle/driver/supervisor/helper/loader.
+const STEP1_SUBMITTED = "t.start_step_submitted = TRUE";
 
 /**
  * Placeholder indexes are computed from the ACTUAL params array so every
@@ -79,6 +83,7 @@ export async function assertTripResourcesAvailable(
          FROM trips t JOIN vehicles v ON v.id = t.vehicle_id
         WHERE t.vehicle_id = $1
           AND ${SOFT_DELETED_EXCLUSION}
+          AND ${STEP1_SUBMITTED}
           AND t.status = ${statusParam}::trip_status
           ${selfExclude}
         LIMIT 1`,
@@ -96,6 +101,7 @@ export async function assertTripResourcesAvailable(
          FROM trips t JOIN employees e ON e.id = t.driver_id
         WHERE t.driver_id = $1
           AND ${SOFT_DELETED_EXCLUSION}
+          AND ${STEP1_SUBMITTED}
           AND t.status = ${statusParam}::trip_status
           ${selfExclude}
         LIMIT 1`,
@@ -113,6 +119,7 @@ export async function assertTripResourcesAvailable(
          FROM trips t JOIN employees e ON e.id = t.supervisor_id
         WHERE t.supervisor_id = $1
           AND ${SOFT_DELETED_EXCLUSION}
+          AND ${STEP1_SUBMITTED}
           AND t.status = ${statusParam}::trip_status
           ${selfExclude}
         LIMIT 1`,
@@ -143,6 +150,7 @@ export async function assertTripResourcesAvailable(
         WHERE tc.role = ${roleParam}::crew_role
           AND tc.employee_name = ANY($1)
           AND ${SOFT_DELETED_EXCLUSION}
+          AND ${STEP1_SUBMITTED}
           AND t.status = ${statusParam}::trip_status
           ${selfExclude}
         LIMIT 1`,

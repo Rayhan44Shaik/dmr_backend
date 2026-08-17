@@ -27,6 +27,11 @@ import {
   recalcTripDeliveryTotals,
   sumActiveDeliveries,
 } from "../utils/tripDeliverySync.js";
+import {
+  applyCorrection,
+  applyCredit,
+  applyDebit,
+} from "../utils/shopLedger.js";
 
 type Client = pg.PoolClient;
 
@@ -345,6 +350,23 @@ export const shopSalesService = {
           ]
         );
         const saleId = num(result.rows[0].id);
+        if (data.shopId != null) {
+          // Shop Sale = DEBIT on the shop's ledger + outstanding. Because a
+          // Shop Sale is only creatable on a rate-locked Completed trip, this
+          // new (post-lock) sale has its authoritative amount now.
+          await applyDebit(
+            client,
+            data.shopId,
+            {
+              entryDate: dateOnly(trip.tripDate) ?? "",
+              entryType: "sale",
+              referenceType: "shop_sale",
+              referenceId: saleId,
+              note: "Shop sale debit (created via Shop Sales)",
+            },
+            amount
+          );
+        }
         await recalcTripDeliveryTotals(client, trip.id);
         const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [saleId]);
         return mapDeliverySale(row.rows[0]);
@@ -398,6 +420,8 @@ export const shopSalesService = {
     const effectiveWeight = data.weight ?? num(cur.weight);
     const effectiveRate = data.rate ?? num(cur.rate);
     const nextAmount = computeAmount(effectiveWeight, effectiveRate);
+    const oldAmount = num(cur.amount);
+    const saleShopId = num(cur.shop_id);
 
     return withTransaction(async (client) => {
       const tripId = await getDeliveryTripId(client, id);
@@ -447,6 +471,24 @@ export const shopSalesService = {
         ]
       );
       if (!result.rowCount) throw new AppError(404, "Shop sale not found");
+      if (saleShopId > 0) {
+        // Shop Sales correction sync: a sale amount change moves the shop
+        // outstanding by the DIFFERENCE only (₹5,000 → ₹5,500 bumps
+        // outstanding by exactly +₹500), never by re-applying the whole amount.
+        const diff = nextAmount - oldAmount;
+        await applyCorrection(
+          client,
+          saleShopId,
+          {
+            entryDate: trip.tripDate,
+            entryType: "correction",
+            referenceType: "shop_sale",
+            referenceId: id,
+            note: `Shop sale correction (₹${oldAmount.toFixed(2)} → ₹${nextAmount.toFixed(2)})`,
+          },
+          diff
+        );
+      }
       await recalcTripDeliveryTotals(client, trip.id);
       const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [id]);
       return mapDeliverySale(row.rows[0]);
@@ -477,6 +519,45 @@ export const shopSalesService = {
       assertTripCompletedForShopSales(trip);
       await assertRateEntryLocked(client, trip.id, trip);
 
+      const deliveryRow = await client.query<{ shop_id: number | null; amount: string }>(
+        `SELECT shop_id, amount FROM trip_deliveries WHERE id = $1`,
+        [id]
+      );
+      const saleShopId = deliveryRow.rowCount ? num(deliveryRow.rows[0].shop_id) : 0;
+      const saleAmount = deliveryRow.rowCount ? num(deliveryRow.rows[0].amount) : 0;
+
+      // Permanent-lock rule (mirrors trg_trip_deliveries_rate_lock): a
+      // delivery on a rate-locked trip may never be removed — the 10-day
+      // correction window only ever permits in-place edits of
+      // birds/weight/rate (and the derived amount), never deletion. This
+      // soft-delete path performs an UPDATE (deleted = TRUE) rather than a
+      // hard DELETE, so it would otherwise evade the trigger's DELETE arm and
+      // wrongly allow removal even after the window has closed. Reject it
+      // explicitly with the same 409 pattern used by update(), using the
+      // existing evaluateRateLock helper (no duplicated 10-day math).
+      const rateRow = await client.query<{ rate_locked_at: string | null }>(
+        `SELECT rate_locked_at FROM trips WHERE id = $1`,
+        [tripId]
+      );
+      const rateLock = evaluateRateLock({
+        rate_completed: true,
+        rate_locked_at: rateRow.rows[0]?.rate_locked_at ?? null,
+      });
+      if (rateLock.rateCompleted) {
+        throw new AppError(
+          409,
+          "Rate correction window expired - deleting locked after Rate Entry",
+          {
+            tripId: trip.id,
+            rateLockedAt: rateLock.rateLockedAt,
+            correctionWindowClosesAt: rateLock.correctionWindowClosesAt,
+          }
+        );
+      }
+
+      // Unreachable: assertRateEntryLocked already guarantees rate_completed =
+      // TRUE for every reachable Shop Sale. Kept as the protective gate above
+      // so the service layer cannot be tricked into deleting an unlocked trip.
       const result = await client.query(
         `UPDATE trip_deliveries SET deleted = TRUE, deleted_at = NOW(), deleted_reason = $2
          WHERE id = $1 AND deleted = FALSE
@@ -484,6 +565,23 @@ export const shopSalesService = {
         [id, reason ?? null]
       );
       if (!result.rowCount) throw new AppError(404, "Shop sale not found");
+
+      if (saleShopId > 0) {
+        // Deleting a sale removes its DEBIT → credit the shop back by the full
+        // amount so outstanding no longer includes this sale.
+        await applyCredit(
+          client,
+          saleShopId,
+          {
+            entryDate: trip.tripDate,
+            entryType: "correction",
+            referenceType: "shop_sale",
+            referenceId: id,
+            note: "Shop sale debit reversed (deleted)",
+          },
+          saleAmount
+        );
+      }
 
       await recalcTripDeliveryTotals(client, trip.id);
       const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [id]);

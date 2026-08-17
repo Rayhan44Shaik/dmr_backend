@@ -48,6 +48,7 @@ export function computeTripKpis(opts: {
   );
 
   const totalWeight = round3(boxes.reduce((sum, b) => sum + Number(b.weight ?? 0), 0));
+  const birdsSum = boxes.reduce((s, b) => s + Number(b.birds ?? 0), 0);
   const totalDeliveredWeight = round3(
     deliveries.reduce((sum, d) => sum + Number(d.weight ?? 0), 0)
   );
@@ -85,10 +86,12 @@ export function computeTripKpis(opts: {
     lastShop,
     deliveries: enrichedDeliveries,
     boxes: boxes.length,
-    totalBirds: boxes.reduce((s, b) => s + Number(b.birds ?? 0), 0) || farmBirdCount,
+    totalBirds: birdsSum || farmBirdCount,
     avgWeight:
       boxes.length > 0
-        ? round3(totalWeight / boxes.reduce((s, b) => s + Number(b.birds ?? 0), 0) || 1)
+        ? birdsSum > 0
+          ? round3(totalWeight / birdsSum)
+          : 0
         : farmBirdCount > 0
           ? round3(farmLoadWeight / farmBirdCount)
           : 0,

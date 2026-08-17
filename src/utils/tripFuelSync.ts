@@ -126,18 +126,46 @@ export async function loadDcPhoto(
   client: Client,
   tripId: number,
   dcPhotoKey: string | null
-): Promise<{ dcPhotoData: string | null; dcPhotoMime: string | null }> {
-  if (!dcPhotoKey) return { dcPhotoData: null, dcPhotoMime: null };
-
+): Promise<{
+  dcPhotoKey: string | null;
+  dcPhotoMime: string | null;
+  dcPhotoData: string | null;
+  dcPhotoKey2: string | null;
+  dcPhotoMime2: string | null;
+  dcPhotoData2: string | null;
+}> {
+  const empty = {
+    dcPhotoKey: dcPhotoKey ?? null,
+    dcPhotoMime: null,
+    dcPhotoData: null,
+    dcPhotoKey2: null,
+    dcPhotoMime2: null,
+    dcPhotoData2: null,
+  };
   const result = await client.query(
-    `SELECT data_base64, mime_type FROM trip_media
-     WHERE trip_id = $1 AND media_key = $2`,
-    [tripId, dcPhotoKey]
+    `SELECT media_key, mime_type, data_base64 FROM trip_media
+     WHERE trip_id = $1 AND media_type = 'image' ORDER BY media_key`,
+    [tripId]
   );
-  if (!result.rowCount) return { dcPhotoData: null, dcPhotoMime: null };
+  if (!result.rowCount) return empty;
+
+  const photos = result.rows
+    .map((r) => ({
+      key: str(r.media_key),
+      mime: r.mime_type ? str(r.mime_type) : null,
+      data: r.data_base64 ? str(r.data_base64) : null,
+    }))
+    .filter((p) => p.data);
+
+  const primary = photos.find((p) => p.key === dcPhotoKey) ?? photos[0] ?? null;
+  const secondary = photos.find((p) => p.key !== (primary?.key ?? "")) ?? null;
 
   return {
-    dcPhotoData: result.rows[0].data_base64 ? str(result.rows[0].data_base64) : null,
-    dcPhotoMime: result.rows[0].mime_type ? str(result.rows[0].mime_type) : null,
+    dcPhotoKey: primary?.key ?? null,
+    dcPhotoMime: primary?.mime ?? null,
+    dcPhotoData: primary?.data ?? null,
+    dcPhotoKey2: secondary?.key ?? null,
+    dcPhotoMime2: secondary?.mime ?? null,
+    dcPhotoData2: secondary?.data ?? null,
   };
 }

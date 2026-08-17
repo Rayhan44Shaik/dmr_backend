@@ -105,6 +105,39 @@ export interface Collection {
     updatedAt?: string | null;
     balance?: number;
 }
+/**
+ * Real Collection Entry (the financial credit record — distinct from the
+ * legacy derived-view `Collection` above). Snapshots the Shop's balance at the
+ * moment the collection becomes financially effective (approval). `amount` is
+ * the CREDIT amount; `amountCollected` mirrors it for legacy consumers.
+ */
+export interface CollectionEntry {
+    id: number;
+    collectionNo: string;
+    collectionDate: string;
+    shopId: number | null;
+    shopName: string;
+    tripId: number | null;
+    amountDue: number;
+    amount: number;
+    amountCollected: number;
+    collector: string;
+    paymentMode: string;
+    referenceNo: string;
+    remarks: string;
+    openingBalance: number | null;
+    closingBalance: number | null;
+    status: OpsRecordStatus | "Pending";
+    deleted: boolean;
+    deletedBy?: string | null;
+    deletedAt?: string | null;
+    isFinancial: boolean;
+    approvedBy?: string | null;
+    approvedAt?: string | null;
+    createdBy?: string;
+    createdAt?: string | null;
+    updatedAt?: string | null;
+}
 export type FuelSourceType = "TRIP" | "MANUAL";
 export interface FuelExpense {
     id: string;

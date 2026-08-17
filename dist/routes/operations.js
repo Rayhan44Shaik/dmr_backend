@@ -1,11 +1,13 @@
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
+import { collectionEntryService } from "../services/collectionEntryService.js";
 import { collectionsService } from "../services/collectionsService.js";
 import { dashboardService } from "../services/dashboardService.js";
 import { fuelExpensesService } from "../services/fuelExpensesService.js";
 import { rateEntryService } from "../services/rateEntryService.js";
 import { shopRatesService } from "../services/shopRatesService.js";
 import { shopSalesService } from "../services/shopSalesService.js";
+import { shopLedgerService } from "../services/shopLedgerService.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
 export const operationsRouter = Router();
@@ -207,6 +209,56 @@ operationsRouter.patch("/collections/:id/status", asyncHandler(async (req, res) 
 }));
 operationsRouter.delete("/collections/:id", asyncHandler(async (req, res) => {
     res.json(await collectionsService.softDelete(Number(req.params.id), typeof req.body?.reason === "string" ? req.body.reason : undefined));
+}));
+// ── Shop Ledger (complete financial history) ────────────────────────────────
+// Authoritative read of shop_ledger (single source of truth). Supports the
+// shop + custom date range + optional pagination. There is NO 10-row display
+// limit here — the complete matching history is returned. Opening balance is
+// computed by the backend as of the range start; running balances are correct
+// across pages. See services/shopLedgerService.ts for the contract.
+operationsRouter.get("/shop-ledger", asyncHandler(async (req, res) => {
+    res.json(await shopLedgerService.list({
+        shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
+        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        pagination: opsListPagination(req),
+    }));
+}));
+// ── Collection Entry (real financial collections) ──────────────────────────
+// Distinct from the legacy derived /collections view. Persists real collection
+// records, generates permanent Col-YYYYMMDD-NNN numbers, snapshots Shop
+// opening/closing balances and writes the Shop Ledger CREDIT at approval.
+// The existing /collections endpoints above are preserved unmodified.
+function collectionEntryFilters(req) {
+    return {
+        shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
+        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        status: typeof req.query.status === "string" ? req.query.status : undefined,
+        includeDeleted: req.query.includeDeleted === "true",
+        pagination: opsListPagination(req),
+    };
+}
+operationsRouter.get("/collection-entry", asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.list(collectionEntryFilters(req)));
+}));
+operationsRouter.get("/collection-entry/:id", asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.getById(Number(req.params.id)));
+}));
+operationsRouter.post("/collection-entry", asyncHandler(async (req, res) => {
+    res.status(201).json(await collectionEntryService.create(req.body));
+}));
+operationsRouter.put("/collection-entry/:id", asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.update(Number(req.params.id), req.body));
+}));
+operationsRouter.patch("/collection-entry/:id/status", asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.updateStatus(Number(req.params.id), req.body));
+}));
+operationsRouter.delete("/collection-entry/:id", asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.softDelete(Number(req.params.id), {
+        reason: typeof req.body?.reason === "string" ? req.body.reason : undefined,
+        deletedBy: typeof req.body?.deletedBy === "string" ? req.body.deletedBy : undefined,
+    }));
 }));
 // ── Fuel Expenses ────────────────────────────────────────────────
 operationsRouter.get("/fuel-expenses", asyncHandler(async (req, res) => {

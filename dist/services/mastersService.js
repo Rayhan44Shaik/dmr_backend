@@ -70,6 +70,7 @@ export function mapShop(row) {
         address: row.address == null ? null : str(row.address),
         status: str(row.status),
         openingBalance: num(row.opening_balance),
+        currentBalance: num(row.current_balance),
     };
 }
 function mapBank(row) {
@@ -377,7 +378,9 @@ export const mastersService = {
             await assertUnique("shop", body.shopName, body.id);
             const result = await query(`UPDATE shops SET
           shop_no=$2, shop_name=$3, owner_name=$4, phone_number=$5,
-          village=$6, address=$7, status=$8, opening_balance=$9
+          village=$6, address=$7, status=$8, opening_balance=$9,
+          current_balance = $9 + COALESCE(
+            (SELECT SUM(debit) - SUM(credit) FROM shop_ledger WHERE shop_id = $1), 0)
          WHERE id=$1 RETURNING *`, [
                 body.id,
                 body.shopNo,
@@ -395,8 +398,8 @@ export const mastersService = {
         await assertUnique("shop", body.shopName);
         const result = await query(`INSERT INTO shops (
          shop_no, shop_name, owner_name, phone_number, village, address, status,
-         opening_balance
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [
+         opening_balance, current_balance
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING *`, [
             body.shopNo ?? nextNo.rows[0].n,
             body.shopName,
             body.ownerName ?? "",
@@ -443,8 +446,8 @@ export const mastersService = {
                 const no = await client.query(`SELECT COALESCE(MAX(shop_no), 0) + 1 AS n FROM shops`);
                 const result = await client.query(`INSERT INTO shops (
              shop_no, shop_name, owner_name, phone_number, village, address,
-             status, opening_balance
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [
+             status, opening_balance, current_balance
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING *`, [
                     input.shopNo ?? no.rows[0].n,
                     shopName,
                     str(input.ownerName).trim(),

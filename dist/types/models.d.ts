@@ -63,6 +63,7 @@ export interface Shop {
     address?: string | null;
     status: ActiveStatus;
     openingBalance: number;
+    currentBalance: number;
 }
 export interface Bank {
     id: number;
