@@ -170,7 +170,7 @@ operationsRouter.post(
 operationsRouter.get(
   "/trip-list",
   asyncHandler(async (req, res) => {
-    const { params: pagination } = parsePagination(req.query);
+    const { params: pagination, enabled } = parsePagination(req.query);
     res.json(
       await tripsService.listCompleted({
         fromDate:
@@ -183,7 +183,7 @@ operationsRouter.get(
         driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
         farmId: req.query.farmId ? Number(req.query.farmId) : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
-        pagination: pagination ?? { page: 1, limit: 50, offset: 0 },
+        pagination: enabled ? pagination : null,
       })
     );
   })

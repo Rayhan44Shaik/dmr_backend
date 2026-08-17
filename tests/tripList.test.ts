@@ -165,10 +165,10 @@ interface TripInput {
 }
 
 async function makeTrip(m: Awaited<ReturnType<typeof seedMasters>>, input: TripInput) {
-  return tripsService.save(null, {
+  const trip = await tripsService.save(null, {
     tripNo: input.tripNo,
     tripDate: input.tripDate,
-    status: input.status ?? "Draft",
+    status: input.status === "Completed" ? "Pending" : (input.status ?? "Draft"),
     startTime: `${input.tripDate}T05:30:00.000Z`,
     vehicleId: input.vehicleId ?? m.vehicle.id,
     vehicleNo: m.vehicle.vehicleNumber,
@@ -187,6 +187,13 @@ async function makeTrip(m: Awaited<ReturnType<typeof seedMasters>>, input: TripI
     totalKm: 100,
     totalWeight: 5000,
   });
+  if (input.status === "Completed") {
+    return tripsService.updateStatus(trip.id, {
+      status: "Completed",
+      approvedBy: "test",
+    });
+  }
+  return trip;
 }
 
 let m: Awaited<ReturnType<typeof seedMasters>>;
@@ -199,6 +206,7 @@ let flagDeletedCompletedId: number;
 let statusDeletedId: number;
 let flagDeletedTripNo: string;
 let statusDeletedTripNo: string;
+let partialTripNo: string;
 
 before(async () => {
   m = await seedMasters();
@@ -265,28 +273,61 @@ before(async () => {
   await pool.query(`UPDATE trips SET status = 'Deleted' WHERE id = $1`, [
     statusOnly.id,
   ]);
+
+  const partial = await tripsService.save(null, {
+    tripDate: "2026-08-17",
+    status: "Draft",
+    vehicleId: m.vehicle2.id,
+    vehicleNo: m.vehicle2.vehicleNumber,
+    driverId: m.driver2.id,
+    driverName: m.driver2.employeeName,
+    supervisorId: m.supervisor.id,
+    supervisorName: m.supervisor.employeeName,
+    sourceFarmId: m.farm.id,
+    sourceFarm: m.farm.farmName,
+    openingMeter: 1000,
+    startStepSubmitted: true,
+    farmStepSubmitted: true,
+    pickupStepSubmitted: true,
+    deliveryStepSubmitted: true,
+    expensesStepSubmitted: false,
+  });
+  partialTripNo = partial.tripNo;
 });
 
 // ---------------------------------------------------------------------------
 // Eligibility (the core business rule)
 // ---------------------------------------------------------------------------
 
+function tripListRows(body: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(body)) return body as Array<Record<string, unknown>>;
+  if (body && typeof body === "object" && Array.isArray((body as { data?: unknown }).data)) {
+    return (body as { data: Array<Record<string, unknown>> }).data;
+  }
+  return [];
+}
+
 describe("Trip List eligibility", () => {
   it("returns only completed/approved trips (excludes Draft, Pending)", async () => {
     const { status, body } = await getJson(baseUrl, "/api/operations/trip-list");
     assert.equal(status, 200);
-    assert.ok(Array.isArray(body.data), "response must be paginated { data, meta }");
+    const rows = tripListRows(body);
+    assert.ok(Array.isArray(rows), "response must be an array of eligible trips");
 
-    const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
+    const tripNos = rows.map((t) => t.tripNo);
     assert.ok(tripNos.includes(completedA.tripNo), "completed trip must appear");
     assert.ok(tripNos.includes(completedB.tripNo), "second completed trip must appear");
     assert.ok(!tripNos.includes(draftTrip.tripNo), "draft trip must NOT appear");
     assert.ok(!tripNos.includes(pendingTrip.tripNo), "pending trip must NOT appear");
+    const listed = rows.find((t) => t.id === completedA.id);
+    assert.ok(listed, "completed trip id must be unchanged in Trip List");
+    assert.equal(listed?.tripNo, completedA.tripNo, "completed trip number must be unchanged");
   });
 
   it("excludes every deleted trip, including legacy inconsistent states", async () => {
     const { body } = await getJson(baseUrl, "/api/operations/trip-list");
-    const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
+    const rows = tripListRows(body);
+    const tripNos = rows.map((t) => t.tripNo);
 
     assert.ok(!tripNos.includes(softDeletedTrip.tripNo), "soft-deleted trip must NOT appear");
     assert.ok(
@@ -298,17 +339,21 @@ describe("Trip List eligibility", () => {
       "status-deleted trip must NOT appear"
     );
     assert.ok(
-      body.data.every((t: { status: string; deleted: boolean }) => {
-        return t.status === "Completed" && t.deleted === false;
-      }),
+      rows.every((t) => t.status === "Completed" && t.deleted === false),
       "every returned row must be status=Completed and deleted=false"
     );
+  });
+
+  it("excludes a partially completed trip that has not been approved", async () => {
+    const { body } = await getJson(baseUrl, "/api/operations/trip-list");
+    const tripNos = tripListRows(body).map((t) => t.tripNo);
+    assert.ok(!tripNos.includes(partialTripNo), "partially completed trip must NOT appear");
   });
 
   it("direct API request is the only source — refresh yields identical results", async () => {
     const first = await getJson(baseUrl, "/api/operations/trip-list");
     const second = await getJson(baseUrl, "/api/operations/trip-list");
-    assert.deepEqual(second.body, first.body, "repeat request must be identical");
+    assert.deepEqual(tripListRows(second.body), tripListRows(first.body), "repeat request must be identical");
   });
 
   it("a second server instance (backend restart / new machine) sees the same data", async () => {
@@ -316,7 +361,7 @@ describe("Trip List eligibility", () => {
     try {
       const { status, body } = await getJson(app2.baseUrl, "/api/operations/trip-list");
       assert.equal(status, 200);
-      const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
+      const tripNos = tripListRows(body).map((t) => t.tripNo);
       assert.ok(tripNos.includes(completedA.tripNo));
       assert.ok(!tripNos.includes(draftTrip.tripNo));
       assert.ok(!tripNos.includes(softDeletedTrip.tripNo));
@@ -338,20 +383,20 @@ describe("Trip List filters and pagination", () => {
       baseUrl,
       `/api/operations/trip-list?search=${draftTrip.tripNo}`
     );
-    assert.equal(draftSearch.body.data.length, 0, "searching a draft must return nothing");
+    assert.equal(tripListRows(draftSearch.body).length, 0, "searching a draft must return nothing");
 
     const deletedSearch = await getJson(
       baseUrl,
       `/api/operations/trip-list?search=${softDeletedTrip.tripNo}`
     );
-    assert.equal(deletedSearch.body.data.length, 0, "searching a deleted trip must return nothing");
+    assert.equal(tripListRows(deletedSearch.body).length, 0, "searching a deleted trip must return nothing");
 
     const hit = await getJson(
       baseUrl,
       `/api/operations/trip-list?search=${completedA.tripNo}`
     );
-    assert.equal(hit.body.data.length, 1);
-    assert.equal(hit.body.data[0].tripNo, completedA.tripNo);
+    assert.equal(tripListRows(hit.body).length, 1);
+    assert.equal(tripListRows(hit.body)[0].tripNo, completedA.tripNo);
   });
 
   it("date-range filter is enforced server-side", async () => {
@@ -359,7 +404,7 @@ describe("Trip List filters and pagination", () => {
       baseUrl,
       "/api/operations/trip-list?fromDate=2026-08-13&toDate=2026-08-13"
     );
-    const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
+    const tripNos = tripListRows(body).map((t) => t.tripNo);
     assert.deepEqual(tripNos, [completedB.tripNo]);
   });
 
@@ -368,7 +413,7 @@ describe("Trip List filters and pagination", () => {
       baseUrl,
       `/api/operations/trip-list?vehicleId=${m.vehicle2.id}`
     );
-    const tripNos = body.data.map((t: { tripNo: string }) => t.tripNo);
+    const tripNos = tripListRows(body).map((t) => t.tripNo);
     assert.deepEqual(tripNos, [completedB.tripNo]);
   });
 
@@ -378,9 +423,7 @@ describe("Trip List filters and pagination", () => {
       `/api/operations/trip-list?supervisorId=${m.supervisor.id}`
     );
     assert.ok(
-      bySupervisor.body.data.every(
-        (t: { supervisorId: number | null }) => t.supervisorId === m.supervisor.id
-      )
+      tripListRows(bySupervisor.body).every((t) => t.supervisorId === m.supervisor.id)
     );
 
     const byDriver = await getJson(
@@ -388,7 +431,7 @@ describe("Trip List filters and pagination", () => {
       `/api/operations/trip-list?driverId=${m.driver2.id}`
     );
     assert.deepEqual(
-      byDriver.body.data.map((t: { tripNo: string }) => t.tripNo),
+      tripListRows(byDriver.body).map((t) => t.tripNo),
       [completedB.tripNo]
     );
 
@@ -396,11 +439,9 @@ describe("Trip List filters and pagination", () => {
       baseUrl,
       `/api/operations/trip-list?farmId=${m.farm.id}`
     );
-    assert.ok(byFarm.body.data.length >= 2);
+    assert.ok(tripListRows(byFarm.body).length >= 2);
     assert.ok(
-      byFarm.body.data.every(
-        (t: { sourceFarmId: number | null }) => t.sourceFarmId === m.farm.id
-      )
+      tripListRows(byFarm.body).every((t) => t.sourceFarmId === m.farm.id)
     );
   });
 
