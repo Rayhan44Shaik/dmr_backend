@@ -198,11 +198,6 @@ export function assertWithinCapacity(opts: {
   alreadyAllocated: number;
   requested: number;
 }): void {
-  // No bypass: the caller resolves `available` from Step 3 Pickup
-  // (total_birds/dc_weight), which is mandatory before a trip can be
-  // Completed — a Completed trip's capacity is never legitimately "not
-  // tracked". If it resolves to 0, that is a real data problem and any
-  // positive delivery is correctly rejected rather than silently allowed.
   const total = opts.alreadyAllocated + opts.requested;
   if (total > opts.available) {
     const noun = opts.label === "birds" ? "birds" : "weight";
@@ -212,4 +207,15 @@ export function assertWithinCapacity(opts: {
         `Available: ${opts.available}, already allocated: ${opts.alreadyAllocated}, requested: ${opts.requested}.`
     );
   }
+}
+
+/** Remaining Step 3 pickup-box birds/weight after other shops' allocations. */
+export function remainingPickupBox(
+  pickup: { birds: number; weight: number },
+  used: { birds: number; weight: number }
+): { birds: number; weight: number } {
+  return {
+    birds: Math.max(0, pickup.birds - used.birds),
+    weight: Math.max(0, Number((pickup.weight - used.weight).toFixed(3))),
+  };
 }

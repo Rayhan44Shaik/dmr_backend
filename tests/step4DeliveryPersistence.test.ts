@@ -486,7 +486,7 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
     assert.equal(Number(rows[0].weight), 150, "rejected save must not mutate the DB");
   });
 
-  it("rejects using a box already assigned to another shop delivery", async () => {
+  it("allows partial consumption of a pickup box across shops and rejects over-remaining", async () => {
     const m = await seedMasters();
     const trip = await makePickupTrip(m, {
       tripDate: "2026-07-08",
@@ -508,24 +508,150 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
       ],
     });
 
+    const savedB = await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          clientKey: "ck-box-used-b",
+          shopId: m.shopB.id,
+          shopName: m.shopB.shopName,
+          birds: 40,
+          weight: 80,
+          selectedBoxIds: [1],
+          farmBirds: 100,
+          farmWeight: 200,
+        }),
+      ],
+    });
+    assert.equal(savedB.deliveries.length, 2);
+
     await assert.rejects(
       () =>
         tripsService.saveDeliveries(trip.id, {
           deliveries: [
             delivery({
-              clientKey: "ck-box-used-b",
-              shopId: m.shopB.id,
-              shopName: m.shopB.shopName,
-              birds: 40,
-              weight: 80,
+              clientKey: "ck-box-used-c",
+              shopId: m.shopA.id,
+              shopName: m.shopA.shopName,
+              birds: 1,
+              weight: 1,
               selectedBoxIds: [1],
-              farmBirds: 100,
-              farmWeight: 200,
             }),
           ],
         }),
-      /already used/i
+      /available birds|exceed/i
     );
+  });
+
+  it("save without a shop persists progress and does not submit", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-16",
+      boxes: [{ boxNo: 1, birds: 100, weight: 200 }],
+    });
+    const saved = await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          clientKey: "ck-partial-shop",
+          shopId: null,
+          shopName: "",
+          birds: 10,
+          weight: 20,
+          selectedBoxIds: [1],
+        }),
+      ],
+    });
+    assert.equal(saved.deliveryStepSubmitted, false);
+    assert.equal(saved.deliveries.length, 1);
+    assert.equal(saved.deliveries[0].shopId, null);
+  });
+
+  it("uses Step 3 pickup totals as capacity, not Step 2 farm values", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-17",
+      boxes: [{ boxNo: 1, birds: 100, weight: 200 }],
+    });
+    await pool.query(
+      `UPDATE trips SET farm_bird_count = 500, farm_load_weight = 1000 WHERE id = $1`,
+      [trip.id]
+    );
+    await assert.rejects(
+      () =>
+        tripsService.saveDeliveries(trip.id, {
+          deliveries: [
+            delivery({
+              clientKey: "ck-farm-not-cap",
+              shopId: m.shopA.id,
+              shopName: m.shopA.shopName,
+              birds: 150,
+              weight: 200,
+              selectedBoxIds: [1],
+            }),
+          ],
+        }),
+      /available birds|exceed/i
+    );
+  });
+
+  it("keeps the same delivery DB id across save and submit", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-18",
+      boxes: [{ boxNo: 1, birds: 100, weight: 200 }],
+    });
+    const first = await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          clientKey: "ck-stable-id",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          birds: 100,
+          weight: 200,
+          selectedBoxIds: [1],
+        }),
+      ],
+    });
+    const id = first.deliveries[0].id;
+    const submitted = await tripsService.submitStep(trip.id, "deliveries", {
+      deliveries: [
+        delivery({
+          clientKey: "ck-stable-id",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          birds: 90,
+          weight: 180,
+          mortality: 10,
+          mortKg: 20,
+          selectedBoxIds: [1],
+          amount: 0,
+        }),
+      ],
+      deliveryStepSubmitted: true,
+    } as Record<string, unknown>);
+    assert.equal(submitted.deliveries[0].id, id);
+  });
+
+  it("does not modify Step 3 pickup boxes when saving deliveries", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-19",
+      boxes: [{ boxNo: 1, birds: 100, weight: 200 }],
+    });
+    const before = await pool.query(`SELECT box_no, birds, weight FROM trip_boxes WHERE trip_id = $1`, [trip.id]);
+    await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          clientKey: "ck-no-touch-s3",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          birds: 40,
+          weight: 80,
+          selectedBoxIds: [1],
+        }),
+      ],
+    });
+    const after = await pool.query(`SELECT box_no, birds, weight FROM trip_boxes WHERE trip_id = $1`, [trip.id]);
+    assert.deepEqual(after.rows, before.rows);
   });
 
   it("weight-mode per-box breakdown cannot exceed each box capacity", async () => {
@@ -664,7 +790,7 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
             }),
           ],
         }),
-      /Step 3 \(Pickup\)/i
+      /pickup|Step 3/i
     );
   });
 

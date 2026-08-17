@@ -2,6 +2,7 @@ import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
+import { validateStepSubmit } from "../validation/trips.js";
 
 export const tripsRouter = Router();
 
@@ -45,12 +46,16 @@ tripsRouter.get(
 tripsRouter.post(
   "/steps/start",
   asyncHandler(async (req, res) => {
+    const parsed = validateStepSubmit("start", req.body);
     const payload = {
       ...req.body,
+      ...parsed,
       status: "Draft" as const,
       startStepSubmitted: true,
-      startTime: req.body?.startTime || new Date().toISOString(),
     };
+    // Official Start Time is captured with PostgreSQL NOW() inside the save
+    // transaction. Never accept or synthesize a client/browser clock.
+    delete payload.startTime;
 
     res.status(201).json(await tripsService.save(null, payload));
   })
@@ -124,6 +129,29 @@ tripsRouter.put(
   "/:id/deliveries",
   asyncHandler(async (req, res) => {
     res.json(await tripsService.saveDeliveries(Number(req.params.id), req.body));
+  })
+);
+
+tripsRouter.post(
+  "/:id/diesel",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await tripsService.submitDiesel(Number(req.params.id), req.body));
+  })
+);
+
+tripsRouter.patch(
+  "/:id/diesel/:entryId",
+  asyncHandler(async (req, res) => {
+    res.json(
+      await tripsService.updateDiesel(Number(req.params.id), Number(req.params.entryId), req.body)
+    );
+  })
+);
+
+tripsRouter.delete(
+  "/:id/diesel/:entryId",
+  asyncHandler(async (req, res) => {
+    res.json(await tripsService.deleteDiesel(Number(req.params.id), Number(req.params.entryId)));
   })
 );
 

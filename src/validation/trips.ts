@@ -2,10 +2,23 @@ import { z } from "zod";
 import { AppError } from "../middleware/errorHandler.js";
 import type { TripWizardStep } from "../utils/tripResume.js";
 
+/** Empty/blank → null. Numeric 0 is preserved (not coerced to null). */
+function emptyToNullNumber(v: unknown): unknown {
+  if (v === undefined || v === null || v === "") return null;
+  if (typeof v === "string") {
+    const trimmed = v.trim();
+    if (trimmed === "") return null;
+    const n = Number(trimmed);
+    return Number.isFinite(n) ? n : v;
+  }
+  return v;
+}
+
 const boxDetailSchema = z.object({
   boxNo: z.coerce.number().int().positive(),
   birds: z.coerce.number().int().nonnegative().optional(),
   weight: z.coerce.number().nonnegative().optional(),
+  avgWeight: z.coerce.number().nonnegative().nullable().optional(),
 });
 
 // Used for autosave (very permissive)
@@ -50,14 +63,23 @@ const deliverySaveSchema = z
   .passthrough();
 
 const dieselEntrySchema = z.object({
+  id: z.coerce.number().int().optional(),
   rowIndex: z.coerce.number().int().nonnegative(),
   litres: z.coerce.number().nonnegative().nullable().optional(),
   rate: z.coerce.number().nonnegative().nullable().optional(),
+  amount: z.coerce.number().nonnegative().nullable().optional(),
   meter: z.coerce.number().nonnegative().nullable().optional(),
   bunkName: z.string().nullable().optional(),
   bunkGps: z.string().nullable().optional(),
+  gpsLat: z.coerce.number().nullable().optional(),
+  gpsLon: z.coerce.number().nullable().optional(),
+  gpsAccuracy: z.coerce.number().nonnegative().nullable().optional(),
+  gpsCapturedAt: z.string().nullable().optional(),
   imageData: z.string().nullable().optional(),
   imageName: z.string().nullable().optional(),
+  submitted: z.boolean().optional(),
+  submittedAt: z.string().nullable().optional(),
+  clientKey: z.string().max(120).nullable().optional(),
 });
 
 export const tripAutosaveSchema = z
@@ -85,42 +107,44 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
   start: z
     .object({
       tripDate: z.string().min(1),
-      // FIXED: Moved required_error inside z.coerce.number() instead of .int()
-      vehicleId: z.coerce.number({ required_error: "Vehicle is required" }).int(),
-      driverId: z.coerce.number({ required_error: "Driver is required" }).int(),
-      supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int(),
-      // Starting Meter / Advance are OPTIONAL. Empty/blank/null must pass through
-      // as null so the backend meter validator is skipped (and the value is
-      // persisted as NULL). A non-null value is still checked as a number.
-      openingMeter: z.preprocess(
-        (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-        z.number().nonnegative().nullable().optional()
-      ),
-      advanceAmount: z.preprocess(
-        (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-        z.number().nonnegative().nullable().optional()
-      ),
+      vehicleId: z.coerce
+        .number({ required_error: "Vehicle is required", invalid_type_error: "Vehicle is required" })
+        .int()
+        .positive("Vehicle is required"),
+      driverId: z.coerce
+        .number({ required_error: "Driver is required", invalid_type_error: "Driver is required" })
+        .int()
+        .positive("Driver is required"),
+      supervisorId: z.coerce
+        .number({ required_error: "Supervisor is required", invalid_type_error: "Supervisor is required" })
+        .int()
+        .positive("Supervisor is required"),
+      helpers: z
+        .array(z.string().trim().min(1))
+        .min(1, "Please add at least one Helper."),
+      loaders: z
+        .array(z.string().trim().min(1))
+        .min(1, "Please add at least one Loader."),
+      // Empty/blank → NULL. Explicit 0 stays 0 (meter ledger decides if 0 is valid).
+      openingMeter: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
+      advanceAmount: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
       startTime: z.string().optional(),
     })
     .passthrough(),
   farm: z
     .object({
-      sourceFarmId: z.coerce.number().int(),
-      destMeter: z.coerce.number().nonnegative(),
+      sourceFarmId: z.coerce.number().int().positive("Farm is required"),
+      destMeter: z.coerce.number().positive("Farm meter is required"),
+      farmAddress: z.string().trim().min(1, "Farm address is required."),
       // reached_time is never sent by the frontend (backend captures it) — but
       // tolerate a null in case a legacy client sends one.
       reachedTime: z.string().nullable().optional(),
       // Tolls may legitimately be 0. Negative values are normalized to 0.
       pickupTolls: z.preprocess(
-        (v) => (v == null || v === "" ? undefined : Math.max(0, Number(v))),
-        z.coerce.number().nonnegative().optional()
+        (v) => (v == null || v === "" ? 0 : Math.max(0, Number(v))),
+        z.coerce.number().nonnegative()
       ),
-      // Avg Bird Weight is a Step 2 mandatory submit field (matches the UI).
-      avgBirdWeight: z.coerce.number().positive(),
-      farmBirdTypeId: z.coerce.number().int().optional(),
-      farmBirdCount: z.coerce.number().int().nonnegative().nullable().optional(),
-      farmLoadWeight: z.coerce.number().nonnegative().nullable().optional(),
-      // GPS — optional capture; ranges validated below when supplied.
+      avgBirdWeight: z.coerce.number().positive("Average Bird Weight is required"),
       farmGpsLat: z.coerce.number().nullable().optional(),
       farmGpsLon: z.coerce.number().nullable().optional(),
       farmGpsAccuracy: z.coerce.number().nonnegative().nullable().optional(),
@@ -137,26 +161,16 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
     ),
   pickup: z
     .object({
-      // Totals are OPTIONAL from the client — the backend derives and persists
-      // them from the submitted box rows (authoritative).
       dcWeight: z.coerce.number().positive().optional(),
       totalBirds: z.coerce.number().int().positive().optional(),
       boxes: z.coerce.number().int().positive().optional(),
       boxDetails: z.array(boxDetailSchema).min(1),
-      dcPhotoKey: z.string().min(1, "DC Photo is required."),
+      dcPhotoKey: z.string().optional(),
       dcPhotoKey2: z.string().optional(),
+      dcPhotoData: z.string().optional(),
+      dcPhotoData2: z.string().optional(),
     })
-    .passthrough()
-    .refine(
-      (data) => {
-        const photoCount = (data.dcPhotoKey ? 1 : 0) + (data.dcPhotoKey2 ? 1 : 0);
-        return photoCount >= 1 && photoCount <= 2;
-      },
-      {
-        message: "Step 3 requires between 1 and 2 photos.",
-        path: ["dcPhotoKey"],
-      }
-    ),
+    .passthrough(),
   deliveries: z
     .object({
       deliveries: z.array(
@@ -187,7 +201,9 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
     .object({
       closingMeter: z.coerce.number().nonnegative().optional(),
       endMeter: z.coerce.number().nonnegative().optional(),
-      endTime: z.string({ required_error: "End time is required" }), 
+      destinationTolls: z.coerce.number().nonnegative().optional(),
+      deliveryTolls: z.coerce.number().nonnegative().optional(),
+      endTime: z.string().optional(),
     })
     .passthrough()
     .refine((data) => data.closingMeter != null || data.endMeter != null, {

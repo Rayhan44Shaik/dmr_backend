@@ -88,15 +88,18 @@ async function makeDraftTrip(
     sourceFarmId: m.farm.id,
     sourceFarm: m.farm.farmName,
     openingMeter: 1000,
-    startStepSubmitted: true,
+    pickupStepSubmitted: true,
     totalBirds: opts.totalBirds,
     dcWeight: opts.dcWeight,
+    boxDetails: [{ boxNo: 1, birds: opts.totalBirds, weight: opts.dcWeight }],
   } as Record<string, unknown>);
 }
 
 function delivery(overrides: Record<string, unknown>) {
+  const shopName = String(overrides.shopName ?? "Shop");
   return {
     id: 0,
+    clientKey: `cap-${shopName}`,
     shopId: null,
     shopName: "Shop",
     birds: 0,
@@ -115,14 +118,14 @@ describe("Trip Delivery capacity validation (birds)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-01", totalBirds: 100, dcWeight: 200 });
 
     // Below capacity — fine.
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 50, weight: 90 })],
     } as Record<string, unknown>);
     const row1 = await pool.query(`SELECT birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     assert.equal(Number(row1.rows[0].birds), 50);
 
     // Exactly at capacity — fine.
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 100, weight: 190 })],
     } as Record<string, unknown>);
     const row2 = await pool.query(`SELECT birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
@@ -131,7 +134,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     // One over — rejected, DB unchanged (still 100 from the prior save).
     await assert.rejects(
       () =>
-        tripsService.save(trip.id, {
+        tripsService.saveDeliveries(trip.id, {
           deliveries: [delivery({ shopName: "A", birds: 101, weight: 190 })],
         } as Record<string, unknown>),
       /exceed/i
@@ -145,7 +148,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-02", totalBirds: 100, dcWeight: 200 });
 
     // 95 delivered + 5 mortality = 100 -> exactly at capacity, must succeed.
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 95, weight: 190, mortality: 5 })],
     } as Record<string, unknown>);
     const ok = await pool.query(`SELECT birds, mortality FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
@@ -154,7 +157,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     // 95 delivered + 6 mortality = 101 -> over capacity, must reject.
     await assert.rejects(
       () =>
-        tripsService.save(trip.id, {
+        tripsService.saveDeliveries(trip.id, {
           deliveries: [delivery({ shopName: "A", birds: 95, weight: 190, mortality: 6 })],
         } as Record<string, unknown>),
       /exceed/i
@@ -165,7 +168,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     const m = await seedMasters();
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-03", totalBirds: 100, dcWeight: 200 });
 
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 0, weight: 0 })],
     } as Record<string, unknown>);
     const zero = await pool.query(`SELECT birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
@@ -176,7 +179,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     // before it ever reaches the new capacity check — still correctly
     // rejected end-to-end, just by an earlier layer.
     await assert.rejects(() =>
-      tripsService.save(trip.id, {
+      tripsService.saveDeliveries(trip.id, {
         deliveries: [delivery({ shopName: "A", birds: -5, weight: 10 })],
       } as Record<string, unknown>)
     );
@@ -189,7 +192,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     // Same as above — the existing schema's `.int()` already rejects this
     // before the capacity check runs.
     await assert.rejects(() =>
-      tripsService.save(trip.id, {
+      tripsService.saveDeliveries(trip.id, {
         deliveries: [delivery({ shopName: "A", birds: 10.5, weight: 20 })],
       } as Record<string, unknown>)
     );
@@ -199,7 +202,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     const m = await seedMasters();
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-05", totalBirds: 100, dcWeight: 200 });
 
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [
         delivery({ shopName: "A", birds: 40, weight: 70 }),
         delivery({ shopName: "B", birds: 40, weight: 70 }),
@@ -211,7 +214,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
 
     await assert.rejects(
       () =>
-        tripsService.save(trip.id, {
+        tripsService.saveDeliveries(trip.id, {
           deliveries: [
             delivery({ shopName: "A", birds: 40, weight: 70 }),
             delivery({ shopName: "B", birds: 40, weight: 70 }),
@@ -226,12 +229,12 @@ describe("Trip Delivery capacity validation (birds)", () => {
     const m = await seedMasters();
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-06", totalBirds: 100, dcWeight: 200 });
 
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 60, weight: 100 })],
     } as Record<string, unknown>);
 
     // Edit up to 100 -> still fine.
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 100, weight: 190 })],
     } as Record<string, unknown>);
     const row = await pool.query(`SELECT birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
@@ -240,7 +243,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     // Edit up to 101 -> rejected.
     await assert.rejects(
       () =>
-        tripsService.save(trip.id, {
+        tripsService.saveDeliveries(trip.id, {
           deliveries: [delivery({ shopName: "A", birds: 101, weight: 190 })],
         } as Record<string, unknown>),
       /exceed/i
@@ -260,10 +263,10 @@ describe("Trip Delivery capacity validation (birds)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-07", totalBirds: 100, dcWeight: 200 });
 
     const results = await Promise.allSettled([
-      tripsService.save(trip.id, {
+      tripsService.saveDeliveries(trip.id, {
         deliveries: [delivery({ shopName: "A", birds: 100, weight: 190 })],
       } as Record<string, unknown>),
-      tripsService.save(trip.id, {
+      tripsService.saveDeliveries(trip.id, {
         deliveries: [delivery({ shopName: "B", birds: 90, weight: 150 })],
       } as Record<string, unknown>),
     ]);
@@ -283,11 +286,11 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const m = await seedMasters();
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-10", totalBirds: 1000, dcWeight: 200 });
 
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 50, weight: 150 })],
     } as Record<string, unknown>);
 
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 50, weight: 200 })],
     } as Record<string, unknown>);
     const atCap = await pool.query(`SELECT weight FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
@@ -295,7 +298,7 @@ describe("Trip Delivery capacity validation (weight)", () => {
 
     await assert.rejects(
       () =>
-        tripsService.save(trip.id, {
+        tripsService.saveDeliveries(trip.id, {
           deliveries: [delivery({ shopName: "A", birds: 50, weight: 200.001 })],
         } as Record<string, unknown>),
       /exceed/i
@@ -308,7 +311,7 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const m = await seedMasters();
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-11", totalBirds: 1000, dcWeight: 200 });
 
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [
         delivery({ shopName: "A", birds: 10, weight: 66.333 }),
         delivery({ shopName: "B", birds: 10, weight: 66.333 }),
@@ -323,13 +326,13 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const m = await seedMasters();
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-12", totalBirds: 1000, dcWeight: 200 });
 
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 50, weight: 150 })],
     } as Record<string, unknown>);
 
     await assert.rejects(
       () =>
-        tripsService.save(trip.id, {
+        tripsService.saveDeliveries(trip.id, {
           deliveries: [delivery({ shopName: "A", birds: 50, weight: 201 })],
         } as Record<string, unknown>),
       /exceed/i
@@ -340,13 +343,13 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const m = await seedMasters();
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-13", totalBirds: 1000, dcWeight: 200 });
 
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 0, weight: 0 })],
     } as Record<string, unknown>);
 
     // Rejected by the existing schema's `weight: z.coerce.number().nonnegative()`.
     await assert.rejects(() =>
-      tripsService.save(trip.id, {
+      tripsService.saveDeliveries(trip.id, {
         deliveries: [delivery({ shopName: "A", birds: 5, weight: -1 })],
       } as Record<string, unknown>)
     );
@@ -367,10 +370,10 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-14", totalBirds: 1000, dcWeight: 200 });
 
     const results = await Promise.allSettled([
-      tripsService.save(trip.id, {
+      tripsService.saveDeliveries(trip.id, {
         deliveries: [delivery({ shopName: "A", birds: 10, weight: 20 })],
       } as Record<string, unknown>),
-      tripsService.save(trip.id, {
+      tripsService.saveDeliveries(trip.id, {
         deliveries: [delivery({ shopName: "B", birds: 10, weight: 18 })],
       } as Record<string, unknown>),
     ]);
@@ -393,7 +396,7 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const m = await seedMasters();
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-15", totalBirds: 100, dcWeight: 200 });
 
-    await tripsService.save(trip.id, {
+    await tripsService.saveDeliveries(trip.id, {
       deliveries: [delivery({ shopName: "A", birds: 50, weight: 100 })],
     } as Record<string, unknown>);
 
@@ -401,7 +404,7 @@ describe("Trip Delivery capacity validation (weight)", () => {
     // same submission — must reject and leave the prior valid row untouched.
     await assert.rejects(
       () =>
-        tripsService.save(trip.id, {
+        tripsService.saveDeliveries(trip.id, {
           deliveries: [delivery({ shopName: "A", birds: 150, weight: 250 })],
         } as Record<string, unknown>),
       /exceed/i
@@ -419,7 +422,7 @@ describe("Trip 52 regression — the exact scenario that was previously accepted
 
     await assert.rejects(
       () =>
-        tripsService.save(trip.id, {
+        tripsService.saveDeliveries(trip.id, {
           deliveries: [delivery({ shopName: "City Broiler DMR", birds: 2000, weight: 940 })],
         } as Record<string, unknown>),
       /exceed/i,

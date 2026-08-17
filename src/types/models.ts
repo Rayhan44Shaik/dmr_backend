@@ -155,14 +155,23 @@ export interface ShopDelivery {
 }
 
 export interface DieselEntry {
+  id?: number;
   rowIndex: number;
   litres?: number | null;
   rate?: number | null;
+  amount?: number | null;
   meter?: number | null;
   bunkName?: string | null;
   bunkGps?: string | null;
+  gpsLat?: number | null;
+  gpsLon?: number | null;
+  gpsAccuracy?: number | null;
+  gpsCapturedAt?: string | null;
   imageData?: string | null;
   imageName?: string | null;
+  submitted?: boolean;
+  submittedAt?: string | null;
+  clientKey?: string | null;
 }
 
 export interface Trip {
@@ -199,7 +208,6 @@ export interface Trip {
   farmLoadWeight?: number | null;
   farmRate?: number | null;
   farmAmount?: number | null;
-  farmCompletedTrips?: number | null;
   farmGpsLat?: number | null;
   farmGpsLon?: number | null;
   farmGpsAccuracy?: number | null;
@@ -217,6 +225,7 @@ export interface Trip {
   dcPhotoKey2?: string | null;
   pickupStepSubmitted: boolean;
   pickupStepSubmittedAt: string | null;
+  vehicleBoxCapacity?: number;
 
   deliveries: ShopDelivery[];
   deliveryStepSubmitted: boolean;
@@ -248,6 +257,7 @@ export interface Trip {
   endStepSubmitted: boolean;
   expensesStepSubmitted: boolean;
   expensesStepSubmittedAt: string | null;
+  mileageKmL?: number | null;
 
   totalKm: number;
   totalShops: number;

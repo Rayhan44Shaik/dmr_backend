@@ -134,6 +134,21 @@ export async function patchJson(
   return { status: res.status, body: await res.json() };
 }
 
+export async function deleteJson(
+  baseUrl: string,
+  apiPath: string
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${apiPath}`, { method: "DELETE" });
+  const text = await res.text();
+  let body: any = {};
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { raw: text };
+  }
+  return { status: res.status, body };
+}
+
 export async function getJson(
   baseUrl: string,
   apiPath: string

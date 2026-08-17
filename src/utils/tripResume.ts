@@ -13,8 +13,8 @@ export const TRIP_STEP_ORDER: TripWizardStep[] = [
 export const TRIP_STEP_LABELS: Record<TripWizardStep, string> = {
   start: "Step 1 — Trip Header",
   farm: "Step 2 — Farm Loading",
-  pickup: "Step 3 — Pickup / DC",
-  deliveries: "Step 4 — Shop Delivery",
+  pickup: "Step 3 — Pickup / Loading",
+  deliveries: "Step 4 — Shop Deliveries",
   expenses: "Step 5 — Diesel & Expenses",
 };
 

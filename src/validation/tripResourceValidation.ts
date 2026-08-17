@@ -62,6 +62,60 @@ function pushConflicts(conflicts: string[], row: { label?: string; trip_no?: str
 }
 
 /**
+ * Serialize concurrent Step 1 submits that share a vehicle or employee so
+ * availability can be re-checked after the lock is held (same transaction).
+ */
+export async function lockTripResourcesForWrite(
+  input: TripResourceInput | null | undefined,
+  client: Client
+): Promise<void> {
+  if (!input) return;
+
+  const lock = (key: string) =>
+    client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [key]);
+
+  if (input.vehicleId) {
+    await lock(`trip_resource_vehicle_${input.vehicleId}`);
+    const vehicle = await client.query(`SELECT id FROM vehicles WHERE id = $1 FOR UPDATE`, [
+      input.vehicleId,
+    ]);
+    if (!vehicle.rowCount) {
+      throw new AppError(422, "Invalid vehicle", { vehicleId: input.vehicleId });
+    }
+  }
+
+  const employeeIds = [input.driverId, input.supervisorId].filter(
+    (id): id is number => typeof id === "number" && id > 0
+  );
+  employeeIds.sort((a, b) => a - b);
+  for (const id of employeeIds) {
+    await lock(`trip_resource_employee_${id}`);
+  }
+  if (employeeIds.length) {
+    await client.query(`SELECT id FROM employees WHERE id = ANY($1::int[]) FOR UPDATE`, [
+      employeeIds,
+    ]);
+  }
+
+  const names = [
+    ...new Set(
+      [...(input.helpers ?? []), ...(input.loaders ?? [])]
+        .map((n) => n?.trim())
+        .filter((n): n is string => Boolean(n))
+    ),
+  ].sort();
+  for (const name of names) {
+    await lock(`trip_resource_crew_${name}`);
+  }
+  if (names.length) {
+    await client.query(
+      `SELECT id FROM employees WHERE employee_name = ANY($1::text[]) FOR UPDATE`,
+      [names]
+    );
+  }
+}
+
+/**
  * Throw an HTTP 409 with a clear message if any of the supplied resources is
  * already assigned to another active (Draft) trip. Returns normally otherwise.
  */
