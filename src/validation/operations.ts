@@ -123,10 +123,6 @@ export const rateEntryUpdateSchema = z.object({
   deliveries: z.array(rateEntryDeliverySchema).optional(),
 });
 
-export const rateEntryLockSchema = z.object({
-  lockedBy: z.string().optional(),
-});
-
 /**
  * Rate Entry payload.
  *
@@ -141,9 +137,32 @@ export const rateEntryItemSchema = z.object({
     .max(MAX_SHOP_SALE_RATE, `Rate must be between ₹${MIN_SHOP_SALE_RATE} and ₹${MAX_SHOP_SALE_RATE}`),
 });
 
+function uniqueDeliveryIds(
+  rows: Array<{ deliveryId: number }> | undefined,
+  ctx: z.RefinementCtx
+) {
+  if (!rows) return;
+  const seen = new Set<number>();
+  for (const row of rows) {
+    if (seen.has(row.deliveryId)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Duplicate rate entry for delivery ${row.deliveryId}`,
+      });
+    }
+    seen.add(row.deliveryId);
+  }
+}
+
 export const rateEntrySaveSchema = z.object({
-  /** Partial list — only deliveries included are updated. */
-  rates: z.array(rateEntryItemSchema).min(1),
+  /** Partial list — only deliveries included are updated. Empty is allowed. */
+  rates: z.array(rateEntryItemSchema).default([]).superRefine(uniqueDeliveryIds),
+});
+
+export const rateEntryLockSchema = z.object({
+  lockedBy: z.string().optional(),
+  /** Optional rates applied in the same lock transaction (atomic save+lock). */
+  rates: z.array(rateEntryItemSchema).optional().superRefine(uniqueDeliveryIds),
 });
 
 export const collectionBodySchema = z.object({

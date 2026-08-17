@@ -4,6 +4,8 @@ import { AppError } from "../middleware/errorHandler.js";
 import type {
   RateEntryDelivery,
   RateEntryMarketRate,
+  RateEntryMarketRateMaster,
+  RateEntryMarketRateWindowRow,
   RateEntryTrip,
 } from "../types/operations.js";
 import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
@@ -14,6 +16,8 @@ import {
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import {
+  MAX_SHOP_SALE_RATE,
+  MIN_SHOP_SALE_RATE,
   parseBody,
   rateEntryLockSchema,
   rateEntrySaveSchema,
@@ -23,15 +27,6 @@ type Client = pg.PoolClient;
 
 const ELIGIBLE_WHERE = `
   WHERE t.status = 'Completed'
-    AND COALESCE(t.deleted, FALSE) = FALSE
-    AND COALESCE(t.rate_completed, FALSE) = FALSE
-`;
-
-const ELIGIBLE_BY_ID = `
-  SELECT t.*
-  FROM trips t
-  WHERE t.id = $1
-    AND t.status = 'Completed'
     AND COALESCE(t.deleted, FALSE) = FALSE
     AND COALESCE(t.rate_completed, FALSE) = FALSE
 `;
@@ -54,144 +49,157 @@ interface DeliveryRow extends Record<string, unknown> {
   delivery_mode: "box" | "weight";
 }
 
-interface MarketRateRow {
-  shop_id: number | null;
-  bird_type_id: number | null;
-  master_rate: number | null;
-  last_trip_rate: number | null;
-  last_trip_date: string | null;
-  last_trip_no: string | null;
-  avg_trip_rate: number | null;
-  samples: number;
+function addDays(isoDate: string, days: number): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+  if (!match) return isoDate;
+  const y = Number(match[1]);
+  const m = Number(match[2]);
+  const d = Number(match[3]);
+  const dt = new Date(y, m - 1, d + days);
+  const pad = (n: number) => (n < 10 ? `0${n}` : String(n));
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
 }
 
-function marketKey(shopId: number | null, birdTypeId: number | null) {
-  return `${shopId ?? "null"}::${birdTypeId ?? "null"}`;
+function sizeColumnKeysFromFields(fields: Array<{ name: string }>): string[] {
+  return fields
+    .map((f) => f.name)
+    .filter((name) => /^c\d+$/i.test(name))
+    .sort((a, b) => Number(b.slice(1)) - Number(a.slice(1)));
 }
 
-async function loadMarketRates(
-  client: Client,
-  pairs: Array<{ shopId: number | null; birdTypeId: number | null }>
-): Promise<Map<string, RateEntryMarketRate>> {
-  const out = new Map<string, RateEntryMarketRate>();
-  if (!pairs.length) return out;
-
-  const pairSet = new Map<string, { shopId: number | null; birdTypeId: number | null }>();
-  for (const p of pairs) pairSet.set(marketKey(p.shopId, p.birdTypeId), p);
-
-  const masterResult = await client.query<{
-    shop_id: number | null;
-    bird_type_id: number | null;
-    shop_name: string;
-    bird_type: string;
-    rate: number;
-  }>(
-    `SELECT DISTINCT ON (r.shop_id, r.bird_type_id)
-       r.shop_id, r.bird_type_id, r.shop_name, r.bird_type, r.rate
-     FROM shop_rates r
-     INNER JOIN UNNEST($1::int[], $2::int[])
-       AS pair(shop_id, bird_type_id)
-       ON pair.shop_id IS NOT DISTINCT FROM r.shop_id
-      AND pair.bird_type_id IS NOT DISTINCT FROM r.bird_type_id
-     WHERE COALESCE(r.deleted, FALSE) = FALSE
-     ORDER BY r.shop_id, r.bird_type_id, r.effective_from DESC, r.id DESC`,
-    [
-      pairs.map((p) => p.shopId),
-      pairs.map((p) => p.birdTypeId),
-    ]
-  );
-
-  for (const row of masterResult.rows) {
-    const key = marketKey(row.shop_id, row.bird_type_id);
-    out.set(key, {
-      shopId: numOrNull(row.shop_id),
-      shopName: str(row.shop_name),
-      birdTypeId: numOrNull(row.bird_type_id),
-      birdType: str(row.bird_type),
-      masterRate: numOrNull(row.rate),
-      lastTripRate: null,
-      lastTripDate: null,
-      lastTripNo: null,
-      avgTripRate: null,
-      tripRateSamples: 0,
-    });
-  }
-
-  const lastResult = await client.query<MarketRateRow>(
-    `
-    WITH target AS (
-      SELECT shop_id, bird_type_id
-      FROM UNNEST($1::int[], $2::int[]) AS pair(shop_id, bird_type_id)
-    ),
-    matched AS (
-      SELECT d.shop_id, d.bird_type_id, d.rate, t.trip_date, t.trip_no, d.id AS delivery_id
-      FROM trip_deliveries d
-      INNER JOIN trips t ON t.id = d.trip_id
-      INNER JOIN target p
-        ON p.shop_id IS NOT DISTINCT FROM d.shop_id
-       AND p.bird_type_id IS NOT DISTINCT FROM d.bird_type_id
-      WHERE t.status = 'Completed'
-        AND COALESCE(t.deleted, FALSE) = FALSE
-        AND t.rate_completed = TRUE
-        AND d.rate IS NOT NULL
-    ),
-    latest AS (
-      SELECT DISTINCT ON (shop_id, bird_type_id)
-             shop_id, bird_type_id, rate, trip_date, trip_no
-      FROM matched
-      ORDER BY shop_id, bird_type_id, trip_date DESC, delivery_id DESC
-    ),
-    avg AS (
-      SELECT shop_id, bird_type_id,
-             AVG(rate)::numeric(12,2) AS avg_rate,
-             COUNT(*)::int AS samples
-      FROM matched
-      GROUP BY shop_id, bird_type_id
-    )
-    SELECT l.shop_id, l.bird_type_id,
-           l.rate AS last_trip_rate, l.trip_date AS last_trip_date,
-           l.trip_no AS last_trip_no,
-           a.avg_rate AS avg_trip_rate, a.samples
-    FROM latest l
-    LEFT JOIN avg a
-      ON a.shop_id IS NOT DISTINCT FROM l.shop_id
-     AND a.bird_type_id IS NOT DISTINCT FROM l.bird_type_id
-    `,
-    [
-      pairs.map((p) => p.shopId),
-      pairs.map((p) => p.birdTypeId),
-    ]
-  );
-
-  for (const row of lastResult.rows) {
-    const key = marketKey(row.shop_id, row.bird_type_id);
-    const existing = out.get(key) ?? {
-      shopId: numOrNull(row.shop_id),
-      shopName: "",
-      birdTypeId: numOrNull(row.bird_type_id),
-      birdType: "",
-      masterRate: null,
-      lastTripRate: null,
-      lastTripDate: null,
-      lastTripNo: null,
-      avgTripRate: null,
-      tripRateSamples: 0,
-    };
-    existing.lastTripRate = numOrNull(row.last_trip_rate);
-    existing.lastTripDate = dateOnly(row.last_trip_date);
-    existing.lastTripNo = row.last_trip_no == null ? null : str(row.last_trip_no);
-    existing.avgTripRate = numOrNull(row.avg_trip_rate);
-    existing.tripRateSamples = Number(row.samples ?? 0);
-    out.set(key, existing);
-  }
-
+function emptySizeColumns(keys: string[]): Record<string, number | null> {
+  const out: Record<string, number | null> = {};
+  for (const key of keys) out[key] = null;
   return out;
+}
+
+function mapEnteredWindowRow(
+  row: Record<string, unknown>,
+  sizeKeys: string[]
+): RateEntryMarketRateWindowRow {
+  const sizeColumns: Record<string, number | null> = {};
+  for (const key of sizeKeys) {
+    sizeColumns[key] = numOrNull(row[key]);
+  }
+  return {
+    businessDate: dateOnly(row.business_date) ?? "",
+    entered: true,
+    vij: numOrNull(row.vij),
+    gun: numOrNull(row.gun),
+    rp: numOrNull(row.rp),
+    sneha: numOrNull(row.sneha),
+    vencobRate: numOrNull(row.vencob_rate),
+    vencobVii: numOrNull(row.vencob_vii),
+    vencobGun: numOrNull(row.vencob_gun),
+    associationVii: numOrNull(row.association_vii),
+    sizeColumns,
+  };
+}
+
+function emptyWindowRow(date: string, sizeKeys: string[]): RateEntryMarketRateWindowRow {
+  return {
+    businessDate: date,
+    entered: false,
+    vij: null,
+    gun: null,
+    rp: null,
+    sneha: null,
+    vencobRate: null,
+    vencobVii: null,
+    vencobGun: null,
+    associationVii: null,
+    sizeColumns: emptySizeColumns(sizeKeys),
+  };
+}
+
+function toMarketRateMaster(
+  tripDate: string,
+  fromDate: string,
+  toDate: string,
+  slots: RateEntryMarketRateWindowRow[],
+  sizeColumnKeys: string[]
+): RateEntryMarketRateMaster {
+  return {
+    tripDate,
+    fromDate,
+    toDate,
+    additionalMetrics: slots.map((r) => ({
+      date: r.businessDate,
+      entered: r.entered,
+      vij: r.vij,
+      gun: r.gun,
+      rp: r.rp,
+    })),
+    companyRates: slots.map((r) => ({
+      date: r.businessDate,
+      entered: r.entered,
+      sneha: r.sneha,
+      vencobRate: r.vencobRate,
+      vencobVii: r.vencobVii,
+      vencobGun: r.vencobGun,
+      associationVii: r.associationVii,
+    })),
+    sizeCategoryBreakdown: slots.map((r) => ({
+      date: r.businessDate,
+      entered: r.entered,
+      columns: r.sizeColumns,
+    })),
+    sizeColumnKeys,
+  };
+}
+
+/**
+ * Market Rate Master rows for tripDate-1, tripDate, tripDate+1 only.
+ * Reads the existing `market_rates` table. Missing dates stay null (not 0).
+ */
+async function loadMarketRatesWindow(
+  client: Client,
+  tripDate: string
+): Promise<{
+  slots: RateEntryMarketRateWindowRow[];
+  master: RateEntryMarketRateMaster;
+}> {
+  const fromDate = addDays(tripDate, -1);
+  const toDate = addDays(tripDate, 1);
+  const dates = [fromDate, tripDate, toDate];
+  const result = await client.query(
+    `SELECT * FROM market_rates
+     WHERE business_date >= $1::date AND business_date <= $2::date
+     ORDER BY business_date`,
+    [fromDate, toDate]
+  );
+  const sizeKeys = sizeColumnKeysFromFields(result.fields);
+  const byDate = new Map<string, RateEntryMarketRateWindowRow>();
+  for (const row of result.rows) {
+    const mapped = mapEnteredWindowRow(row, sizeKeys);
+    byDate.set(mapped.businessDate, mapped);
+  }
+  const slots = dates.map((date) => byDate.get(date) ?? emptyWindowRow(date, sizeKeys));
+  return {
+    slots,
+    master: toMarketRateMaster(tripDate, fromDate, toDate, slots, sizeKeys),
+  };
+}
+
+function tripDateMasterRate(
+  window: RateEntryMarketRateWindowRow[],
+  tripDate: string
+): number | null {
+  const row = window.find((r) => r.businessDate === tripDate);
+  if (!row || !row.entered) return null;
+  return row.vencobRate;
 }
 
 async function loadDeliveries(
   client: Client,
-  tripId: number
-): Promise<RateEntryDelivery[]> {
+  tripId: number,
+  tripDate: string,
+  includeMarket: boolean
+): Promise<{
+  deliveries: RateEntryDelivery[];
+  marketRatesWindow: RateEntryMarketRateWindowRow[];
+  marketRateMaster: RateEntryMarketRateMaster | null;
+}> {
   const result = await client.query<DeliveryRow>(
     `SELECT id, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
             birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode
@@ -201,15 +209,32 @@ async function loadDeliveries(
     [tripId]
   );
 
-  const pairs = result.rows.map((r) => ({
-    shopId: numOrNull(r.shop_id),
-    birdTypeId: numOrNull(r.bird_type_id),
-  }));
-  const market = await loadMarketRates(client, pairs);
+  let marketRatesWindow: RateEntryMarketRateWindowRow[] = [];
+  let marketRateMaster: RateEntryMarketRateMaster | null = null;
+  if (includeMarket && tripDate) {
+    const loaded = await loadMarketRatesWindow(client, tripDate);
+    marketRatesWindow = loaded.slots;
+    marketRateMaster = loaded.master;
+  }
+  const masterRate = includeMarket
+    ? tripDateMasterRate(marketRatesWindow, tripDate)
+    : null;
 
-  return result.rows.map((r) => {
-    const key = marketKey(numOrNull(r.shop_id), numOrNull(r.bird_type_id));
-    const rate = numOrNull(r.rate);
+  const deliveries = result.rows.map((r) => {
+    const market: RateEntryMarketRate | null = includeMarket
+      ? {
+          shopId: numOrNull(r.shop_id),
+          shopName: str(r.shop_name),
+          birdTypeId: numOrNull(r.bird_type_id),
+          birdType: str(r.bird_type),
+          masterRate,
+          lastTripRate: null,
+          lastTripDate: null,
+          lastTripNo: null,
+          avgTripRate: null,
+          tripRateSamples: 0,
+        }
+      : null;
     return {
       id: num(r.id),
       serialNo: numOrNull(r.serial_no),
@@ -222,18 +247,22 @@ async function loadDeliveries(
       weight: num(r.weight),
       mortality: num(r.mortality),
       mortKg: numOrNull(r.mort_kg),
-      rate,
+      rate: numOrNull(r.rate),
       amount: num(r.amount),
       remarks: str(r.remarks),
       deliveryMode: (str(r.delivery_mode) as "box" | "weight") || "box",
-      marketRate: market.get(key) ?? null,
+      marketRate: market,
     };
   });
+
+  return { deliveries, marketRatesWindow, marketRateMaster };
 }
 
 function mapTrip(
   row: Record<string, unknown>,
-  deliveries: RateEntryDelivery[]
+  deliveries: RateEntryDelivery[],
+  marketRatesWindow: RateEntryMarketRateWindowRow[] = [],
+  marketRateMaster: RateEntryMarketRateMaster | null = null
 ): RateEntryTrip {
   const totalAmount = deliveries
     .filter((d) => d.rate != null)
@@ -252,13 +281,138 @@ function mapTrip(
     totalWeight: num(row.total_weight),
     totalShops: num(row.total_shops),
     rateLocked: Boolean(row.rate_completed),
-    rateLockedAt: row.rate_locked_at == null ? null : new Date(str(row.rate_locked_at)).toISOString(),
+    rateLockedAt:
+      row.rate_locked_at == null ? null : new Date(str(row.rate_locked_at)).toISOString(),
     rateLockedBy: row.rate_locked_by == null ? null : str(row.rate_locked_by),
     ratesEntered: deliveries.filter((d) => d.rate != null).length,
     deliveriesCount: deliveries.length,
     totalAmount: Number(totalAmount.toFixed(2)),
     deliveries,
+    marketRatesWindow,
+    marketRateMaster,
   };
+}
+
+async function rejectIfIneligible(
+  client: Client,
+  tripId: number,
+  row: {
+    status: string;
+    deleted: boolean;
+    rate_completed: boolean;
+  } | undefined
+): Promise<void> {
+  if (!row) {
+    throw new AppError(404, `Trip ${tripId} not found`);
+  }
+  if (row.rate_completed) {
+    throw new AppError(409, `Trip ${tripId} is already rate-locked`);
+  }
+  throw new AppError(
+    422,
+    `Trip ${tripId} is not eligible for Rate Entry (must be Completed and not deleted)`
+  );
+}
+
+async function persistRates(
+  client: Client,
+  tripId: number,
+  rates: Array<{ deliveryId: number; rate: number }>
+): Promise<void> {
+  if (!rates.length) return;
+
+  const deliveryIds = rates.map((r) => r.deliveryId);
+  const existing = await client.query<{ id: number }>(
+    `SELECT id FROM trip_deliveries WHERE trip_id = $1 AND id = ANY($2::int[])`,
+    [tripId, deliveryIds]
+  );
+  const found = new Set(existing.rows.map((r) => num(r.id)));
+  const missing = deliveryIds.filter((id) => !found.has(id));
+  if (missing.length) {
+    throw new AppError(422, "Some deliveries do not belong to this trip", {
+      tripId,
+      missingDeliveryIds: missing,
+    });
+  }
+
+  for (const item of rates) {
+    await client.query(
+      `UPDATE trip_deliveries
+          SET rate = $2,
+              amount = ROUND(weight::numeric * $2::numeric, 2),
+              updated_at = NOW()
+        WHERE id = $1 AND trip_id = $3`,
+      [item.deliveryId, item.rate, tripId]
+    );
+  }
+}
+
+async function assertAllShopsHaveValidRates(client: Client, tripId: number): Promise<void> {
+  const count = await client.query<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM trip_deliveries WHERE trip_id = $1`,
+    [tripId]
+  );
+  if (Number(count.rows[0]?.c ?? 0) === 0) {
+    throw new AppError(422, "Every shop delivery must have a rate before locking", {
+      tripId,
+      missingDeliveries: [],
+    });
+  }
+
+  const missing = await client.query<{ id: number; shop_name: string; rate: number | null }>(
+    `SELECT id, shop_name, rate FROM trip_deliveries
+     WHERE trip_id = $1
+       AND (rate IS NULL
+            OR rate < $2::numeric
+            OR rate > $3::numeric)
+     ORDER BY serial_no NULLS LAST, id`,
+    [tripId, MIN_SHOP_SALE_RATE, MAX_SHOP_SALE_RATE]
+  );
+  if (missing.rowCount) {
+    throw new AppError(422, "Every shop delivery must have a rate before locking", {
+      tripId,
+      missingDeliveries: missing.rows.map((r) => ({
+        deliveryId: num(r.id),
+        shopName: str(r.shop_name),
+        rate: numOrNull(r.rate),
+      })),
+    });
+  }
+}
+
+async function stampLock(client: Client, tripId: number, lockedBy: string | null): Promise<void> {
+  await client.query(
+    `UPDATE trips
+        SET rate_completed = TRUE,
+            rate_locked_at = NOW(),
+            rate_locked_by = COALESCE($2, rate_locked_by, 'system')
+      WHERE id = $1`,
+    [tripId, lockedBy]
+  );
+
+  await client.query(
+    `INSERT INTO rate_entry (
+       trip_id, bird_type, rate, locked, locked_by, locked_at, created_by
+     ) VALUES ($1, '', 0, TRUE, COALESCE($2, 'system'), NOW(), COALESCE($2, 'system'))
+     ON CONFLICT (trip_id) DO UPDATE SET
+       locked = TRUE,
+       locked_by = COALESCE(EXCLUDED.locked_by, rate_entry.locked_by),
+       locked_at = COALESCE(rate_entry.locked_at, NOW()),
+       updated_at = NOW()`,
+    [tripId, lockedBy]
+  );
+}
+
+async function loadMappedTrip(client: Client, tripId: number, includeMarket: boolean): Promise<RateEntryTrip> {
+  const trip = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+  const tripDate = dateOnly(trip.rows[0].trip_date) ?? "";
+  const { deliveries, marketRatesWindow, marketRateMaster } = await loadDeliveries(
+    client,
+    tripId,
+    tripDate,
+    includeMarket
+  );
+  return mapTrip(trip.rows[0], deliveries, marketRatesWindow, marketRateMaster);
 }
 
 export const rateEntryService = {
@@ -336,8 +490,9 @@ export const rateEntryService = {
 
         const items: RateEntryTrip[] = [];
         for (const row of result.rows) {
-          const deliveries = await loadDeliveries(client, num(row.id));
-          items.push(mapTrip(row, deliveries));
+          const tripDate = dateOnly(row.trip_date) ?? "";
+          const { deliveries } = await loadDeliveries(client, num(row.id), tripDate, false);
+          items.push(mapTrip(row, deliveries, []));
         }
         return paginatedResult(items, total, filters.pagination);
       }
@@ -349,8 +504,9 @@ export const rateEntryService = {
       );
       const items: RateEntryTrip[] = [];
       for (const row of result.rows) {
-        const deliveries = await loadDeliveries(client, num(row.id));
-        items.push(mapTrip(row, deliveries));
+        const tripDate = dateOnly(row.trip_date) ?? "";
+        const { deliveries } = await loadDeliveries(client, num(row.id), tripDate, false);
+        items.push(mapTrip(row, deliveries, []));
       }
       return items;
     });
@@ -368,8 +524,14 @@ export const rateEntryService = {
       if (!result.rowCount) {
         throw new AppError(404, `Trip ${id} is not available for Rate Entry`);
       }
-      const deliveries = await loadDeliveries(client, id);
-      return mapTrip(result.rows[0], deliveries);
+      const tripDate = dateOnly(result.rows[0].trip_date) ?? "";
+      const { deliveries, marketRatesWindow, marketRateMaster } = await loadDeliveries(
+        client,
+        id,
+        tripDate,
+        true
+      );
+      return mapTrip(result.rows[0], deliveries, marketRatesWindow, marketRateMaster);
     });
   },
 
@@ -378,68 +540,28 @@ export const rateEntryService = {
 
     return withTransaction(async (client) => {
       try {
-        const eligible = await client.query(ELIGIBLE_BY_ID, [tripId]);
-        if (!eligible.rowCount) {
-          const current = await client.query<{
-            status: string;
-            deleted: boolean;
-            rate_completed: boolean;
-          }>(
-            `SELECT status, COALESCE(deleted,FALSE) AS deleted,
-                    COALESCE(rate_completed,FALSE) AS rate_completed
-             FROM trips WHERE id = $1`,
-            [tripId]
-          );
-          if (!current.rowCount) {
-            throw new AppError(404, `Trip ${tripId} not found`);
-          }
-          const c = current.rows[0];
-          if (c.rate_completed) {
-            throw new AppError(409, `Trip ${tripId} is already rate-locked`);
-          }
-          throw new AppError(
-            422,
-            `Trip ${tripId} is not eligible for Rate Entry (must be Completed and not deleted)`
-          );
-        }
-
-        const deliveryIds = data.rates.map((r) => r.deliveryId);
-        const existing = await client.query<{
-          id: number;
-          weight: number;
+        const locked = await client.query<{
+          status: string;
+          deleted: boolean;
+          rate_completed: boolean;
         }>(
-          `SELECT id, weight FROM trip_deliveries
-           WHERE trip_id = $1 AND id = ANY($2::int[])`,
-          [tripId, deliveryIds]
+          `SELECT status, COALESCE(deleted,FALSE) AS deleted,
+                  COALESCE(rate_completed,FALSE) AS rate_completed
+             FROM trips WHERE id = $1 FOR UPDATE`,
+          [tripId]
         );
-        const found = new Set(existing.rows.map((r) => num(r.id)));
-        const missing = deliveryIds.filter((id) => !found.has(id));
-        if (missing.length) {
-          throw new AppError(422, "Some deliveries do not belong to this trip", {
-            tripId,
-            missingDeliveryIds: missing,
-          });
+        const row = locked.rows[0];
+        const eligible =
+          row &&
+          row.status === "Completed" &&
+          !row.deleted &&
+          !row.rate_completed;
+        if (!eligible) {
+          await rejectIfIneligible(client, tripId, row);
         }
 
-        const weightById = new Map<number, number>();
-        for (const r of existing.rows) weightById.set(num(r.id), num(r.weight));
-
-        for (const item of data.rates) {
-          const weight = weightById.get(item.deliveryId) ?? 0;
-          const amount = Number((weight * item.rate).toFixed(2));
-          await client.query(
-            `UPDATE trip_deliveries
-               SET rate = $2, amount = $3, updated_at = NOW()
-             WHERE id = $1 AND trip_id = $4`,
-            [item.deliveryId, item.rate, amount, tripId]
-          );
-        }
-
-        const trip = await client.query(`SELECT * FROM trips WHERE id = $1`, [
-          tripId,
-        ]);
-        const deliveries = await loadDeliveries(client, tripId);
-        return mapTrip(trip.rows[0], deliveries);
+        await persistRates(client, tripId, data.rates ?? []);
+        return loadMappedTrip(client, tripId, true);
       } catch (err) {
         rethrowIfAppError(err);
         throw err;
@@ -452,69 +574,37 @@ export const rateEntryService = {
 
     return withTransaction(async (client) => {
       try {
-        const eligible = await client.query(
-          `SELECT * FROM trips
-           WHERE id = $1
-             AND status = 'Completed'
-             AND COALESCE(deleted, FALSE) = FALSE
-             AND COALESCE(rate_completed, FALSE) = FALSE
-           FOR UPDATE`,
+        const locked = await client.query<{
+          status: string;
+          deleted: boolean;
+          rate_completed: boolean;
+        }>(
+          `SELECT status, COALESCE(deleted,FALSE) AS deleted,
+                  COALESCE(rate_completed,FALSE) AS rate_completed
+             FROM trips WHERE id = $1 FOR UPDATE`,
           [tripId]
         );
-        if (!eligible.rowCount) {
-          const current = await client.query<{
-            status: string;
-            deleted: boolean;
-            rate_completed: boolean;
-          }>(
-            `SELECT status, COALESCE(deleted,FALSE) AS deleted,
-                    COALESCE(rate_completed,FALSE) AS rate_completed
-             FROM trips WHERE id = $1`,
-            [tripId]
-          );
-          if (!current.rowCount) {
-            throw new AppError(404, `Trip ${tripId} not found`);
-          }
-          const c = current.rows[0];
-          if (c.rate_completed) {
-            throw new AppError(409, `Trip ${tripId} is already rate-locked`);
-          }
+        const row = locked.rows[0];
+        if (!row) {
+          throw new AppError(404, `Trip ${tripId} not found`);
+        }
+        if (row.rate_completed) {
+          return loadMappedTrip(client, tripId, true);
+        }
+        if (row.status !== "Completed" || row.deleted) {
           throw new AppError(
             422,
             `Trip ${tripId} is not eligible for Rate Entry (must be Completed and not deleted)`
           );
         }
 
-        const missing = await client.query<{ id: number; shop_name: string }>(
-          `SELECT id, shop_name FROM trip_deliveries
-           WHERE trip_id = $1 AND rate IS NULL
-           ORDER BY serial_no NULLS LAST, id`,
-          [tripId]
-        );
-        if (missing.rowCount) {
-          throw new AppError(422, "Every shop delivery must have a rate before locking", {
-            tripId,
-            missingDeliveries: missing.rows.map((r) => ({
-              deliveryId: num(r.id),
-              shopName: str(r.shop_name),
-            })),
-          });
+        if (data.rates?.length) {
+          await persistRates(client, tripId, data.rates);
         }
 
-        await client.query(
-          `UPDATE trips
-             SET rate_completed = TRUE,
-                 rate_locked_at = NOW(),
-                 rate_locked_by = COALESCE($2, rate_locked_by, 'system')
-           WHERE id = $1`,
-          [tripId, data.lockedBy ?? null]
-        );
-
-        const trip = await client.query(`SELECT * FROM trips WHERE id = $1`, [
-          tripId,
-        ]);
-        const deliveries = await loadDeliveries(client, tripId);
-        return mapTrip(trip.rows[0], deliveries);
+        await assertAllShopsHaveValidRates(client, tripId);
+        await stampLock(client, tripId, data.lockedBy ?? null);
+        return loadMappedTrip(client, tripId, true);
       } catch (err) {
         rethrowIfAppError(err);
         throw err;

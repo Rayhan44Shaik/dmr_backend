@@ -200,11 +200,55 @@ export interface RunningBalanceRow {
   runningBalance: number;
 }
 
+/** One Market Rate Master row (read-only reference) for a business date. */
+export interface RateEntryMarketRateWindowRow {
+  businessDate: string;
+  entered: boolean;
+  vij: number | null;
+  gun: number | null;
+  rp: number | null;
+  sneha: number | null;
+  vencobRate: number | null;
+  vencobVii: number | null;
+  vencobGun: number | null;
+  associationVii: number | null;
+  sizeColumns: Record<string, number | null>;
+}
+
+export interface RateEntryMarketRateMaster {
+  tripDate: string;
+  fromDate: string;
+  toDate: string;
+  additionalMetrics: Array<{
+    date: string;
+    entered: boolean;
+    vij: number | null;
+    gun: number | null;
+    rp: number | null;
+  }>;
+  companyRates: Array<{
+    date: string;
+    entered: boolean;
+    sneha: number | null;
+    vencobRate: number | null;
+    vencobVii: number | null;
+    vencobGun: number | null;
+    associationVii: number | null;
+  }>;
+  sizeCategoryBreakdown: Array<{
+    date: string;
+    entered: boolean;
+    columns: Record<string, number | null>;
+  }>;
+  sizeColumnKeys: string[];
+}
+
 export interface RateEntryMarketRate {
   shopId: number | null;
   shopName: string;
   birdTypeId: number | null;
   birdType: string;
+  /** VenCob R. from Market Rate Master for the trip date (read-only). */
   masterRate: number | null;
   lastTripRate: number | null;
   lastTripDate: string | null;
@@ -251,4 +295,7 @@ export interface RateEntryTrip {
   deliveriesCount: number;
   totalAmount: number;
   deliveries: RateEntryDelivery[];
+  /** Market Rate Master rows for tripDate-1, tripDate, tripDate+1 only. */
+  marketRatesWindow: RateEntryMarketRateWindowRow[];
+  marketRateMaster: RateEntryMarketRateMaster | null;
 }

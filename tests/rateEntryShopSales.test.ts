@@ -279,7 +279,8 @@ describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
     assert.equal(first.status, 200);
 
     const second = await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
-    assert.equal(second.status, 409, "second lock attempt must be rejected");
+    assert.equal(second.status, 200, "second lock attempt must be idempotent");
+    assert.equal(second.body.rateLocked, true);
 
     const shopSales = await getJson(baseUrl, "/api/operations/shop-sales");
     const rows = shopSales.body.filter((s: { tripId: number }) => s.tripId === trip.id);
