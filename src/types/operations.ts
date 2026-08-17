@@ -62,8 +62,13 @@ export interface ShopSale {
   birdType: string;
   tripId: number | null;
   tripNo: string;
+  shopNo: string;
   vehicleNo: string | null;
   farmName: string | null;
+  pickupBirds?: number;
+  pickupWeight?: number;
+  mortalityWeight?: number;
+  weightLoss?: number;
   birds: number;
   weight: number;
   rate: number;

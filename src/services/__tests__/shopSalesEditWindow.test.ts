@@ -20,6 +20,8 @@ function uniqueInt(): number {
   return uniqBase + ++uniqSeq;
 }
 
+const DAY = 24 * 60 * 60 * 1000;
+
 interface Fixture {
   tripIds: number[];
   shopIds: number[];
@@ -45,14 +47,26 @@ async function makeShop(f: Fixture): Promise<number> {
  * each test place the trip at an exact age relative to the 10-day window. */
 async function makeAgedTrip(f: Fixture, ageOffsetMs: number): Promise<{ tripId: number; deliveryId: number }> {
   const shopId = await makeShop(f);
+  const ageDays = Math.round(ageOffsetMs / DAY);
   const t = await pool.query<{ id: number }>(
-    `INSERT INTO trips (trip_no, trip_date, status, deleted, approved_at, total_birds, dc_weight)
-     VALUES ($1, CURRENT_DATE, 'Completed', FALSE, NOW() - ($2 || ' milliseconds')::interval, 1000, 2000)
+    `INSERT INTO trips (
+       trip_no, trip_date, status, deleted, approved_at, total_birds, dc_weight,
+       delivery_step_submitted, expenses_step_submitted
+     )
+     VALUES (
+       $1,
+       (CURRENT_DATE - ($2::int * INTERVAL '1 day'))::date,
+       'Completed', FALSE, NOW(), 50, 100, TRUE, TRUE
+     )
      RETURNING id`,
-    [`T-WIN-${uniqueInt()}`, String(ageOffsetMs)]
+    [`T-WIN-${uniqueInt()}`, String(ageDays)]
   );
   const tripId = t.rows[0].id;
   f.tripIds.push(tripId);
+  await pool.query(
+    `UPDATE trips SET delivery_step_submitted = TRUE, expenses_step_submitted = TRUE WHERE id = $1`,
+    [tripId]
+  );
   const d = await pool.query<{ id: number }>(
     `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate)
      VALUES ($1, $2, $3, $4, $5, $6, NULL)
@@ -60,12 +74,10 @@ async function makeAgedTrip(f: Fixture, ageOffsetMs: number): Promise<{ tripId: 
     [tripId, `SALE-${uniqueInt()}`, shopId, "window-shop", 50, 100]
   );
   const deliveryId = d.rows[0].id;
-  await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 40 }] });
+  await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 50 }] });
   await rateEntryService.lock(tripId, { lockedBy: "window-tester" });
   return { tripId, deliveryId };
 }
-
-const DAY = 24 * 60 * 60 * 1000;
 
 async function assertStatus(promise: Promise<unknown>, status: number): Promise<void> {
   await assert.rejects(promise, (err: unknown) => {
@@ -80,32 +92,32 @@ describe("10-day EDIT window (direct API/service calls, not frontend visibility)
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 0);
-    const updated = await shopSalesService.update(deliveryId, { birds: 51 });
-    assert.equal(updated.birds, 51);
+    const updated = await shopSalesService.update(deliveryId, { rate: 55 });
+    assert.equal(updated.rate, 55);
   });
 
   test("2. 1 day old: PASS", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 1 * DAY);
-    const updated = await shopSalesService.update(deliveryId, { birds: 51 });
-    assert.equal(updated.birds, 51);
+    const updated = await shopSalesService.update(deliveryId, { rate: 55 });
+    assert.equal(updated.rate, 55);
   });
 
   test("3. 5 days old: PASS", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 5 * DAY);
-    const updated = await shopSalesService.update(deliveryId, { birds: 51 });
-    assert.equal(updated.birds, 51);
+    const updated = await shopSalesService.update(deliveryId, { rate: 55 });
+    assert.equal(updated.rate, 55);
   });
 
   test("4. 9 days old: PASS", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 9 * DAY);
-    const updated = await shopSalesService.update(deliveryId, { birds: 51 });
-    assert.equal(updated.birds, 51);
+    const updated = await shopSalesService.update(deliveryId, { rate: 55 });
+    assert.equal(updated.rate, 55);
   });
 
   test("5. Exactly 10 days old: boundary is INCLUSIVE (existing rule: now <= anchor+10d) -> PASS", async (t) => {
@@ -115,37 +127,37 @@ describe("10-day EDIT window (direct API/service calls, not frontend visibility)
     // of real wall-clock time that elapses between fixture creation and the
     // assertion below, while still exercising the true boundary.
     const { deliveryId } = await makeAgedTrip(f, 10 * DAY - 5000);
-    const updated = await shopSalesService.update(deliveryId, { birds: 51 });
-    assert.equal(updated.birds, 51);
+    const updated = await shopSalesService.update(deliveryId, { rate: 55 });
+    assert.equal(updated.rate, 55);
   });
 
   test("6. 10 days + 1 day old: FAIL", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 11 * DAY);
-    await assertStatus(shopSalesService.update(deliveryId, { birds: 51 }), 409);
+    await assertStatus(shopSalesService.update(deliveryId, { rate: 55 }), 409);
   });
 
   test("7. 15 days old: FAIL", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 15 * DAY);
-    await assertStatus(shopSalesService.update(deliveryId, { birds: 51 }), 409);
+    await assertStatus(shopSalesService.update(deliveryId, { rate: 55 }), 409);
   });
 
   test("8. 30 days old: FAIL", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 30 * DAY);
-    await assertStatus(shopSalesService.update(deliveryId, { birds: 51 }), 409);
+    await assertStatus(shopSalesService.update(deliveryId, { rate: 55 }), 409);
   });
 
   test("9. Future-dated trip (approved_at in the future): existing rule computes an even-later expiry -> still editable", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, -5 * DAY); // approved 5 days in the future
-    const updated = await shopSalesService.update(deliveryId, { birds: 51 });
-    assert.equal(updated.birds, 51, "current rule does not reject a future-dated trip — documenting existing behavior as-is");
+    const updated = await shopSalesService.update(deliveryId, { rate: 55 });
+    assert.equal(updated.rate, 55, "future trip_date remains inside the inclusive 10-day window");
   });
 
   test("10. Direct API-level call (service function, bypassing any notion of a frontend) after the window closes: FAIL", async (t) => {

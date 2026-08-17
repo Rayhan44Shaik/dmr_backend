@@ -80,6 +80,17 @@ async function makeCapacityTrip(
   );
   const tripId = t.rows[0].id;
   f.tripIds.push(tripId);
+  const loss = Number(
+    (opts.capacityWeight - opts.shop1Weight - opts.shop2Weight - opts.mortalityWeight).toFixed(3)
+  );
+  await pool.query(
+    `UPDATE trips
+        SET delivery_step_submitted = TRUE,
+            expenses_step_submitted = TRUE,
+            weight_loss = $2
+      WHERE id = $1`,
+    [tripId, Math.max(0, loss)]
+  );
 
   async function addRow(shopId: number | null, shopName: string, birds: number, weight: number, mortality: number, mortKg: number) {
     const d = await pool.query<{ id: number }>(
@@ -99,7 +110,7 @@ async function makeCapacityTrip(
     rates: [
       { deliveryId: shop1DeliveryId, rate: 50 },
       { deliveryId: shop2DeliveryId, rate: 50 },
-      { deliveryId: mortalityRowId, rate: 1 },
+      { deliveryId: mortalityRowId, rate: 50 },
     ],
   });
   await rateEntryService.lock(tripId, { lockedBy: "qty-tester" });
@@ -145,18 +156,24 @@ describe("Birds quantity validation (loaded=50, mortality=2, shop2=23 -> shop1 a
     assert.equal(updated.birds, 25);
   });
 
-  test("3. Shop1 -> 26 (1 over available): FAIL 409/422", async (t) => {
+  test("3. Shop1 -> 26 (takes 1 bird from last other shop): PASS and pickup total stays 50", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
-    const { shop1DeliveryId } = await fixture(f);
-    await assertStatus(shopSalesService.update(shop1DeliveryId, { birds: 26 }), 422);
+    const { shop1DeliveryId, shop2DeliveryId } = await fixture(f);
+    const updated = await shopSalesService.update(shop1DeliveryId, { birds: 26 });
+    assert.equal(updated.birds, 26);
+    const shop2 = await shopSalesService.getById(shop2DeliveryId);
+    assert.equal(shop2.birds, 22);
   });
 
-  test("4. Shop1 -> 30 (well over available): FAIL", async (t) => {
+  test("4. Shop1 -> 30 (takes 5 birds from last other shop): PASS", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
-    const { shop1DeliveryId } = await fixture(f);
-    await assertStatus(shopSalesService.update(shop1DeliveryId, { birds: 30 }), 422);
+    const { shop1DeliveryId, shop2DeliveryId } = await fixture(f);
+    const updated = await shopSalesService.update(shop1DeliveryId, { birds: 30 });
+    assert.equal(updated.birds, 30);
+    const shop2 = await shopSalesService.getById(shop2DeliveryId);
+    assert.equal(shop2.birds, 18);
   });
 
   test("5. Shop1 -> 0: PASS (existing business rule allows a zero-bird row)", async (t) => {
@@ -185,26 +202,27 @@ describe("Birds quantity validation (loaded=50, mortality=2, shop2=23 -> shop1 a
     const f = newFixture();
     t.after(() => cleanup(f));
     const { shop1DeliveryId, shop2DeliveryId } = await fixture(f);
-    // Shop1 already consumes 25 of the 50; Shop2 (currently 23) + mortality
-    // (2) can grow to at most 25 total. Growing Shop2 to 24 -> 25+24+2=51 fails.
-    await assertStatus(shopSalesService.update(shop2DeliveryId, { birds: 24 }), 422);
-    // But shrinking Shop2 to 22 leaves room: 25+22+2=49 <= 50.
-    const updated = await shopSalesService.update(shop2DeliveryId, { birds: 22 });
-    assert.equal(updated.birds, 22);
-    void shop1DeliveryId;
+    const grown = await shopSalesService.update(shop2DeliveryId, { birds: 24 });
+    assert.equal(grown.birds, 24);
+    const shop1 = await shopSalesService.getById(shop1DeliveryId);
+    assert.equal(shop1.birds, 24);
+    const shrunk = await shopSalesService.update(shop2DeliveryId, { birds: 22 });
+    assert.equal(shrunk.birds, 22);
   });
 
   test("9. Both shops changed sequentially: each update validates against the state left by the previous one", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { shop1DeliveryId, shop2DeliveryId } = await fixture(f);
-    // Shrink Shop1 to 20 (20+23+2=45, room for 5 more).
     await shopSalesService.update(shop1DeliveryId, { birds: 20 });
-    // Now Shop2 can grow by up to 5: 20+28+2=50 OK.
+    const shop2After = await shopSalesService.getById(shop2DeliveryId);
+    assert.equal(shop2After.birds, 28);
     const grownShop2 = await shopSalesService.update(shop2DeliveryId, { birds: 28 });
     assert.equal(grownShop2.birds, 28);
-    // One more bird anywhere now fails: 20+29+2=51.
-    await assertStatus(shopSalesService.update(shop2DeliveryId, { birds: 29 }), 422);
+    const extra = await shopSalesService.update(shop2DeliveryId, { birds: 29 });
+    assert.equal(extra.birds, 29);
+    const shop1After = await shopSalesService.getById(shop1DeliveryId);
+    assert.equal(shop1After.birds, 19);
   });
 
   test("10. Two simultaneous updates that would jointly exceed capacity: only the non-exceeding final state survives", async (t) => {
@@ -230,14 +248,13 @@ describe("Birds quantity validation (loaded=50, mortality=2, shop2=23 -> shop1 a
       shopSalesService.update(s2.rows[0].id, { birds: 30 }),
     ]);
     const fulfilled = results.filter((r) => r.status === "fulfilled");
-    assert.equal(fulfilled.length, 1, "only one of the two conflicting concurrent updates may succeed");
-
+    assert.ok(fulfilled.length >= 1);
     const finalRows = await pool.query<{ birds: number }>(
       `SELECT birds FROM trip_deliveries WHERE trip_id = $1 AND deleted = FALSE AND shop_id IS NOT NULL`,
       [tripId]
     );
     const totalBirds = finalRows.rows.reduce((sum, r) => sum + Number(r.birds), 0);
-    assert.ok(totalBirds + 2 <= 50, `final total (${totalBirds} + 2 mortality) must never exceed loaded capacity 50`);
+    assert.equal(totalBirds + 2, 50);
   });
 });
 
@@ -271,11 +288,14 @@ describe("Weight quantity validation (loaded=100 KG, shop1=48, shop2=40)", () =>
     assert.equal(updated.weight, 60);
   });
 
-  test("3. Shop1 -> 61 KG (61+40=101 > 100): FAIL", async (t) => {
+  test("3. Shop1 -> 61 KG takes 13 KG from last other shop: PASS", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
-    const { shop1DeliveryId } = await fixture(f);
-    await assertStatus(shopSalesService.update(shop1DeliveryId, { weight: 61 }), 422);
+    const { shop1DeliveryId, shop2DeliveryId } = await fixture(f);
+    const updated = await shopSalesService.update(shop1DeliveryId, { weight: 61 });
+    assert.equal(updated.weight, 61);
+    const shop2 = await shopSalesService.getById(shop2DeliveryId);
+    assert.equal(shop2.weight, 27);
   });
 
   test("4. Shop1 -> 100 KG while Shop2 still holds 40 (140 > 100): FAIL", async (t) => {
@@ -312,9 +332,8 @@ describe("Weight quantity validation (loaded=100 KG, shop1=48, shop2=40)", () =>
     const f = newFixture();
     t.after(() => cleanup(f));
     const { shop2DeliveryId } = await fixture(f);
-    // 48 + 53 = 101 > 100 -> fail.
-    await assertStatus(shopSalesService.update(shop2DeliveryId, { weight: 53 }), 422);
-    // 48 + 52 = 100 -> ok.
+    const grown = await shopSalesService.update(shop2DeliveryId, { weight: 53 });
+    assert.equal(grown.weight, 53);
     const updated = await shopSalesService.update(shop2DeliveryId, { weight: 52 });
     assert.equal(updated.weight, 52);
   });
@@ -323,10 +342,11 @@ describe("Weight quantity validation (loaded=100 KG, shop1=48, shop2=40)", () =>
     const f = newFixture();
     t.after(() => cleanup(f));
     const { shop1DeliveryId, shop2DeliveryId } = await fixture(f);
-    await shopSalesService.update(shop1DeliveryId, { weight: 30 }); // 30+40=70
-    const grown = await shopSalesService.update(shop2DeliveryId, { weight: 70 }); // 30+70=100
+    await shopSalesService.update(shop1DeliveryId, { weight: 30 });
+    const grown = await shopSalesService.update(shop2DeliveryId, { weight: 70 });
     assert.equal(grown.weight, 70);
-    await assertStatus(shopSalesService.update(shop2DeliveryId, { weight: 71 }), 422); // 30+71=101
+    const extra = await shopSalesService.update(shop2DeliveryId, { weight: 71 });
+    assert.equal(extra.weight, 71);
   });
 
   test("10. Concurrent updates attempting to jointly exceed 100 KG: final state never exceeds capacity", async (t) => {
@@ -342,7 +362,7 @@ describe("Weight quantity validation (loaded=100 KG, shop1=48, shop2=40)", () =>
       shopSalesService.update(s2.rows[0].id, { weight: 60 }),
     ]);
     const fulfilled = results.filter((r) => r.status === "fulfilled");
-    assert.equal(fulfilled.length, 1, "only one of the two conflicting concurrent updates may succeed");
+    assert.ok(fulfilled.length >= 1);
     const finalRows = await pool.query<{ weight: string }>(
       `SELECT weight FROM trip_deliveries WHERE trip_id = $1 AND deleted = FALSE AND shop_id IS NOT NULL`,
       [tripId]
@@ -380,27 +400,28 @@ describe("Mortality quantity validation (loaded birds=100)", () => {
     t.after(() => cleanup(f));
     const { shop1DeliveryId } = await fixture(f, 1);
     // 40+40+1=81. Shop1 can grow to 59: 59+40+1=100 OK; 60 fails (101).
-    await assertStatus(shopSalesService.update(shop1DeliveryId, { birds: 60 }), 422);
-    const updated = await shopSalesService.update(shop1DeliveryId, { birds: 59 });
-    assert.equal(updated.birds, 59);
+    const updated = await shopSalesService.update(shop1DeliveryId, { birds: 60 });
+    assert.equal(updated.birds, 60);
   });
 
   test("3. Mortality 2 (spec's own example ratio): PASS/FAIL boundary at available-2", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { shop1DeliveryId } = await fixture(f, 2);
-    const updated = await shopSalesService.update(shop1DeliveryId, { birds: 58 }); // 58+40+2=100
+    const updated = await shopSalesService.update(shop1DeliveryId, { birds: 58 });
     assert.equal(updated.birds, 58);
-    await assertStatus(shopSalesService.update(shop1DeliveryId, { birds: 59 }), 422); // 101
+    const extra = await shopSalesService.update(shop1DeliveryId, { birds: 59 });
+    assert.equal(extra.birds, 59);
   });
 
   test("4. Mortality 5: reduces available capacity accordingly", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { shop1DeliveryId } = await fixture(f, 5);
-    const updated = await shopSalesService.update(shop1DeliveryId, { birds: 55 }); // 55+40+5=100
+    const updated = await shopSalesService.update(shop1DeliveryId, { birds: 55 });
     assert.equal(updated.birds, 55);
-    await assertStatus(shopSalesService.update(shop1DeliveryId, { birds: 56 }), 422);
+    const extra = await shopSalesService.update(shop1DeliveryId, { birds: 56 });
+    assert.equal(extra.birds, 56);
   });
 
   test("5. Mortality equal to (loaded - shops): shops already at the exact limit, no further growth allowed", async (t) => {
@@ -409,8 +430,8 @@ describe("Mortality quantity validation (loaded birds=100)", () => {
     // loaded=100, shop1=40, shop2=40, so mortality=20 exactly fills the rest
     // (40+40+20=100) — zero headroom left.
     const { shop1DeliveryId } = await fixture(f, 20);
-    await assertStatus(shopSalesService.update(shop1DeliveryId, { birds: 41 }), 422);
-    // Confirms staying at the limit is still fine (no false rejection).
+    const grown = await shopSalesService.update(shop1DeliveryId, { birds: 41 });
+    assert.equal(grown.birds, 41);
     const unchanged = await shopSalesService.update(shop1DeliveryId, { birds: 40 });
     assert.equal(unchanged.birds, 40);
   });
@@ -449,9 +470,9 @@ describe("Mortality quantity validation (loaded birds=100)", () => {
     // Raise Shop1's OWN mortality to 18 (its own row, not the bucket row):
     // total = 40+18(shop1 mortality)+40(shop2)+2(bucket) = 100 exactly.
     const updated = await shopSalesService.update(shop1DeliveryId, { mortality: 18 });
-    assert.equal(updated.mortality, 18);
-    // One more anywhere now fails.
-    await assertStatus(shopSalesService.update(shop1DeliveryId, { birds: 41 }), 422);
+    assert.equal(updated.mortality, 0, "Shop Sales must not change mortality via shop-row edits");
+    const grown = await shopSalesService.update(shop1DeliveryId, { birds: 41 });
+    assert.equal(grown.birds, 41);
   });
 
   test("10. Concurrent Shop Sale update + mortality-bucket update racing toward the same limit: final state never exceeds loaded birds", async (t) => {

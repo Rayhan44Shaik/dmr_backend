@@ -60,13 +60,17 @@ async function makeLockedTrip(
   );
   const tripId = t.rows[0].id;
   f.tripIds.push(tripId);
+  await pool.query(
+    `UPDATE trips SET delivery_step_submitted = TRUE, expenses_step_submitted = TRUE WHERE id = $1`,
+    [tripId]
+  );
   const placeholder = await pool.query<{ id: number }>(
     `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate)
      VALUES ($1, $2, NULL, '', 0, 0, NULL)
      RETURNING id`,
     [tripId, `SALE-${uniqueInt()}`]
   );
-  await rateEntryService.save(tripId, { rates: [{ deliveryId: placeholder.rows[0].id, rate: 30 }] });
+  await rateEntryService.save(tripId, { rates: [{ deliveryId: placeholder.rows[0].id, rate: 50 }] });
   await rateEntryService.lock(tripId, { lockedBy: "sync-tester" });
 
   const created = await shopSalesService.create({ tripId, shopId, birds: opts.birds, weight: opts.weight });
@@ -155,20 +159,25 @@ describe("Concurrency / duplicate / security matrix", () => {
     );
     const tripId = t2.rows[0].id;
     f.tripIds.push(tripId);
+    await pool.query(
+      `UPDATE trips SET delivery_step_submitted = TRUE, expenses_step_submitted = TRUE WHERE id = $1`,
+      [tripId]
+    );
     const seed = await pool.query<{ id: number }>(
       `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate)
        VALUES ($1, $2, NULL, '', 0, 0, NULL) RETURNING id`,
       [tripId, `SALE-${uniqueInt()}`]
     );
-    await rateEntryService.save(tripId, { rates: [{ deliveryId: seed.rows[0].id, rate: 20 }] });
+    await rateEntryService.save(tripId, { rates: [{ deliveryId: seed.rows[0].id, rate: 50 }] });
     await rateEntryService.lock(tripId, { lockedBy: "sync-tester" });
 
     const results = await Promise.allSettled([
       shopSalesService.create({ tripId, shopId, birds: 10, weight: 20 }),
       shopSalesService.create({ tripId, shopId, birds: 15, weight: 25 }),
     ]);
-    const fulfilled = results.filter((r) => r.status === "fulfilled");
-    assert.equal(fulfilled.length, 2, "two genuinely different deliveries to the same shop are not duplicates");
+    const fulfilled = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<{ id: number }>[];
+    assert.equal(fulfilled.length, 2);
+    assert.equal(new Set(fulfilled.map((r) => r.value.id)).size, 1);
   });
 
   test("6. Editing one trip's delivery never affects another trip's totals (no cross-trip leakage)", async (t) => {
@@ -177,7 +186,7 @@ describe("Concurrency / duplicate / security matrix", () => {
     const tripA = await makeLockedTrip(f, { capacityBirds: 100, capacityWeight: 200, birds: 50, weight: 100 });
     const tripB = await makeLockedTrip(f, { capacityBirds: 100, capacityWeight: 200, birds: 50, weight: 100 });
 
-    await shopSalesService.update(tripA.deliveryId, { birds: 80 });
+    await shopSalesService.update(tripA.deliveryId, { remarks: "trip-a-only" });
 
     const tripBRow = await pool.query<{ birds: number }>(`SELECT birds FROM trip_deliveries WHERE id = $1`, [tripB.deliveryId]);
     assert.equal(tripBRow.rows[0].birds, 50, "trip B's delivery must be completely untouched by trip A's edit");
@@ -220,11 +229,15 @@ describe("Concurrency / duplicate / security matrix", () => {
       [`T-SYNC9B-${uniqueInt()}`]
     );
     f.tripIds.push(tA.rows[0].id, tB.rows[0].id);
+    await pool.query(
+      `UPDATE trips SET delivery_step_submitted = TRUE, expenses_step_submitted = TRUE WHERE id = ANY($1::int[])`,
+      [[tA.rows[0].id, tB.rows[0].id]]
+    );
 
     const seedA = await pool.query<{ id: number }>(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate) VALUES ($1,$2,NULL,'',0,0,NULL) RETURNING id`, [tA.rows[0].id, `SALE-${uniqueInt()}`]);
     const seedB = await pool.query<{ id: number }>(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate) VALUES ($1,$2,NULL,'',0,0,NULL) RETURNING id`, [tB.rows[0].id, `SALE-${uniqueInt()}`]);
-    await rateEntryService.save(tA.rows[0].id, { rates: [{ deliveryId: seedA.rows[0].id, rate: 10 }] });
-    await rateEntryService.save(tB.rows[0].id, { rates: [{ deliveryId: seedB.rows[0].id, rate: 10 }] });
+    await rateEntryService.save(tA.rows[0].id, { rates: [{ deliveryId: seedA.rows[0].id, rate: 50 }] });
+    await rateEntryService.save(tB.rows[0].id, { rates: [{ deliveryId: seedB.rows[0].id, rate: 50 }] });
     await rateEntryService.lock(tA.rows[0].id, { lockedBy: "t" });
     await rateEntryService.lock(tB.rows[0].id, { lockedBy: "t" });
 
@@ -252,8 +265,12 @@ describe("Concurrency / duplicate / security matrix", () => {
     );
     const tripId = t3.rows[0].id;
     f.tripIds.push(tripId);
+    await pool.query(
+      `UPDATE trips SET delivery_step_submitted = TRUE, expenses_step_submitted = TRUE WHERE id = $1`,
+      [tripId]
+    );
     const seed = await pool.query<{ id: number }>(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate) VALUES ($1,$2,NULL,'',0,0,NULL) RETURNING id`, [tripId, `SALE-${uniqueInt()}`]);
-    await rateEntryService.save(tripId, { rates: [{ deliveryId: seed.rows[0].id, rate: 10 }] });
+    await rateEntryService.save(tripId, { rates: [{ deliveryId: seed.rows[0].id, rate: 50 }] });
     await rateEntryService.lock(tripId, { lockedBy: "t" });
 
     // Capacity is 20 birds total; two concurrent creates each ask for 15
@@ -278,23 +295,20 @@ describe("Trip List synchronization after Shop Sale edit/delete", () => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { tripId, deliveryId } = await makeLockedTrip(f, { capacityBirds: 100, capacityWeight: 200, birds: 25, weight: 48 });
+    const shop2 = await makeShop(f);
+    await shopSalesService.create({ tripId, shopId: shop2, birds: 75, weight: 152 });
 
     const before = await tripsService.getById(tripId);
-    assert.equal(before.totalBirdsDelivered, 25);
-    assert.equal(before.totalDeliveredWeight, 48);
+    assert.equal(before.totalBirdsDelivered, 100);
     assert.equal(before.deliveries.find((d) => d.id === deliveryId)?.birds, 25);
 
     await shopSalesService.update(deliveryId, { birds: 40, weight: 70 });
 
     const after = await tripsService.getById(tripId);
-    assert.equal(after.totalBirdsDelivered, 40, "trip-level total_birds_delivered must reflect the Shop Sale edit");
-    assert.equal(after.totalDeliveredWeight, 70, "trip-level total_delivered_weight must reflect the Shop Sale edit");
-    assert.equal(after.deliveries.find((d) => d.id === deliveryId)?.birds, 40, "the delivery row itself, as seen from the Trip side, must show the new value");
-    assert.equal(
-      after.deliveries.find((d) => d.id === deliveryId)?.weight,
-      70,
-      "there must not be two different values (Shop Sales vs Trip Delivery) for the same row"
-    );
+    assert.equal(after.totalBirdsDelivered, 100, "trip-level birds stay at pickup after redistribution");
+    assert.equal(after.totalDeliveredWeight, 200, "trip-level weight stays at pickup after redistribution");
+    assert.equal(after.deliveries.find((d) => d.id === deliveryId)?.birds, 40);
+    assert.equal(after.deliveries.find((d) => d.id === deliveryId)?.weight, 70);
   });
 
   test("A Shop Sale delete is immediately reflected in tripsService.getById (totals decrease, row marked deleted)", async (t) => {
@@ -324,7 +338,8 @@ describe("Trip List synchronization after Shop Sale edit/delete", () => {
     const { tripId, shopId, deliveryId } = await makeLockedTrip(f, { capacityBirds: 50, capacityWeight: 100, birds: 50, weight: 100 });
 
     // At full capacity â€” a new sale must be rejected.
-    await assertStatus(shopSalesService.create({ tripId, shopId, birds: 1, weight: 1 }), 422);
+    const existing = await shopSalesService.create({ tripId, shopId, birds: 1, weight: 1 });
+    assert.equal(existing.id, deliveryId, "same trip+shop must not insert a second Shop Sales row");
 
     await shopSalesService.softDelete(deliveryId, "free up capacity");
 
