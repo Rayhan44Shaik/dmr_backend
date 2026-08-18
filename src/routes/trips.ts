@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
+import { deliveryEmailService } from "../services/deliveryEmailService.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { validateStepSubmit } from "../validation/trips.js";
@@ -76,6 +77,13 @@ tripsRouter.get(
 );
 
 tripsRouter.get(
+  "/:id/delivery-emails",
+  asyncHandler(async (req, res) => {
+    res.json(await deliveryEmailService.listForTrip(Number(req.params.id)));
+  })
+);
+
+tripsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
     res.json(await tripsService.getById(Number(req.params.id)));
@@ -129,6 +137,18 @@ tripsRouter.put(
   "/:id/deliveries",
   asyncHandler(async (req, res) => {
     res.json(await tripsService.saveDeliveries(Number(req.params.id), req.body));
+  })
+);
+
+tripsRouter.post(
+  "/:id/deliveries/:deliveryId/email",
+  asyncHandler(async (req, res) => {
+    const result = await deliveryEmailService.sendDeliveryEmail(
+      Number(req.params.id),
+      Number(req.params.deliveryId),
+      req.body ?? {}
+    );
+    res.json(result);
   })
 );
 

@@ -345,9 +345,16 @@ export const vehicleEmiService = {
       FROM vehicles v
       LEFT JOIN vehicle_emis e ON e.vehicle_id = v.id
       WHERE v.status = 'Active'
-      ORDER BY v.vehicle_number
     `);
-    return result.rows.map(mapOverviewRow);
+    // Deterministic default order for the EMI page: PENDING first, then
+    // COMPLETED; within each group vehicle number A → Z.
+    const rows = result.rows.map(mapOverviewRow);
+    const statusRank: Record<EmiOverview["status"], number> = { pending: 0, completed: 1 };
+    return rows.sort((a, b) => {
+      const rankDiff = statusRank[a.status] - statusRank[b.status];
+      if (rankDiff !== 0) return rankDiff;
+      return a.vehicleNo.localeCompare(b.vehicleNo);
+    });
   },
 
   async getById(id: number): Promise<VehicleEMI> {

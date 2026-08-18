@@ -315,5 +315,15 @@ describe("Fleet EMI overview (Vehicle-Master-derived)", () => {
       assert.ok(rowFor(first, vehicleNo), `${vehicleNo} present`);
     }
     assert.equal(first.filter((r: any) => r.status === "completed").length, 1); // OV-2
+
+    // Default order is PENDING first, then COMPLETED (deterministic).
+    const statuses = first.map((r: any) => r.status);
+    const firstCompletedIndex = statuses.indexOf("completed");
+    if (firstCompletedIndex !== -1) {
+      assert.equal(statuses.indexOf("pending", firstCompletedIndex), -1, "pending before completed");
+    }
+    // Within each group vehicle number is ascending.
+    const pendingNos = first.filter((r: any) => r.status === "pending").map((r: any) => r.vehicleNo);
+    assert.deepEqual(pendingNos, [...pendingNos].sort());
   });
 });
