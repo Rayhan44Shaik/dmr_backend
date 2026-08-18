@@ -16,6 +16,7 @@ import {
 import { parsePagination } from "../utils/pagination.js";
 import {
   getLatestVehicleMeter,
+  listLatestVehicleMeters,
   listVehicleMeterHistory,
 } from "../utils/vehicleMeterLedger.js";
 
@@ -63,6 +64,15 @@ function bodyAndFiles(
 // Backs the Vehicle History meter timeline and the "Latest Meter: X KM" hint
 // shown on Fuel Entry / Maintenance Entry vehicle selection. Read-only —
 // derived from trips + fuel_expenses + fleet_maintenance, never written to.
+// NOTE: registered before the /:vehicleId routes so "meter-summary" is never
+// parsed as a vehicle id.
+fleetRouter.get(
+  "/vehicles/meter-summary",
+  asyncHandler(async (_req, res) => {
+    res.json(await listLatestVehicleMeters());
+  })
+);
+
 fleetRouter.get(
   "/vehicles/:vehicleId/meter-history",
   asyncHandler(async (req, res) => {

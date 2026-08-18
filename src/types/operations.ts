@@ -157,6 +157,61 @@ export interface CollectionEntry {
   updatedAt?: string | null;
 }
 
+/** Pending Collection main-table row. Derived from Collection Entry accounting. */
+export interface PendingCollectionSummaryRow {
+  shopId: number;
+  shopName: string;
+  weekStart: string;
+  weekEnd: string;
+  /** Previous week's closing (shops.opening_balance + ledger before week start). NOT shops.opening_balance. */
+  openingBalance: number;
+  /** Weekly outstanding (opening + sales − approved). May be negative. */
+  balance: number;
+  weeklySales: number;
+  weeklyApprovedCollections: number;
+  weeklyPendingCollections: number;
+  recoveryPercentage: number;
+  /** Reserved. Always null until an overdue rule is defined. */
+  overdueDays: null;
+  hasPendingCollections: boolean;
+}
+
+/** Collection row for the Pending Collection detail (latest 10). */
+export interface PendingCollectionRecentEntry extends CollectionEntry {
+  /** Backend-enforced: CURRENT_DATE <= collection_date + 7. */
+  canDelete: boolean;
+}
+
+/** Collection Report — official financial breakdown for GET /collection-entry/report.
+ * Aggregated server-side over Approved, non-deleted collections in [fromDate, toDate]. */
+export interface CollectionReportPaymentModeRow {
+  paymentMode: string;
+  count: number;
+  amount: number;
+  /** Share of totalAmount, 0–100 (uncapped, 0 when totalAmount is 0). */
+  percentage: number;
+}
+
+export interface CollectionReportCollectorRow {
+  collector: string;
+  /** Amount collected per payment mode, keyed by the exact payment_mode value. */
+  amounts: Record<string, number>;
+  total: number;
+}
+
+export interface CollectionReportSummary {
+  fromDate: string;
+  toDate: string;
+  totalAmount: number;
+  totalCount: number;
+  /** Distinct collectors across the full filtered set. */
+  totalCollectors: number;
+  paymentModeSummary: CollectionReportPaymentModeRow[];
+  /** Distinct collector count per payment mode (for headcount widgets — not a financial total). */
+  collectorsByPaymentMode: { paymentMode: string; collectorCount: number }[];
+  collectorSummary: CollectionReportCollectorRow[];
+}
+
 export type FuelSourceType = "TRIP" | "MANUAL";
 
 export interface FuelExpense {
@@ -180,6 +235,10 @@ export interface FuelExpense {
   pumpName: string;
   bunkAddress?: string | null;
   remarks?: string | null;
+  gpsLat?: number | null;
+  gpsLon?: number | null;
+  gpsAccuracy?: number | null;
+  gpsCapturedAt?: string | null;
   status: OpsRecordStatus;
   imageData?: string | null;
   imageName?: string | null;

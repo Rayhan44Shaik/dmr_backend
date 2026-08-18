@@ -58,7 +58,8 @@ async function main() {
 
     for (const t of trips.rows) {
       const dieselRows = await client.query(
-        `SELECT row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name
+        `SELECT row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name,
+                gps_lat, gps_lon, gps_accuracy, gps_captured_at
          FROM trip_diesel_entries WHERE trip_id = $1 ORDER BY row_index`,
         [t.id]
       );
@@ -71,6 +72,10 @@ async function main() {
         bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
         imageData: r.image_data == null ? null : str(r.image_data),
         imageName: r.image_name == null ? null : str(r.image_name),
+        gpsLat: r.gps_lat == null ? null : num(r.gps_lat),
+        gpsLon: r.gps_lon == null ? null : num(r.gps_lon),
+        gpsAccuracy: r.gps_accuracy == null ? null : num(r.gps_accuracy),
+        gpsCapturedAt: r.gps_captured_at == null ? null : str(r.gps_captured_at),
       }));
 
       const before = await client.query(
@@ -79,6 +84,7 @@ async function main() {
       );
 
       await withTransaction(async (txClient) => {
+        const tripRow = await txClient.query(`SELECT status FROM trips WHERE id = $1`, [t.id]);
         await syncDieselToFuelExpenses(txClient, t.id, dateOnly(t.trip_date) ?? "", entries, {
           vehicleId: t.vehicle_id == null ? null : num(t.vehicle_id),
           vehicleNo: t.vehicle_no == null ? null : str(t.vehicle_no),
@@ -87,12 +93,10 @@ async function main() {
           supervisorId: t.supervisor_id == null ? null : num(t.supervisor_id),
           supervisorName: t.supervisor_name == null ? null : str(t.supervisor_name),
           createdBy: "reconciliation-script",
+          tripStatus: str(tripRow.rows[0]?.status),
+          tripNo: t.trip_no == null ? null : str(t.trip_no),
         });
 
-        // Match the trip's current status: if the trip is already Completed,
-        // its fuel bills should already be Approved (matching the auto-approve
-        // rule), not left dangling as Pending.
-        const tripRow = await txClient.query(`SELECT status FROM trips WHERE id = $1`, [t.id]);
         if (str(tripRow.rows[0]?.status) === "Completed") {
           await txClient.query(
             `UPDATE fuel_expenses

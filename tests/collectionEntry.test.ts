@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { postJson, patchJson, startApp, type TestApp } from "./helpers/app.js";
+import { postJson, patchJson, getJson, startApp, type TestApp } from "./helpers/app.js";
 import { applySchema, markTripCompletedForTests, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
@@ -758,5 +758,222 @@ describe("Collection weekly-summary (derived Monday–Sunday)", () => {
     const httpBody = (await http.json()) as { currentOutstanding: number; openingBalance: number };
     assert.equal(httpBody.openingBalance, w2.openingBalance);
     assert.equal(httpBody.currentOutstanding, w2.currentOutstanding);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Collection Report — GET /collection-entry/report. Official financial
+// totals (payment mode + collector breakdown) for the Collection Report
+// page/PDF/Excel export. Must be backend-authoritative: Approved + not
+// deleted only, filtered by the requested date range/shop/collector/mode.
+// ---------------------------------------------------------------------------
+describe("Collection Report (official financial totals)", () => {
+  it("aggregates approved collections by payment mode with correct percentages", async () => {
+    const shop = await seedShop(0);
+    const a = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 1000, paymentMode: "Cash", collector: "Ravi",
+    });
+    await collectionEntryService.approve(a.id);
+    const b = await collectionEntryService.create({
+      collectionDate: "2026-08-11", shopId: shop.id, amount: 500, paymentMode: "Cash", collector: "Ravi",
+    });
+    await collectionEntryService.approve(b.id);
+    const c = await collectionEntryService.create({
+      collectionDate: "2026-08-12", shopId: shop.id, amount: 500, paymentMode: "Union Bank", collector: "Sita",
+    });
+    await collectionEntryService.approve(c.id);
+
+    const res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/report?fromDate=2026-08-10&toDate=2026-08-16&shopId=${shop.id}`
+    );
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const body = res.body as {
+      totalAmount: number;
+      totalCount: number;
+      totalCollectors: number;
+      paymentModeSummary: { paymentMode: string; count: number; amount: number; percentage: number }[];
+    };
+    assert.equal(body.totalAmount, 2000);
+    assert.equal(body.totalCount, 3);
+    assert.equal(body.totalCollectors, 2);
+    const cash = body.paymentModeSummary.find((r) => r.paymentMode === "Cash");
+    const bank = body.paymentModeSummary.find((r) => r.paymentMode === "Union Bank");
+    assert.ok(cash && bank);
+    assert.equal(cash!.amount, 1500);
+    assert.equal(cash!.count, 2);
+    assert.equal(cash!.percentage, 75);
+    assert.equal(bank!.amount, 500);
+    assert.equal(bank!.percentage, 25);
+  });
+
+  it("excludes Pending Approval and deleted collections from official totals", async () => {
+    const shop = await seedShop(0);
+    const approved = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 1000, paymentMode: "Cash", collector: "Ravi",
+    });
+    await collectionEntryService.approve(approved.id);
+    await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 999, paymentMode: "Cash", collector: "Ravi",
+    }); // left Pending — must not count
+
+    const toDelete = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 777, paymentMode: "Cash", collector: "Ravi",
+    });
+    await collectionEntryService.approve(toDelete.id);
+    await collectionEntryService.softDelete(toDelete.id, { reason: "test cleanup" });
+
+    const res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/report?fromDate=2026-08-10&toDate=2026-08-10&shopId=${shop.id}`
+    );
+    const body = res.body as { totalAmount: number; totalCount: number };
+    assert.equal(body.totalAmount, 1000);
+    assert.equal(body.totalCount, 1);
+  });
+
+  it("aggregates by collector across payment modes (collectorSummary)", async () => {
+    const shop = await seedShop(0);
+    const a = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 1000, paymentMode: "Cash", collector: "Ravi",
+    });
+    await collectionEntryService.approve(a.id);
+    const b = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 300, paymentMode: "Union Bank", collector: "Ravi",
+    });
+    await collectionEntryService.approve(b.id);
+    const c = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 200, paymentMode: "Cash", collector: "Sita",
+    });
+    await collectionEntryService.approve(c.id);
+
+    const res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/report?fromDate=2026-08-10&toDate=2026-08-10&shopId=${shop.id}`
+    );
+    const body = res.body as {
+      collectorSummary: { collector: string; amounts: Record<string, number>; total: number }[];
+    };
+    const ravi = body.collectorSummary.find((r) => r.collector === "Ravi");
+    const sita = body.collectorSummary.find((r) => r.collector === "Sita");
+    assert.ok(ravi && sita);
+    assert.equal(ravi!.total, 1300);
+    assert.equal(ravi!.amounts["Cash"], 1000);
+    assert.equal(ravi!.amounts["Union Bank"], 300);
+    assert.equal(sita!.total, 200);
+    assert.equal(sita!.amounts["Cash"], 200);
+  });
+
+  it("respects the shopId filter", async () => {
+    const shop1 = await seedShop(0);
+    const shop2 = await seedShop(0);
+    const a = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop1.id, amount: 1000,
+    });
+    await collectionEntryService.approve(a.id);
+    const b = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop2.id, amount: 4000,
+    });
+    await collectionEntryService.approve(b.id);
+
+    const res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/report?fromDate=2026-08-10&toDate=2026-08-10&shopId=${shop1.id}`
+    );
+    const body = res.body as { totalAmount: number; totalCount: number };
+    assert.equal(body.totalAmount, 1000);
+    assert.equal(body.totalCount, 1);
+  });
+
+  it("respects the date range — excludes collections outside [fromDate, toDate]", async () => {
+    const shop = await seedShop(0);
+    const inside = await collectionEntryService.create({
+      collectionDate: "2026-08-12", shopId: shop.id, amount: 1000,
+    });
+    await collectionEntryService.approve(inside.id);
+    const outside = await collectionEntryService.create({
+      collectionDate: "2026-08-25", shopId: shop.id, amount: 9000,
+    });
+    await collectionEntryService.approve(outside.id);
+
+    const res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/report?fromDate=2026-08-10&toDate=2026-08-16&shopId=${shop.id}`
+    );
+    const body = res.body as { totalAmount: number; totalCount: number };
+    assert.equal(body.totalAmount, 1000);
+    assert.equal(body.totalCount, 1);
+  });
+
+  it("late approval — a collection is attributed by collection_date, not the approval timestamp", async () => {
+    const shop = await seedShop(0);
+    // collectionDate falls inside the report's range even though we approve it "later" in test time.
+    const backdated = await collectionEntryService.create({
+      collectionDate: "2026-08-11", shopId: shop.id, amount: 2500,
+    });
+    // Simulate late approval: nothing about approve() uses "now" for attribution.
+    await collectionEntryService.approve(backdated.id);
+
+    const res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/report?fromDate=2026-08-10&toDate=2026-08-16&shopId=${shop.id}`
+    );
+    const body = res.body as { totalAmount: number };
+    assert.equal(body.totalAmount, 2500);
+
+    const outsideRes = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/report?fromDate=2026-08-17&toDate=2026-08-23&shopId=${shop.id}`
+    );
+    const outsideBody = outsideRes.body as { totalAmount: number };
+    assert.equal(outsideBody.totalAmount, 0);
+  });
+
+  it("returns zeroed totals (no NaN/Infinity) for an empty range", async () => {
+    const res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/report?fromDate=2099-01-01&toDate=2099-01-07`
+    );
+    const body = res.body as {
+      totalAmount: number;
+      totalCount: number;
+      totalCollectors: number;
+      paymentModeSummary: unknown[];
+      collectorSummary: unknown[];
+    };
+    assert.equal(body.totalAmount, 0);
+    assert.equal(body.totalCount, 0);
+    assert.equal(body.totalCollectors, 0);
+    assert.deepEqual(body.paymentModeSummary, []);
+    assert.deepEqual(body.collectorSummary, []);
+  });
+
+  it("paymentMode=Others aggregates every mode outside the known set (Cash/Union Bank/HDFC Bank)", async () => {
+    const shop = await seedShop(0);
+    const cash = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 1000, paymentMode: "Cash",
+    });
+    await collectionEntryService.approve(cash.id);
+    const cheque = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 300, paymentMode: "Cheque",
+    });
+    await collectionEntryService.approve(cheque.id);
+    const upi = await collectionEntryService.create({
+      collectionDate: "2026-08-10", shopId: shop.id, amount: 200, paymentMode: "UPI",
+    });
+    await collectionEntryService.approve(upi.id);
+
+    const res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/report?fromDate=2026-08-10&toDate=2026-08-10&shopId=${shop.id}&paymentMode=Others`
+    );
+    const body = res.body as { totalAmount: number; totalCount: number };
+    assert.equal(body.totalAmount, 500);
+    assert.equal(body.totalCount, 2);
+  });
+
+  it("rejects a missing/invalid date range with 400", async () => {
+    const res = await getJson(baseUrl, `/api/operations/collection-entry/report?fromDate=2026-08-10`);
+    assert.equal(res.status, 400);
   });
 });

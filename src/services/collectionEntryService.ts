@@ -1,7 +1,14 @@
 import type pg from "pg";
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
-import type { CollectionEntry } from "../types/operations.js";
+import type {
+  CollectionEntry,
+  CollectionReportCollectorRow,
+  CollectionReportPaymentModeRow,
+  CollectionReportSummary,
+  PendingCollectionRecentEntry,
+  PendingCollectionSummaryRow,
+} from "../types/operations.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
 import { assertShopExists } from "../utils/fkValidation.js";
 import {
@@ -43,6 +50,11 @@ export interface CollectionWeeklySummary {
   closingBalance: number;
   isCurrentWeek: boolean;
 }
+
+/** Collection Report's "Others" payment-mode bucket = anything outside this
+ * set. Matches the same list the frontend already used for display grouping;
+ * the exclusion/aggregation itself runs in SQL below, not client-side. */
+const COLLECTION_REPORT_KNOWN_PAYMENT_MODES = ["Cash", "Union Bank", "HDFC Bank"];
 
 const SHOP_SALES_ELIGIBLE = `
   t.status = 'Completed'
@@ -714,5 +726,307 @@ export const collectionEntryService = {
       weekEnd: dateOnly(bounds.rows[0].week_end) ?? "",
       isCurrentWeek: Boolean(bounds.rows[0].is_current_week),
     };
+  },
+
+  /**
+   * Pending Collection main table — one aggregated query for all Active shops.
+   * Same weekly accounting as getWeeklySummary; does not N+1 per shop.
+   * Does not rewrite Collection Entry weekly-summaries.
+   */
+  async getPendingSummary(date: string): Promise<PendingCollectionSummaryRow[]> {
+    const asOf = dateOnly(date);
+    if (!asOf) throw new AppError(400, "Invalid date. Use YYYY-MM-DD.");
+
+    const result = await query<{
+      shop_id: string;
+      shop_name: string;
+      week_start: string;
+      week_end: string;
+      opening_balance: string;
+      balance: string;
+      weekly_sales: string;
+      weekly_approved: string;
+      weekly_pending: string;
+      recovery_percentage: string;
+      has_pending: boolean;
+    }>(
+      `WITH bounds AS (
+         SELECT
+           ($1::date - ((EXTRACT(ISODOW FROM $1::date)::integer) - 1))::date AS week_start,
+           ($1::date - ((EXTRACT(ISODOW FROM $1::date)::integer) - 1) + 6)::date AS week_end
+       ),
+       ledger_before AS (
+         SELECT l.shop_id, COALESCE(SUM(l.debit - l.credit), 0) AS before_amt
+           FROM shop_ledger l
+           CROSS JOIN bounds b
+          WHERE l.entry_date < b.week_start
+          GROUP BY l.shop_id
+       ),
+       weekly_sales AS (
+         SELECT d.shop_id, COALESCE(SUM(d.amount), 0) AS amt
+           FROM trip_deliveries d
+           INNER JOIN trips t ON t.id = d.trip_id
+           CROSS JOIN bounds b
+          WHERE COALESCE(d.deleted, FALSE) = FALSE
+            AND t.trip_date >= b.week_start
+            AND t.trip_date <= b.week_end
+            AND ${SHOP_SALES_ELIGIBLE}
+          GROUP BY d.shop_id
+       ),
+       weekly_approved AS (
+         SELECT c.shop_id, COALESCE(SUM(COALESCE(c.amount, c.amount_collected)), 0) AS amt
+           FROM collections c
+           CROSS JOIN bounds b
+          WHERE COALESCE(c.deleted, FALSE) = FALSE
+            AND c.status = 'Approved'
+            AND c.collection_date >= b.week_start
+            AND c.collection_date <= b.week_end
+          GROUP BY c.shop_id
+       ),
+       weekly_pending AS (
+         SELECT c.shop_id, COALESCE(SUM(COALESCE(c.amount, c.amount_collected)), 0) AS amt
+           FROM collections c
+           CROSS JOIN bounds b
+          WHERE COALESCE(c.deleted, FALSE) = FALSE
+            AND c.status = 'Pending Approval'
+            AND c.collection_date >= b.week_start
+            AND c.collection_date <= b.week_end
+          GROUP BY c.shop_id
+       )
+       SELECT
+         s.id AS shop_id,
+         s.shop_name,
+         b.week_start,
+         b.week_end,
+         ROUND((s.opening_balance + COALESCE(lb.before_amt, 0))::numeric, 2) AS opening_balance,
+         ROUND(
+           (s.opening_balance
+            + COALESCE(lb.before_amt, 0)
+            + COALESCE(ws.amt, 0)
+            - COALESCE(wa.amt, 0))::numeric,
+           2
+         ) AS balance,
+         ROUND(COALESCE(ws.amt, 0)::numeric, 2) AS weekly_sales,
+         ROUND(COALESCE(wa.amt, 0)::numeric, 2) AS weekly_approved,
+         ROUND(COALESCE(wp.amt, 0)::numeric, 2) AS weekly_pending,
+         CASE
+           WHEN COALESCE(ws.amt, 0) = 0 THEN 0
+           ELSE ROUND((COALESCE(wa.amt, 0) / ws.amt) * 100, 4)
+         END AS recovery_percentage,
+         (COALESCE(wp.amt, 0) > 0) AS has_pending
+       FROM shops s
+       CROSS JOIN bounds b
+       LEFT JOIN ledger_before lb ON lb.shop_id = s.id
+       LEFT JOIN weekly_sales ws ON ws.shop_id = s.id
+       LEFT JOIN weekly_approved wa ON wa.shop_id = s.id
+       LEFT JOIN weekly_pending wp ON wp.shop_id = s.id
+       WHERE s.status = 'Active'
+       ORDER BY s.shop_name ASC`,
+      [asOf]
+    );
+
+    return result.rows.map((row) => ({
+      shopId: num(row.shop_id),
+      shopName: str(row.shop_name),
+      weekStart: dateOnly(row.week_start) ?? "",
+      weekEnd: dateOnly(row.week_end) ?? "",
+      openingBalance: num(row.opening_balance),
+      balance: num(row.balance),
+      weeklySales: num(row.weekly_sales),
+      weeklyApprovedCollections: num(row.weekly_approved),
+      weeklyPendingCollections: num(row.weekly_pending),
+      recoveryPercentage: num(row.recovery_percentage),
+      overdueDays: null,
+      hasPendingCollections: Boolean(row.has_pending),
+    }));
+  },
+
+  /**
+   * Collection Report — official financial totals for the Collection Report
+   * page/PDF/Excel export. Aggregated here (three grouped queries, no N+1)
+   * over Approved, non-deleted collections in [fromDate, toDate], optionally
+   * scoped to one shop/collector/payment mode. The frontend must render
+   * these numbers as-is; it must not re-derive totals/percentages from raw
+   * collection rows. Reuses the same `collections` table as Collection Entry
+   * and Pending Collection — no new accounting engine, no Shop Sales or
+   * shop_ledger changes.
+   */
+  async getCollectionReport(filters: {
+    fromDate: string;
+    toDate: string;
+    shopId?: number;
+    collector?: string;
+    paymentMode?: string;
+  }): Promise<CollectionReportSummary> {
+    const fromDate = dateOnly(filters.fromDate);
+    const toDate = dateOnly(filters.toDate);
+    if (!fromDate || !toDate) {
+      throw new AppError(400, "Invalid date range. fromDate/toDate must be YYYY-MM-DD.");
+    }
+
+    const params: unknown[] = [fromDate, toDate];
+    const conditions = [
+      `status = 'Approved'`,
+      `COALESCE(deleted, FALSE) = FALSE`,
+      `collection_date >= $1`,
+      `collection_date <= $2`,
+    ];
+    if (filters.shopId != null) {
+      params.push(filters.shopId);
+      conditions.push(`shop_id = $${params.length}`);
+    }
+    if (filters.collector) {
+      params.push(filters.collector);
+      conditions.push(`collector = $${params.length}`);
+    }
+    if (filters.paymentMode === "Others") {
+      // "Others" is the Collection Report's UI bucket for every mode outside
+      // the known set — the exclusion and the resulting sums/counts are still
+      // computed here in SQL, not reconstructed from raw rows client-side.
+      const placeholders = COLLECTION_REPORT_KNOWN_PAYMENT_MODES.map((mode) => {
+        params.push(mode);
+        return `$${params.length}`;
+      });
+      conditions.push(`payment_mode NOT IN (${placeholders.join(", ")})`);
+    } else if (filters.paymentMode) {
+      params.push(filters.paymentMode);
+      conditions.push(`payment_mode = $${params.length}`);
+    }
+    const where = conditions.join(" AND ");
+
+    const totalsResult = await query<{ c: string; amt: string; cc: string }>(
+      `SELECT COUNT(*) AS c,
+              COALESCE(SUM(COALESCE(amount, amount_collected)), 0) AS amt,
+              COUNT(DISTINCT NULLIF(collector, '')) AS cc
+         FROM collections
+        WHERE ${where}`,
+      params
+    );
+    const totalAmount = num(totalsResult.rows[0]?.amt ?? 0);
+    const totalCount = num(totalsResult.rows[0]?.c ?? 0);
+    const totalCollectors = num(totalsResult.rows[0]?.cc ?? 0);
+
+    const modeResult = await query<{ payment_mode: string; c: string; amt: string; cc: string }>(
+      `SELECT COALESCE(NULLIF(payment_mode, ''), 'Cash') AS payment_mode,
+              COUNT(*) AS c,
+              COALESCE(SUM(COALESCE(amount, amount_collected)), 0) AS amt,
+              COUNT(DISTINCT NULLIF(collector, '')) AS cc
+         FROM collections
+        WHERE ${where}
+        GROUP BY COALESCE(NULLIF(payment_mode, ''), 'Cash')
+        ORDER BY amt DESC`,
+      params
+    );
+    const paymentModeSummary: CollectionReportPaymentModeRow[] = modeResult.rows.map((row) => {
+      const amount = num(row.amt);
+      return {
+        paymentMode: str(row.payment_mode),
+        count: num(row.c),
+        amount,
+        percentage: totalAmount === 0 ? 0 : Math.round((amount / totalAmount) * 10000) / 100,
+      };
+    });
+    const collectorsByPaymentMode = modeResult.rows.map((row) => ({
+      paymentMode: str(row.payment_mode),
+      collectorCount: num(row.cc),
+    }));
+
+    const collectorModeResult = await query<{ collector: string; payment_mode: string; amt: string }>(
+      `SELECT COALESCE(NULLIF(collector, ''), 'Unknown') AS collector,
+              COALESCE(NULLIF(payment_mode, ''), 'Cash') AS payment_mode,
+              COALESCE(SUM(COALESCE(amount, amount_collected)), 0) AS amt
+         FROM collections
+        WHERE ${where}
+        GROUP BY COALESCE(NULLIF(collector, ''), 'Unknown'), COALESCE(NULLIF(payment_mode, ''), 'Cash')`,
+      params
+    );
+    const byCollector = new Map<string, CollectionReportCollectorRow>();
+    collectorModeResult.rows.forEach((row) => {
+      const collector = str(row.collector);
+      const mode = str(row.payment_mode);
+      const amount = num(row.amt);
+      if (!byCollector.has(collector)) {
+        byCollector.set(collector, { collector, amounts: {}, total: 0 });
+      }
+      const entry = byCollector.get(collector)!;
+      entry.amounts[mode] = (entry.amounts[mode] ?? 0) + amount;
+      entry.total += amount;
+    });
+    const collectorSummary = Array.from(byCollector.values()).sort((a, b) => b.total - a.total);
+
+    return {
+      fromDate,
+      toDate,
+      totalAmount,
+      totalCount,
+      totalCollectors,
+      paymentModeSummary,
+      collectorsByPaymentMode,
+      collectorSummary,
+    };
+  },
+
+  /**
+   * Latest collections for a shop (Pending Collection detail). Caps at 10.
+   * Never truncates database history.
+   */
+  async getRecentForShop(shopId: number, limit = 10): Promise<PendingCollectionRecentEntry[]> {
+    if (!Number.isInteger(shopId) || shopId <= 0) {
+      throw new AppError(400, "shopId is required and must be a positive integer");
+    }
+    const shop = await query(`SELECT id FROM shops WHERE id = $1`, [shopId]);
+    if (!shop.rowCount) throw new AppError(422, "Shop not found", { shopId });
+
+    const capped = Math.min(Math.max(1, Math.floor(limit) || 10), 10);
+    const result = await query(
+      `${SEL.replace(
+        "FROM collections",
+        ", (CURRENT_DATE <= collections.collection_date + 7) AS can_delete FROM collections"
+      )}
+        WHERE collections.shop_id = $1
+          AND COALESCE(collections.deleted, FALSE) = FALSE
+        ORDER BY collections.collection_date DESC,
+                 collections.created_at DESC,
+                 collections.collection_no DESC
+        LIMIT $2`,
+      [shopId, capped]
+    );
+    return result.rows.map((row) => ({
+      ...mapEntry(row),
+      canDelete: Boolean(row.can_delete),
+    }));
+  },
+
+  /**
+   * Pending Collection operational delete (separate UI workflow).
+   *
+   * Gate: PostgreSQL CURRENT_DATE <= collection_date + 7. After the gate, the
+   * existing collection row is reversed/soft-deleted by id — no new collection
+   * number and no duplicate record. Collection Entry DELETE /collection-entry/:id
+   * remains a different endpoint and is not given this window.
+   */
+  async softDeletePending(
+    id: number,
+    body: { reason?: string; deletedBy?: string } = {}
+  ): Promise<CollectionEntry> {
+    const gate = await query<{
+      deleted: boolean;
+      within_window: boolean;
+    }>(
+      `SELECT deleted,
+              (CURRENT_DATE <= collection_date + 7) AS within_window
+         FROM collections
+        WHERE id = $1`,
+      [id]
+    );
+    if (!gate.rowCount) throw new AppError(404, "Collection not found");
+    const row = gate.rows[0];
+    if (!row.deleted && !row.within_window) {
+      throw new AppError(
+        409,
+        "Collection can only be deleted within 7 calendar days of the collection date"
+      );
+    }
+    return this.softDelete(id, body);
   },
 };

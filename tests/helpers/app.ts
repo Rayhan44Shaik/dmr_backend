@@ -38,7 +38,7 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
 
   const child: ChildProcess = spawn(
     process.execPath,
-    ["--import", "tsx", "src/index.ts"],
+    ["--import", "tsx", "tests/helpers/runTestServer.ts"],
     {
       cwd: repoRoot,
       env: {
@@ -47,7 +47,7 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
         CORS_ORIGIN: "*",
         ...env,
       },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
     }
   );
 
@@ -82,7 +82,11 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
     baseUrl,
     close: async () => {
       if (child.exitCode === null) {
-        child.kill("SIGTERM");
+        if (typeof child.send === "function") {
+          child.send("shutdown");
+        } else {
+          child.kill("SIGTERM");
+        }
         await Promise.race([
           new Promise<void>((resolve) => child.once("exit", () => resolve())),
           new Promise<void>((resolve) => setTimeout(resolve, 5_000)),

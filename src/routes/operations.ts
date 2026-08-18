@@ -1,6 +1,11 @@
 ﻿import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { collectionEntryService } from "../services/collectionEntryService.js";
+import {
+  parseCollectionReportQuery,
+  parsePendingRecentQuery,
+  parsePendingSummaryQuery,
+} from "../validation/collectionEntry.js";
 import { collectionsService } from "../services/collectionsService.js";
 import { dashboardService } from "../services/dashboardService.js";
 import { fuelExpensesService } from "../services/fuelExpensesService.js";
@@ -170,7 +175,7 @@ operationsRouter.post(
 operationsRouter.get(
   "/trip-list",
   asyncHandler(async (req, res) => {
-    const { params: pagination, enabled } = parsePagination(req.query);
+    const { params: pagination } = parsePagination(req.query);
     res.json(
       await tripsService.listCompleted({
         fromDate:
@@ -183,7 +188,7 @@ operationsRouter.get(
         driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
         farmId: req.query.farmId ? Number(req.query.farmId) : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
-        pagination: enabled ? pagination : null,
+        pagination: pagination ?? { page: 1, limit: 50, offset: 0 },
       })
     );
   })
@@ -443,6 +448,25 @@ operationsRouter.get(
   })
 );
 
+operationsRouter.post(
+  "/collection-entry",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await collectionEntryService.create(req.body));
+  })
+);
+
+operationsRouter.patch(
+  "/collection-entry/:id/status",
+  asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.updateStatus(Number(req.params.id), req.body));
+  })
+);
+
+// Literal sub-routes (weekly-summary, week-bounds, weekly-summaries,
+// pending-summary, recent, report, pending/:id) MUST be registered before
+// the generic "/collection-entry/:id" routes below — otherwise Express
+// matches e.g. GET /collection-entry/recent against ":id" first ("recent"
+// as the id) and it never reaches the real handler.
 operationsRouter.get(
   "/collection-entry/weekly-summary",
   asyncHandler(async (req, res) => {
@@ -478,16 +502,52 @@ operationsRouter.get(
 );
 
 operationsRouter.get(
-  "/collection-entry/:id",
+  "/collection-entry/pending-summary",
   asyncHandler(async (req, res) => {
-    res.json(await collectionEntryService.getById(Number(req.params.id)));
+    const { date } = parsePendingSummaryQuery(req.query);
+    res.json(await collectionEntryService.getPendingSummary(date));
   })
 );
 
-operationsRouter.post(
-  "/collection-entry",
+operationsRouter.get(
+  "/collection-entry/recent",
   asyncHandler(async (req, res) => {
-    res.status(201).json(await collectionEntryService.create(req.body));
+    const { shopId, limit } = parsePendingRecentQuery(req.query);
+    res.json(await collectionEntryService.getRecentForShop(shopId, limit));
+  })
+);
+
+// Collection Report — official financial totals for the report page/PDF/Excel.
+// Aggregated server-side (payment-mode + collector breakdown); the frontend
+// must display these values, not recompute them from raw collection rows.
+operationsRouter.get(
+  "/collection-entry/report",
+  asyncHandler(async (req, res) => {
+    const filters = parseCollectionReportQuery(req.query);
+    res.json(await collectionEntryService.getCollectionReport(filters));
+  })
+);
+
+// Pending Collection VIEW delete — independent of Collection Entry Delete.
+// Enforces collection_date + 7. The Pending Collection UI must call THIS path
+// and must never call DELETE /collection-entry/:id.
+operationsRouter.delete(
+  "/collection-entry/pending/:id",
+  asyncHandler(async (req, res) => {
+    res.json(
+      await collectionEntryService.softDeletePending(Number(req.params.id), {
+        reason: typeof req.body?.reason === "string" ? req.body.reason : undefined,
+        deletedBy: typeof req.body?.deletedBy === "string" ? req.body.deletedBy : undefined,
+      })
+    );
+  })
+);
+
+// Generic "/:id" routes — must stay AFTER the literal sub-routes above.
+operationsRouter.get(
+  "/collection-entry/:id",
+  asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.getById(Number(req.params.id)));
   })
 );
 
@@ -495,13 +555,6 @@ operationsRouter.put(
   "/collection-entry/:id",
   asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.update(Number(req.params.id), req.body));
-  })
-);
-
-operationsRouter.patch(
-  "/collection-entry/:id/status",
-  asyncHandler(async (req, res) => {
-    res.json(await collectionEntryService.updateStatus(Number(req.params.id), req.body));
   })
 );
 
@@ -524,16 +577,26 @@ operationsRouter.get(
     res.json(
       await fuelExpensesService.list({
         vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        vehicleNo: typeof req.query.vehicleNo === "string" ? req.query.vehicleNo : undefined,
         driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         sourceType: typeof req.query.sourceType === "string" ? req.query.sourceType : undefined,
+        tripNo: typeof req.query.tripNo === "string" ? req.query.tripNo : undefined,
+        billNo: typeof req.query.billNo === "string" ? req.query.billNo : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
         includeDeleted: req.query.includeDeleted === "true",
         pagination: opsListPagination(req),
       })
     );
+  })
+);
+
+operationsRouter.post(
+  "/fuel-expenses/reconcile-trips",
+  asyncHandler(async (_req, res) => {
+    res.json({ ingestedTrips: await fuelExpensesService.reconcileTripOrigin() });
   })
 );
 

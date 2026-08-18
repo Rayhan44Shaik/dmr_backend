@@ -1,4 +1,5 @@
 import { query, withTransaction } from "../config/db.js";
+import type { PoolClient } from "pg";
 import { AppError } from "../middleware/errorHandler.js";
 import type { FuelExpense, FuelSourceType, OpsRecordStatus } from "../types/operations.js";
 import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
@@ -7,13 +8,23 @@ import {
   assertTripExists,
   assertVehicleExists,
 } from "../utils/fkValidation.js";
-import { nextDocNo } from "../utils/operationsHelpers.js";
+import { nextManualFuelBillNo } from "../utils/fuelBillNumbering.js";
+import {
+  assertCalendarDate,
+  assertFinitePositive,
+  computeFuelAmountSql,
+  MAX_FUEL_LITRES,
+  MAX_FUEL_RATE,
+  parseOptionalGps,
+  validateOptionalFuelImage,
+} from "../utils/fuelExpenseRules.js";
 import {
   paginatedResult,
   type PaginatedResult,
   type PaginationParams,
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
+import { ingestCompletedTripDieselToFuel } from "../utils/tripFuelSync.js";
 import {
   lockVehicleForMeterWrite,
   preciseIsoOrUndefined,
@@ -25,13 +36,6 @@ import {
   fuelRejectSchema,
   parseBody,
 } from "../validation/operations.js";
-
-/** ops_status is the canonical 3(+2)-state approval field; legacy `status`
- * (approval_status: Pending/Approved only) is mirrored best-effort for any
- * older code paths still reading it directly. */
-function toLegacyApproval(opsStatus: OpsRecordStatus): "Pending" | "Approved" {
-  return opsStatus === "Approved" ? "Approved" : "Pending";
-}
 
 function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
   const opsStatus = (str(row.ops_status) || "Pending Approval") as OpsRecordStatus;
@@ -47,7 +51,7 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
     supervisorId: row.supervisor_id == null ? null : num(row.supervisor_id),
     supervisorName: row.supervisor_name == null ? null : str(row.supervisor_name),
     tripId: row.trip_id == null ? null : num(row.trip_id),
-    tripNo: row.trip_no == null ? null : str(row.trip_no),
+    tripNo: str(row.source_trip_no || row.trip_no || "") || null,
     tripFuelEntryIndex: row.trip_fuel_entry_index == null ? null : num(row.trip_fuel_entry_index),
     currentMeter: num(row.meter_reading),
     fuelRate: num(row.rate),
@@ -56,6 +60,10 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
     pumpName: str(row.pump_name || row.petrol_bunk),
     bunkAddress: row.bunk_address == null ? null : str(row.bunk_address),
     remarks: row.remarks == null ? null : str(row.remarks),
+    gpsLat: numOrNull(row.gps_lat),
+    gpsLon: numOrNull(row.gps_lon),
+    gpsAccuracy: numOrNull(row.gps_accuracy),
+    gpsCapturedAt: row.gps_captured_at == null ? null : str(row.gps_captured_at),
     status: opsStatus,
     imageData: row.image_data == null ? null : str(row.image_data),
     imageName: row.image_name == null ? null : str(row.image_name),
@@ -74,19 +82,21 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
 }
 
 const FUEL_SELECT = `
-  SELECT fe.*, t.trip_no
+  SELECT fe.*, COALESCE(fe.source_trip_no, t.trip_no) AS trip_no
   FROM fuel_expenses fe
   LEFT JOIN trips t ON t.id = fe.trip_id
 `;
 
 function buildFuelWhere(filters: {
   vehicleId?: number;
+  vehicleNo?: string;
   driverId?: number;
   fromDate?: string;
   toDate?: string;
   status?: string;
   sourceType?: string;
-  fuelType?: string;
+  tripNo?: string;
+  billNo?: string;
   search?: string;
   includeDeleted?: boolean;
 }) {
@@ -96,16 +106,16 @@ function buildFuelWhere(filters: {
   if (!filters.includeDeleted) {
     clauses.push(`COALESCE(fe.deleted, FALSE) = FALSE`);
   }
-  // Trip-generated fuel (source_type = 'TRIP') is hidden until its related
-  // trip reaches the Completed status. Manual fuel keeps its own approval
-  // workflow and is unaffected. The trip status lives on `trips` (aliased `t`),
-  // which both the count and data queries below LEFT JOIN.
   clauses.push(
-    `(fe.source_type <> 'TRIP' OR (t.status = 'Completed' AND COALESCE(t.deleted, FALSE) = FALSE))`
+    `(fe.source_type <> 'TRIP' OR fe.ops_status = 'Approved'::ops_record_status)`
   );
   if (filters.vehicleId) {
     params.push(filters.vehicleId);
     clauses.push(`fe.vehicle_id = $${params.length}`);
+  }
+  if (filters.vehicleNo) {
+    params.push(filters.vehicleNo);
+    clauses.push(`fe.vehicle_no = $${params.length}`);
   }
   if (filters.driverId) {
     params.push(filters.driverId);
@@ -120,18 +130,34 @@ function buildFuelWhere(filters: {
     clauses.push(`fe.expense_date <= $${params.length}`);
   }
   if (filters.status && filters.status !== "ALL") {
-    params.push(filters.status);
+    const statusMap: Record<string, string> = {
+      Pending: "Pending Approval",
+      Approved: "Approved",
+      Rejected: "Rejected",
+      "Pending Approval": "Pending Approval",
+    };
+    params.push(statusMap[filters.status] ?? filters.status);
     clauses.push(`fe.ops_status = $${params.length}::ops_record_status`);
   }
   if (filters.sourceType && filters.sourceType !== "ALL") {
     params.push(filters.sourceType);
     clauses.push(`fe.source_type = $${params.length}::fuel_source_type`);
   }
+  if (filters.tripNo) {
+    params.push(`%${filters.tripNo}%`);
+    clauses.push(
+      `(COALESCE(fe.source_trip_no, t.trip_no) ILIKE $${params.length})`
+    );
+  }
+  if (filters.billNo) {
+    params.push(`%${filters.billNo}%`);
+    clauses.push(`fe.bill_no ILIKE $${params.length}`);
+  }
   if (filters.search) {
     params.push(`%${filters.search}%`);
     const p = params.length;
     clauses.push(
-      `(fe.bill_no ILIKE $${p} OR fe.vehicle_no ILIKE $${p} OR fe.driver_name ILIKE $${p} OR t.trip_no ILIKE $${p})`
+      `(fe.bill_no ILIKE $${p} OR fe.vehicle_no ILIKE $${p} OR fe.driver_name ILIKE $${p} OR COALESCE(fe.source_trip_no, t.trip_no) ILIKE $${p})`
     );
   }
 
@@ -141,20 +167,39 @@ function buildFuelWhere(filters: {
   };
 }
 
+async function computeAmount(client: PoolClient, litres: number, rate: number) {
+  return computeFuelAmountSql(client, litres, rate);
+}
+
 export const fuelExpensesService = {
+  async reconcileTripOrigin() {
+    return withTransaction(async (client) => {
+      try {
+        return await ingestCompletedTripDieselToFuel(client);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new AppError(500, `Fuel trip ingest failed: ${message}`);
+      }
+    });
+  },
+
   async list(
     filters: {
       vehicleId?: number;
+      vehicleNo?: string;
       driverId?: number;
       fromDate?: string;
       toDate?: string;
       status?: string;
       sourceType?: string;
+      tripNo?: string;
+      billNo?: string;
       search?: string;
       includeDeleted?: boolean;
       pagination?: PaginationParams | null;
     } = {}
   ): Promise<FuelExpense[] | PaginatedResult<FuelExpense>> {
+    await this.reconcileTripOrigin();
     const { where, params } = buildFuelWhere(filters);
 
     if (filters.pagination) {
@@ -174,55 +219,70 @@ export const fuelExpensesService = {
     }
 
     const result = await query(
-      `${FUEL_SELECT} ${where} ORDER BY fe.expense_date DESC, fe.created_at DESC`,
+      `${FUEL_SELECT} ${where} ORDER BY fe.expense_date DESC, fe.created_at DESC LIMIT 2000`,
       params
     );
     return result.rows.map(mapFuelExpense);
   },
 
   async getById(id: string) {
+    await this.reconcileTripOrigin();
     const result = await query(
       `${FUEL_SELECT}
        WHERE fe.id = $1
          AND COALESCE(fe.deleted, FALSE) = FALSE
-         AND (fe.source_type <> 'TRIP' OR (t.status = 'Completed' AND COALESCE(t.deleted, FALSE) = FALSE))`,
+         AND (fe.source_type <> 'TRIP' OR fe.ops_status = 'Approved'::ops_record_status)`,
       [id]
     );
     if (!result.rowCount) throw new AppError(404, "Fuel expense not found");
     return mapFuelExpense(result.rows[0]);
   },
 
-  /** Manual fuel entry only — Trip fuel is created exclusively by
-   * syncDieselToFuelExpenses (tripFuelSync.ts) during Step 5 submission. */
   async create(body: unknown) {
     const data = parseBody(fuelExpenseBodySchema, body);
 
     return withTransaction(async (client) => {
       try {
+        if (data.vehicleId == null) {
+          throw new AppError(422, "Vehicle is required.");
+        }
+        const billDate = assertCalendarDate(data.billDate);
+        const liters = assertFinitePositive(data.liters, "Litres", MAX_FUEL_LITRES);
+        const fuelRate = assertFinitePositive(data.fuelRate, "Rate per litre", MAX_FUEL_RATE);
+        const gps = parseOptionalGps({
+          gpsLat: data.gpsLat,
+          gpsLon: data.gpsLon,
+          gpsAccuracy: data.gpsAccuracy,
+        });
+        const image = validateOptionalFuelImage(data.imageData, data.imageName);
+
         await assertVehicleExists(data.vehicleId, client);
         await assertEmployeeExists(data.driverId, "Driver", client);
         await assertEmployeeExists(data.supervisorId, "Supervisor", client);
-        await assertTripExists(data.tripId, client);
+        if (data.tripId != null) {
+          await assertTripExists(data.tripId, client);
+          const trip = await client.query(
+            `SELECT vehicle_id FROM trips WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`,
+            [data.tripId]
+          );
+          const tripVehicle = numOrNull(trip.rows[0]?.vehicle_id);
+          if (tripVehicle != null && tripVehicle !== data.vehicleId) {
+            throw new AppError(422, "Trip does not belong to the selected vehicle.");
+          }
+        }
 
-        // Universal vehicle meter validation — manual fuel entry only (trip
-        // -generated fuel is validated as part of the Trip Step 5 submission
-        // in tripsService.ts, never edited directly here — see update() below).
-        if (data.vehicleId != null && data.currentMeter != null) {
+        if (data.currentMeter != null && data.currentMeter > 0) {
           await lockVehicleForMeterWrite(client, data.vehicleId);
           await validateVehicleMeter(client, {
             vehicleId: data.vehicleId,
             newMeter: data.currentMeter,
-            eventDate: data.billDate,
+            eventDate: billDate,
             context: "Fuel meter reading",
           });
         }
 
-        const liters = data.liters ?? 0;
-        const fuelRate = data.fuelRate ?? 0;
-        // Amount is always server-computed — never trust a client-supplied amount.
-        const amount = Number((liters * fuelRate).toFixed(2));
-        const billNo =
-          data.billNo || (await nextDocNo(client, "FUEL", "fuel_expenses", "bill_no"));
+        const amount = await computeAmount(client, liters, fuelRate);
+        const billNo = await nextManualFuelBillNo(client, billDate);
         const pumpName = data.pumpName ?? "";
 
         const result = await client.query(
@@ -230,14 +290,16 @@ export const fuelExpensesService = {
              bill_no, expense_date, vehicle_id, vehicle_no, driver_id, driver_name,
              supervisor_id, supervisor_name, trip_id, source_type, meter_reading, amount, rate,
              litres, petrol_bunk, pump_name, bunk_address, remarks, status, ops_status,
-             image_data, image_name, image_mime, created_by
+             image_data, image_name, image_mime,
+             gps_lat, gps_lon, gps_accuracy, gps_captured_at, created_by
            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'MANUAL',$10,$11,$12,$13,$14,$14,$15,$16,
-             'Pending'::approval_status,'Pending Approval'::ops_record_status,$17,$18,$19,$20)
+             'Pending'::approval_status,'Pending Approval'::ops_record_status,$17,$18,$19,
+             $21,$22,$23,$24,$20)
            RETURNING *`,
           [
             billNo,
-            data.billDate,
-            data.vehicleId ?? null,
+            billDate,
+            data.vehicleId,
             data.vehicleNo ?? null,
             data.driverId ?? null,
             data.driverName ?? null,
@@ -251,10 +313,14 @@ export const fuelExpensesService = {
             pumpName,
             data.bunkAddress ?? "",
             data.remarks ?? null,
-            data.imageData ?? null,
-            data.imageName ?? null,
-            data.imageMime ?? null,
+            image.data,
+            image.name,
+            image.mime ?? data.imageMime ?? null,
             data.createdBy ?? "",
+            gps.lat,
+            gps.lon,
+            gps.accuracy,
+            data.gpsCapturedAt ?? null,
           ]
         );
         return mapFuelExpense(result.rows[0]);
@@ -279,16 +345,17 @@ export const fuelExpensesService = {
         if (existing.rows[0].source_type === "TRIP") {
           throw new AppError(
             409,
-            "Trip-generated fuel records cannot be edited directly. Edit the Trip's Step 5 diesel entry instead."
+            "Trip-origin fuel records are independent posted financial records and cannot be edited."
           );
+        }
+        if (existing.rows[0].ops_status !== "Pending Approval" && existing.rows[0].ops_status !== "Draft") {
+          throw new AppError(409, `Fuel expense is already ${existing.rows[0].ops_status}`);
         }
 
         await assertVehicleExists(data.vehicleId, client);
         await assertEmployeeExists(data.driverId, "Driver", client);
         await assertTripExists(data.tripId, client);
 
-        // Universal vehicle meter validation, excluding this record's own
-        // previously-persisted reading so an edit never compares against itself.
         if (data.currentMeter != null) {
           const vehicleId = data.vehicleId ?? numOrNull(existing.rows[0].vehicle_id);
           const eventDate = data.billDate ?? dateOnly(existing.rows[0].expense_date) ?? undefined;
@@ -298,9 +365,6 @@ export const fuelExpensesService = {
               vehicleId,
               newMeter: data.currentMeter,
               eventDate,
-              // Preserve the record's own original instant rather than
-              // defaulting to "now" (see fleetMaintenanceService.update() for
-              // the same fix and why it matters).
               eventInstant: preciseIsoOrUndefined(existing.rows[0].created_at),
               exclude: { sourceType: "FUEL", recordId: id },
               context: "Fuel meter reading",
@@ -308,10 +372,43 @@ export const fuelExpensesService = {
           }
         }
 
-        const liters = data.liters;
-        const fuelRate = data.fuelRate;
-        const amount =
-          liters != null && fuelRate != null ? Number((liters * fuelRate).toFixed(2)) : null;
+        let amount: number | null = null;
+        if (data.liters != null || data.fuelRate != null) {
+          const liters = assertFinitePositive(
+            data.liters ??
+              num(
+                (
+                  await client.query(`SELECT litres FROM fuel_expenses WHERE id = $1`, [id])
+                ).rows[0].litres
+              ),
+            "Litres",
+            MAX_FUEL_LITRES
+          );
+          const fuelRate = assertFinitePositive(
+            data.fuelRate ??
+              num(
+                (await client.query(`SELECT rate FROM fuel_expenses WHERE id = $1`, [id])).rows[0]
+                  .rate
+              ),
+            "Rate per litre",
+            MAX_FUEL_RATE
+          );
+          amount = await computeAmount(client, liters, fuelRate);
+        }
+
+        const gps =
+          data.gpsLat !== undefined || data.gpsLon !== undefined
+            ? parseOptionalGps({
+                gpsLat: data.gpsLat,
+                gpsLon: data.gpsLon,
+                gpsAccuracy: data.gpsAccuracy,
+              })
+            : null;
+        const image =
+          data.imageData !== undefined
+            ? validateOptionalFuelImage(data.imageData, data.imageName)
+            : null;
+        const billDate = data.billDate ? assertCalendarDate(data.billDate) : null;
 
         const result = await client.query(
           `UPDATE fuel_expenses SET
@@ -334,12 +431,16 @@ export const fuelExpensesService = {
              image_data = COALESCE($17, image_data),
              image_name = COALESCE($18, image_name),
              image_mime = COALESCE($19, image_mime),
+             gps_lat = COALESCE($21, gps_lat),
+             gps_lon = COALESCE($22, gps_lon),
+             gps_accuracy = COALESCE($23, gps_accuracy),
+             gps_captured_at = COALESCE($24, gps_captured_at),
              created_by = COALESCE($20, created_by)
            WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE
            RETURNING *`,
           [
             id,
-            data.billDate ?? null,
+            billDate,
             data.vehicleId ?? null,
             data.vehicleNo ?? null,
             data.driverId ?? null,
@@ -349,15 +450,19 @@ export const fuelExpensesService = {
             data.tripId ?? null,
             data.currentMeter ?? null,
             amount,
-            fuelRate ?? null,
-            liters ?? null,
+            data.fuelRate ?? null,
+            data.liters ?? null,
             data.pumpName ?? null,
             data.bunkAddress ?? null,
             data.remarks ?? null,
-            data.imageData ?? null,
-            data.imageName ?? null,
-            data.imageMime ?? null,
+            image?.data ?? null,
+            image?.name ?? null,
+            image?.mime ?? data.imageMime ?? null,
             data.createdBy ?? null,
+            gps?.lat ?? null,
+            gps?.lon ?? null,
+            gps?.accuracy ?? null,
+            data.gpsCapturedAt ?? null,
           ]
         );
         if (!result.rowCount) throw new AppError(404, "Fuel expense not found");
@@ -369,21 +474,21 @@ export const fuelExpensesService = {
     });
   },
 
-  /** Approve a PENDING manual fuel expense. Trip-generated fuel is
-   * auto-approved by tripsService.updateStatus on trip completion and is
-   * never approved through this manual action. */
   async approve(id: string, body: unknown) {
     const data = parseBody(fuelApproveSchema, body);
 
     return withTransaction(async (client) => {
       const existing = await client.query(
-        `SELECT source_type, ops_status FROM fuel_expenses WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`,
+        `SELECT source_type, ops_status FROM fuel_expenses WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE FOR UPDATE`,
         [id]
       );
       if (!existing.rowCount) throw new AppError(404, "Fuel expense not found");
       const row = existing.rows[0];
       if (row.source_type === "TRIP") {
         throw new AppError(409, "Trip-generated fuel is approved automatically on trip completion");
+      }
+      if (row.ops_status === "Approved") {
+        throw new AppError(409, "Fuel expense is already Approved");
       }
       if (row.ops_status !== "Pending Approval" && row.ops_status !== "Draft") {
         throw new AppError(409, `Fuel expense is already ${row.ops_status}`);
@@ -407,13 +512,12 @@ export const fuelExpensesService = {
     });
   },
 
-  /** Reject a PENDING manual fuel expense. A reason is mandatory. */
   async reject(id: string, body: unknown) {
     const data = parseBody(fuelRejectSchema, body);
 
     return withTransaction(async (client) => {
       const existing = await client.query(
-        `SELECT source_type, ops_status FROM fuel_expenses WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`,
+        `SELECT source_type, ops_status FROM fuel_expenses WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE FOR UPDATE`,
         [id]
       );
       if (!existing.rowCount) throw new AppError(404, "Fuel expense not found");
@@ -444,6 +548,17 @@ export const fuelExpensesService = {
   async softDelete(id: string, reason?: string) {
     return withTransaction(async (client) => {
       try {
+        const existing = await client.query(
+          `SELECT source_type, ops_status FROM fuel_expenses WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`,
+          [id]
+        );
+        if (!existing.rowCount) throw new AppError(404, "Fuel expense not found");
+        if (existing.rows[0].source_type === "TRIP") {
+          throw new AppError(409, "Trip-generated fuel records cannot be deleted from Fuel Expenses.");
+        }
+        if (existing.rows[0].ops_status === "Approved") {
+          throw new AppError(409, "Approved fuel expenses cannot be deleted.");
+        }
         const result = await client.query(
           `UPDATE fuel_expenses SET
              deleted = TRUE,

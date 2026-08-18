@@ -21,11 +21,8 @@ export interface TestDb {
 export async function startTestDb(): Promise<TestDb> {
   const db = new PGlite();
   await db.waitReady;
-  const sockets = new Set<net.Socket>();
 
   const server = net.createServer((socket) => {
-    sockets.add(socket);
-    socket.on("close", () => sockets.delete(socket));
     fromNodeSocket(socket, {
       serverVersion: "16.3 (PGlite test server)",
       async onMessage(data) {
@@ -51,11 +48,7 @@ export async function startTestDb(): Promise<TestDb> {
     url: `postgresql://postgres:postgres@127.0.0.1:${address.port}/postgres`,
     close: async () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      try {
-        await db.close();
-      } catch {
-        /* already closed with the process */
-      }
+      await db.close();
     },
   };
 }
