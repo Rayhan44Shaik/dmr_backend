@@ -174,6 +174,24 @@ export interface PendingCollectionSummaryRow {
   /** Reserved. Always null until an overdue rule is defined. */
   overdueDays: null;
   hasPendingCollections: boolean;
+  /** Latest non-deleted collection_date for display. Not a financial total. */
+  lastCollectionDate: string | null;
+}
+
+/** GET /collection-entry/pending-summary envelope. `totals` is the official all-shop week aggregate. */
+export interface PendingCollectionSummaryTotals {
+  weeklySales: number;
+  weeklyApprovedCollections: number;
+  weeklyPendingCollections: number;
+  balance: number;
+  recoveryPercentage: number;
+}
+
+export interface PendingCollectionSummaryResponse {
+  weekStart: string;
+  weekEnd: string;
+  shops: PendingCollectionSummaryRow[];
+  totals: PendingCollectionSummaryTotals;
 }
 
 /** Collection row for the Pending Collection detail (latest 10). */

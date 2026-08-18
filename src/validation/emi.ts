@@ -40,6 +40,8 @@ export const emiUpdateSchema = emiCreateSchema
 /** Payment body — marking the next pending installment as paid. */
 export const emiPaySchema = z.object({
   paidBy: z.string().optional(),
+  /** Client-stable key so a lost HTTP response can be retried without a second pay. */
+  idempotencyKey: z.string().min(8).max(128).optional(),
 });
 
 export { parseBody };

@@ -316,6 +316,17 @@ fleetRouter.get(
   })
 );
 
+// EMI Management overview — every ACTIVE vehicle from the Vehicle Master with
+// its EMI status (purchase amount/date, total EMI, completed/pending, next EMI
+// date) derived from the master + existing payment schedule. Read-only. Must be
+// registered before /emis/:id so "overview" is not parsed as an EMI id.
+fleetRouter.get(
+  "/emis/overview",
+  asyncHandler(async (_req, res) => {
+    res.json(await vehicleEmiService.overview());
+  })
+);
+
 fleetRouter.get(
   "/emis/:id",
   asyncHandler(async (req, res) => {

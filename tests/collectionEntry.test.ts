@@ -40,6 +40,7 @@ async function seedShop(opening: number): Promise<{ id: number; name: string }> 
     phoneNumber: `97300001${String(seq).padStart(2, "0")}`,
     village: "Village",
     address: "Addr",
+    email: `ce${seq}@test.local`,
     status: "Active",
     openingBalance: opening,
   });

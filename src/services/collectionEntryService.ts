@@ -8,6 +8,7 @@ import type {
   CollectionReportSummary,
   PendingCollectionRecentEntry,
   PendingCollectionSummaryRow,
+  PendingCollectionSummaryResponse,
 } from "../types/operations.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
 import { assertShopExists } from "../utils/fkValidation.js";
@@ -733,7 +734,7 @@ export const collectionEntryService = {
    * Same weekly accounting as getWeeklySummary; does not N+1 per shop.
    * Does not rewrite Collection Entry weekly-summaries.
    */
-  async getPendingSummary(date: string): Promise<PendingCollectionSummaryRow[]> {
+  async getPendingSummary(date: string): Promise<PendingCollectionSummaryResponse> {
     const asOf = dateOnly(date);
     if (!asOf) throw new AppError(400, "Invalid date. Use YYYY-MM-DD.");
 
@@ -749,6 +750,7 @@ export const collectionEntryService = {
       weekly_pending: string;
       recovery_percentage: string;
       has_pending: boolean;
+      last_collection_date: string | null;
     }>(
       `WITH bounds AS (
          SELECT
@@ -792,6 +794,12 @@ export const collectionEntryService = {
             AND c.collection_date >= b.week_start
             AND c.collection_date <= b.week_end
           GROUP BY c.shop_id
+       ),
+       last_collection AS (
+         SELECT c.shop_id, MAX(c.collection_date)::date AS last_date
+           FROM collections c
+          WHERE COALESCE(c.deleted, FALSE) = FALSE
+          GROUP BY c.shop_id
        )
        SELECT
          s.id AS shop_id,
@@ -813,19 +821,21 @@ export const collectionEntryService = {
            WHEN COALESCE(ws.amt, 0) = 0 THEN 0
            ELSE ROUND((COALESCE(wa.amt, 0) / ws.amt) * 100, 4)
          END AS recovery_percentage,
-         (COALESCE(wp.amt, 0) > 0) AS has_pending
+         (COALESCE(wp.amt, 0) > 0) AS has_pending,
+         lc.last_date AS last_collection_date
        FROM shops s
        CROSS JOIN bounds b
        LEFT JOIN ledger_before lb ON lb.shop_id = s.id
        LEFT JOIN weekly_sales ws ON ws.shop_id = s.id
        LEFT JOIN weekly_approved wa ON wa.shop_id = s.id
        LEFT JOIN weekly_pending wp ON wp.shop_id = s.id
+       LEFT JOIN last_collection lc ON lc.shop_id = s.id
        WHERE s.status = 'Active'
        ORDER BY s.shop_name ASC`,
       [asOf]
     );
 
-    return result.rows.map((row) => ({
+    const shops: PendingCollectionSummaryRow[] = result.rows.map((row) => ({
       shopId: num(row.shop_id),
       shopName: str(row.shop_name),
       weekStart: dateOnly(row.week_start) ?? "",
@@ -838,7 +848,28 @@ export const collectionEntryService = {
       recoveryPercentage: num(row.recovery_percentage),
       overdueDays: null,
       hasPendingCollections: Boolean(row.has_pending),
+      lastCollectionDate: dateOnly(row.last_collection_date),
     }));
+
+    const weeklySales = shops.reduce((sum, row) => sum + row.weeklySales, 0);
+    const weeklyApprovedCollections = shops.reduce((sum, row) => sum + row.weeklyApprovedCollections, 0);
+    const weeklyPendingCollections = shops.reduce((sum, row) => sum + row.weeklyPendingCollections, 0);
+    const balance = shops.reduce((sum, row) => sum + row.balance, 0);
+    const recoveryPercentage =
+      weeklySales === 0 ? 0 : Math.round((weeklyApprovedCollections / weeklySales) * 1000000) / 10000;
+
+    return {
+      weekStart: shops[0]?.weekStart ?? "",
+      weekEnd: shops[0]?.weekEnd ?? "",
+      shops,
+      totals: {
+        weeklySales,
+        weeklyApprovedCollections,
+        weeklyPendingCollections,
+        balance,
+        recoveryPercentage,
+      },
+    };
   },
 
   /**

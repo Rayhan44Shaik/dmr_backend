@@ -35,6 +35,7 @@ async function seedShop(opening: number, name?: string): Promise<{ id: number; n
     phoneNumber: `97310001${String(seq).padStart(2, "0")}`,
     village: "Village",
     address: "Addr",
+    email: `pc${seq}@test.local`,
     status: "Active",
     openingBalance: opening,
   });
@@ -171,13 +172,25 @@ async function pgToday(): Promise<string> {
   return r.rows[0].d;
 }
 
+function pendingSummaryShops(body: unknown): Array<{ shopId: number } & Record<string, unknown>> {
+  assert.ok(body && typeof body === "object" && "shops" in body, "pending-summary must return { shops, totals }");
+  const shops = (body as { shops: Array<{ shopId: number }> }).shops;
+  assert.ok(Array.isArray(shops), "pending-summary.shops must be an array");
+  return shops;
+}
+
+function pendingSummaryTotals(body: unknown): Record<string, unknown> {
+  assert.ok(body && typeof body === "object" && "totals" in body, "pending-summary must return totals");
+  return (body as { totals: Record<string, unknown> }).totals;
+}
+
 function findShop(
-  rows: Array<{ shopId: number }>,
+  body: unknown,
   shopId: number
 ): Record<string, unknown> {
-  const row = rows.find((r) => r.shopId === shopId);
+  const row = pendingSummaryShops(body).find((r) => r.shopId === shopId);
   assert.ok(row, `shop ${shopId} missing from pending-summary`);
-  return row as Record<string, unknown>;
+  return row;
 }
 
 describe("Pending Collection pending-summary", () => {
@@ -248,7 +261,7 @@ describe("Pending Collection pending-summary", () => {
     await seedShop(0, `PC Alpha ${seq + 2}`);
     const res = await getJson(baseUrl, `/api/operations/collection-entry/pending-summary?date=2026-08-18`);
     assert.equal(res.status, 200);
-    const names = (res.body as Array<{ shopName: string }>).map((r) => r.shopName);
+    const names = pendingSummaryShops(res.body).map((r) => String(r.shopName));
     const sorted = [...names].sort((a, b) => a.localeCompare(b));
     assert.deepEqual(names, sorted);
   });
@@ -300,6 +313,23 @@ describe("Pending Collection pending-summary", () => {
     assert.equal(row.weeklySales, weekly.weeklySales);
     assert.equal(row.weeklyApprovedCollections, weekly.approvedCollections);
     assert.equal(row.weeklyPendingCollections, weekly.pendingCollections);
+  });
+
+  it("returns backend-authoritative all-shop totals including recovery", async () => {
+    const { shop } = await seedShopWithDebit(0, 100000, "2026-08-18");
+    const c = await collectionEntryService.create({
+      collectionDate: "2026-08-18", shopId: shop.id, amount: 90000,
+    });
+    await collectionEntryService.approve(c.id);
+    const res = await getJson(baseUrl, `/api/operations/collection-entry/pending-summary?date=2026-08-18`);
+    const totals = pendingSummaryTotals(res.body);
+    assert.ok(typeof totals.weeklySales === "number");
+    assert.ok(typeof totals.recoveryPercentage === "number");
+    assert.equal(res.body.weekStart, "2026-08-17");
+    assert.equal(res.body.weekEnd, "2026-08-23");
+    const row = findShop(res.body, shop.id);
+    assert.ok(Number(totals.weeklySales) >= Number(row.weeklySales));
+    assert.ok(Number(totals.weeklyApprovedCollections) >= Number(row.weeklyApprovedCollections));
   });
 });
 
