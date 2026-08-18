@@ -226,6 +226,7 @@ export interface FuelExpense {
   supervisorId: number | null;
   supervisorName: string | null;
   tripId: number | null;
+  sourceTripId?: number | null;
   tripNo?: string | null;
   tripFuelEntryIndex: number | null;
   currentMeter: number;

@@ -64,6 +64,7 @@ export interface Shop {
   shopName: string;
   ownerName: string;
   phoneNumber: string;
+  email?: string | null;
   village: string;
   address?: string | null;
   status: ActiveStatus;

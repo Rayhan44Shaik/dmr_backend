@@ -621,6 +621,13 @@ operationsRouter.put(
   })
 );
 
+operationsRouter.patch(
+  "/fuel-expenses/:id",
+  asyncHandler(async () => {
+    throw new AppError(405, "PATCH is not supported for fuel expenses. Posted trip fuel cannot be mutated.");
+  })
+);
+
 operationsRouter.post(
   "/fuel-expenses/:id/approve",
   asyncHandler(async (req, res) => {

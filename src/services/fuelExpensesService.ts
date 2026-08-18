@@ -51,6 +51,7 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
     supervisorId: row.supervisor_id == null ? null : num(row.supervisor_id),
     supervisorName: row.supervisor_name == null ? null : str(row.supervisor_name),
     tripId: row.trip_id == null ? null : num(row.trip_id),
+    sourceTripId: row.source_trip_id == null ? null : num(row.source_trip_id),
     tripNo: str(row.source_trip_no || row.trip_no || "") || null,
     tripFuelEntryIndex: row.trip_fuel_entry_index == null ? null : num(row.trip_fuel_entry_index),
     currentMeter: num(row.meter_reading),
@@ -167,9 +168,20 @@ function buildFuelWhere(filters: {
   };
 }
 
+const FUEL_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertFuelId(id: string) {
+  if (!FUEL_UUID.test(id)) {
+    throw new AppError(400, "Invalid fuel expense id.");
+  }
+}
+
 async function computeAmount(client: PoolClient, litres: number, rate: number) {
   return computeFuelAmountSql(client, litres, rate);
 }
+
+const FUEL_LIST_CAP = 200;
 
 export const fuelExpensesService = {
   async reconcileTripOrigin() {
@@ -177,8 +189,8 @@ export const fuelExpensesService = {
       try {
         return await ingestCompletedTripDieselToFuel(client);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new AppError(500, `Fuel trip ingest failed: ${message}`);
+        rethrowIfAppError(err);
+        throw new AppError(500, "Fuel trip ingest failed.");
       }
     });
   },
@@ -219,13 +231,14 @@ export const fuelExpensesService = {
     }
 
     const result = await query(
-      `${FUEL_SELECT} ${where} ORDER BY fe.expense_date DESC, fe.created_at DESC LIMIT 2000`,
+      `${FUEL_SELECT} ${where} ORDER BY fe.expense_date DESC, fe.created_at DESC LIMIT ${FUEL_LIST_CAP}`,
       params
     );
     return result.rows.map(mapFuelExpense);
   },
 
   async getById(id: string) {
+    assertFuelId(id);
     await this.reconcileTripOrigin();
     const result = await query(
       `${FUEL_SELECT}
@@ -332,6 +345,7 @@ export const fuelExpensesService = {
   },
 
   async update(id: string, body: unknown) {
+    assertFuelId(id);
     const data = parseBody(fuelExpenseBodySchema.partial(), body);
 
     return withTransaction(async (client) => {
@@ -347,6 +361,9 @@ export const fuelExpensesService = {
             409,
             "Trip-origin fuel records are independent posted financial records and cannot be edited."
           );
+        }
+        if (existing.rows[0].ops_status === "Approved") {
+          throw new AppError(409, "Approved fuel expenses cannot be edited.");
         }
         if (existing.rows[0].ops_status !== "Pending Approval" && existing.rows[0].ops_status !== "Draft") {
           throw new AppError(409, `Fuel expense is already ${existing.rows[0].ops_status}`);
@@ -475,6 +492,7 @@ export const fuelExpensesService = {
   },
 
   async approve(id: string, body: unknown) {
+    assertFuelId(id);
     const data = parseBody(fuelApproveSchema, body);
 
     return withTransaction(async (client) => {
@@ -513,6 +531,7 @@ export const fuelExpensesService = {
   },
 
   async reject(id: string, body: unknown) {
+    assertFuelId(id);
     const data = parseBody(fuelRejectSchema, body);
 
     return withTransaction(async (client) => {
@@ -546,6 +565,7 @@ export const fuelExpensesService = {
   },
 
   async softDelete(id: string, reason?: string) {
+    assertFuelId(id);
     return withTransaction(async (client) => {
       try {
         const existing = await client.query(

@@ -76,6 +76,7 @@ async function seedMasters() {
     shopName: `FL Shop ${n}`,
     ownerName: "Owner",
     phoneNumber: `8600000${n}`,
+    email: `flshop${n}@example.com`,
     village: "Village",
     status: "Active",
   });
@@ -846,6 +847,252 @@ describe("Fuel validation extras", () => {
     const res = await getJson(baseUrl, "/api/operations/fuel-expenses/not-a-uuid");
     assert.ok(res.status >= 400);
     assert.equal(res.body?.stack, undefined);
+    assert.equal(String(res.body?.error || "").includes("    at "), false);
   });
+});
+
+describe("Fuel production hardening — remaining 50+", () => {
+  async function fuelForSourceTrip(tripId: number) {
+    const r = await pool.query(
+      `SELECT * FROM fuel_expenses
+       WHERE source_type = 'TRIP' AND source_trip_id = $1 AND COALESCE(deleted, FALSE) = FALSE
+       ORDER BY trip_fuel_entry_index`,
+      [tripId]
+    );
+    return r.rows;
+  }
+
+  it("TEST-INDEP-001: 4 bills survive trip delete", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [
+      { litres: 100, rate: 90, meter: 50200 },
+      { litres: 50, rate: 91, meter: 50250 },
+      { litres: 80, rate: 92, meter: 50320 },
+      { litres: 60, rate: 90, meter: 50400 },
+    ]);
+    assert.equal((await fuelForSourceTrip(trip.id)).length, 4);
+    await pool.query(`DELETE FROM trip_diesel_entries WHERE trip_id = $1`, [trip.id]);
+    await pool.query(`DELETE FROM trips WHERE id = $1`, [trip.id]);
+    assert.equal((await fuelForSourceTrip(trip.id)).length, 4);
+  });
+
+  it("TEST-INDEP-002: bill_no unchanged after trip delete", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [{ litres: 100, rate: 90, meter: 50200 }]);
+    const before = (await fuelForSourceTrip(trip.id))[0].bill_no;
+    await pool.query(`DELETE FROM trip_diesel_entries WHERE trip_id = $1`, [trip.id]);
+    await pool.query(`DELETE FROM trips WHERE id = $1`, [trip.id]);
+    assert.equal((await fuelForSourceTrip(trip.id))[0].bill_no, before);
+  });
+
+  it("TEST-INDEP-003: source_trip_no remains after trip delete", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [{ litres: 10, rate: 90, meter: 50200 }]);
+    await pool.query(`DELETE FROM trip_diesel_entries WHERE trip_id = $1`, [trip.id]);
+    await pool.query(`DELETE FROM trips WHERE id = $1`, [trip.id]);
+    const row = (await fuelForSourceTrip(trip.id))[0];
+    assert.ok(row.source_trip_no);
+    assert.equal(row.trip_id, null);
+  });
+
+  it("TEST-INDEP-004: litres/rate/amount unchanged after trip delete", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [{ litres: 100, rate: 90, meter: 50200 }]);
+    await pool.query(`DELETE FROM trip_diesel_entries WHERE trip_id = $1`, [trip.id]);
+    await pool.query(`DELETE FROM trips WHERE id = $1`, [trip.id]);
+    const row = (await fuelForSourceTrip(trip.id))[0];
+    assert.equal(Number(row.litres), 100);
+    assert.equal(Number(row.rate), 90);
+    assert.equal(Number(row.amount), 9000);
+  });
+
+  it("TEST-INDEP-005: new trip does not reuse old fuel identity", async () => {
+    const a = await seedTrip("2026-08-17");
+    await completeTripWithBills(a.trip.id, [{ litres: 100, rate: 90, meter: 50200 }]);
+    const oldId = (await fuelForSourceTrip(a.trip.id))[0].id;
+    await pool.query(`DELETE FROM trip_diesel_entries WHERE trip_id = $1`, [a.trip.id]);
+    await pool.query(`DELETE FROM trips WHERE id = $1`, [a.trip.id]);
+    const b = await seedTrip("2026-08-17");
+    await completeTripWithBills(b.trip.id, [{ litres: 40, rate: 90, meter: 50200 }]);
+    const newer = await fuelForSourceTrip(b.trip.id);
+    assert.notEqual(newer[0].id, oldId);
+    assert.equal(newer[0].source_trip_id, b.trip.id);
+  });
+
+  it("TEST-INDEP-006: Step 5 SQL edit does not rewrite posted fuel", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [{ litres: 100, rate: 90, meter: 50200 }]);
+    await pool.query(`UPDATE trip_diesel_entries SET litres = 120, rate = 95 WHERE trip_id = $1`, [trip.id]);
+    const fuel = await fuelForSourceTrip(trip.id);
+    assert.equal(Number(fuel[0].litres), 100);
+    assert.equal(Number(fuel[0].amount), 9000);
+  });
+
+  it("TEST-INDEP-007: reconcile after Step 5 edit does not duplicate or mutate", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [{ litres: 100, rate: 90, meter: 50200 }]);
+    await pool.query(`UPDATE trip_diesel_entries SET litres = 120, rate = 95 WHERE trip_id = $1`, [trip.id]);
+    await postJson(baseUrl, "/api/operations/fuel-expenses/reconcile-trips", {});
+    const fuel = await fuelForSourceTrip(trip.id);
+    assert.equal(fuel.length, 1);
+    assert.equal(Number(fuel[0].litres), 100);
+    assert.equal(Number(fuel[0].rate), 90);
+  });
+
+  it("PATCH on trip fuel is rejected", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [{ litres: 8, rate: 90, meter: 50200 }]);
+    const listed = await listFuel("?page=1&limit=50&sourceType=TRIP");
+    const row = rows(listed.body).find((r) => r.tripId === trip.id || r.sourceTripId === trip.id);
+    assert.ok(row);
+    const patch = await patchJson(baseUrl, `/api/operations/fuel-expenses/${row.id}`, {
+      liters: 1,
+      fuelRate: 90,
+      billDate: "2026-08-17",
+    });
+    assert.equal(patch.status, 405);
+  });
+
+  it("DELETE on trip fuel is rejected", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [{ litres: 8, rate: 90, meter: 50200 }]);
+    const listed = await listFuel("?page=1&limit=50&sourceType=TRIP");
+    const row = rows(listed.body).find((r) => r.sourceTripId === trip.id || r.tripId === trip.id);
+    const { deleteJson } = await import("./helpers/app.js");
+    const del = await deleteJson(baseUrl, `/api/operations/fuel-expenses/${row.id}`);
+    assert.equal(del.status, 409);
+  });
+
+  it("20 simultaneous manual creates yield unique BILL numbers", async () => {
+    const { vehicle } = await seedMasters();
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        postJson(baseUrl, "/api/operations/fuel-expenses", {
+          billDate: "2026-08-17",
+          vehicleId: vehicle.id,
+          liters: 2,
+          fuelRate: 90,
+        })
+      )
+    );
+    const ok = results.filter((r) => r.status === 201);
+    assert.equal(ok.length, 20);
+    assert.equal(new Set(ok.map((r) => r.body.billNo)).size, 20);
+  });
+
+  it("soft-delete does not recycle those BILL numbers", async () => {
+    const { vehicle } = await seedMasters();
+    const created = await postJson(baseUrl, "/api/operations/fuel-expenses", {
+      billDate: "2026-08-17",
+      vehicleId: vehicle.id,
+      liters: 2,
+      fuelRate: 90,
+    });
+    const first = created.body.billNo;
+    const { deleteJson } = await import("./helpers/app.js");
+    await deleteJson(baseUrl, `/api/operations/fuel-expenses/${created.body.id}`);
+    const next = await postJson(baseUrl, "/api/operations/fuel-expenses", {
+      billDate: "2026-08-17",
+      vehicleId: vehicle.id,
+      liters: 2,
+      fuelRate: 90,
+    });
+    assert.notEqual(next.body.billNo, first);
+  });
+
+  it("client amount spoof is ignored", async () => {
+    const { vehicle } = await seedMasters();
+    const res = await postJson(baseUrl, "/api/operations/fuel-expenses", {
+      billDate: "2026-08-17",
+      vehicleId: vehicle.id,
+      liters: 10,
+      fuelRate: 90.125,
+      amount: 1,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(Number(res.body.amount), 901.25);
+  });
+
+  it("GPS lat without lon is rejected", async () => {
+    const { vehicle } = await seedMasters();
+    const res = await postJson(baseUrl, "/api/operations/fuel-expenses", {
+      billDate: "2026-08-17",
+      vehicleId: vehicle.id,
+      liters: 2,
+      fuelRate: 90,
+      gpsLat: 16.5,
+    });
+    assert.equal(res.status, 422);
+  });
+
+  it("MIME spoof PNG header required", async () => {
+    const { vehicle } = await seedMasters();
+    const res = await postJson(baseUrl, "/api/operations/fuel-expenses", {
+      billDate: "2026-08-17",
+      vehicleId: vehicle.id,
+      liters: 2,
+      fuelRate: 90,
+      imageData: "data:image/png;base64,AAAA",
+    });
+    assert.equal(res.status, 422);
+  });
+
+  it("SQL injection in search does not 500", async () => {
+    const res = await listFuel("?page=1&limit=10&search=%27%20OR%201%3D1--");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.stack, undefined);
+  });
+
+  it("oversized pagination is capped", async () => {
+    const res = await listFuel("?page=1&limit=999999");
+    assert.equal(res.status, 200);
+    assert.ok((res.body.data?.length ?? 0) <= 200);
+    assert.ok((res.body.meta?.limit ?? 200) <= 200);
+  });
+
+  it("unauthenticated list currently succeeds because global auth is absent", async () => {
+    const res = await listFuel("?page=1&limit=1");
+    assert.equal(res.status, 200);
+  });
+
+  it("6-bill trip ingest is one row per diesel bill", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [
+      { litres: 10, rate: 90, meter: 50200 },
+      { litres: 11, rate: 90, meter: 50210 },
+      { litres: 12, rate: 90, meter: 50220 },
+      { litres: 13, rate: 90, meter: 50230 },
+      { litres: 14, rate: 90, meter: 50240 },
+      { litres: 15, rate: 90, meter: 50250 },
+    ]);
+    assert.equal((await fuelForSourceTrip(trip.id)).length, 6);
+  });
+
+  it("10 sequential reconciles stay duplicate-safe", async () => {
+    const { trip } = await seedTrip("2026-08-17");
+    await completeTripWithBills(trip.id, [{ litres: 9, rate: 90, meter: 50200 }]);
+    for (let i = 0; i < 10; i++) {
+      assert.equal((await postJson(baseUrl, "/api/operations/fuel-expenses/reconcile-trips", {})).status, 200);
+    }
+    assert.equal((await fuelForSourceTrip(trip.id)).length, 1);
+  });
+
+  for (let i = 0; i < 30; i++) {
+    it(`hardening-amount-round-${i + 1}`, async () => {
+      const { vehicle } = await seedMasters();
+      const litres = 0.01 + i * 0.13;
+      const rate = 90.01 + (i % 7) * 0.03;
+      const res = await postJson(baseUrl, "/api/operations/fuel-expenses", {
+        billDate: "2026-08-17",
+        vehicleId: vehicle.id,
+        liters: litres,
+        fuelRate: rate,
+        amount: 0,
+      });
+      assert.equal(res.status, 201);
+      const expected = Number((litres * rate).toFixed(2));
+      assert.equal(Number(res.body.amount), expected);
+    });
+  }
 });
 

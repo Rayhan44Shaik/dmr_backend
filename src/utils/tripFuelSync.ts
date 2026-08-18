@@ -158,7 +158,10 @@ export async function syncDieselToFuelExpenses(
          CASE WHEN $21::int = 1 THEN $20 ELSE NULL END,
          CASE WHEN $21::int = 1 THEN NOW() ELSE NULL END,
          $20
-       )`,
+       )
+       ON CONFLICT (source_trip_id, trip_fuel_entry_index)
+         WHERE source_type = 'TRIP' AND deleted = FALSE AND source_trip_id IS NOT NULL
+       DO NOTHING`,
       [
         billNo,
         tripDate,
@@ -237,6 +240,7 @@ export async function ingestCompletedTripDieselToFuel(
   client: Client,
   tripId?: number
 ): Promise<number> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext('fuel-reconcile-all'))`);
   const trips = await client.query(
     `SELECT t.id, t.trip_no, t.trip_date, t.status, t.vehicle_id, t.vehicle_no,
             t.driver_id, t.driver_name, t.supervisor_id, t.supervisor_name

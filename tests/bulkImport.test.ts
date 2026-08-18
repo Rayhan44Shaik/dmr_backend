@@ -115,17 +115,18 @@ const suites: SuiteOptions[] = [
       phoneNumber: `9000000${String(n).padStart(3, "0")}`,
       village: "Village",
       address: "Address",
+      email: `shop${n}@example.com`,
       status: "Active",
     }),
-    invalidTypeRow: { shopName: "Type Test", village: { not: "a string" } },
-    invalidStatusRow: { shopName: "Status Test", status: "Bogus" },
-    invalidPhoneRow: { shopName: "Phone Test", phoneNumber: "not-a-phone" },
+    invalidTypeRow: { shopName: "Type Test", village: { not: "a string" }, email: "type@example.com" },
+    invalidStatusRow: { shopName: "Status Test", status: "Bogus", email: "status@example.com" },
+    invalidPhoneRow: { shopName: "Phone Test", phoneNumber: "not-a-phone", email: "phone@example.com" },
     invalidDateRow: null,
-    dbViolationRow: { shopName: "X".repeat(300) }, // VARCHAR(200) → 22001
+    dbViolationRow: { shopName: "X".repeat(300), email: "long@example.com" }, // VARCHAR(200) → 22001
     // openingBalance is a real, persisted shop column (masterValidation.ts) —
     // use a field that is genuinely never persisted to test the "ignores
     // unknown fields" contract.
-    legacyRow: { shopName: "Legacy Shop", closingBalance: 8888, oldSpreadsheetRef: "XYZ-1" },
+    legacyRow: { shopName: "Legacy Shop", email: "legacy@example.com", closingBalance: 8888, oldSpreadsheetRef: "XYZ-1" },
     numericStringRow: null,
     numericStringExpect: () => {},
   },
@@ -450,7 +451,7 @@ for (const s of suites) {
       const body = await bulkOk([s.legacyRow], s.endpoint);
       const row = body.created[0];
       const legacyKeys = Object.keys(s.legacyRow).filter(
-        (k) => k !== s.requiredField
+        (k) => k !== s.requiredField && k !== "email"
       );
       for (const key of legacyKeys) {
         assert.ok(!(key in row), `obsolete field ${key} must not be persisted`);
@@ -467,6 +468,160 @@ for (const s of suites) {
 // ---------------------------------------------------------------------------
 // Existing singular CRUD must keep working unchanged (regression check)
 // ---------------------------------------------------------------------------
+
+describe("shop bulk import email", () => {
+  it("persists a valid email", async () => {
+    const withEmail = await bulkOk(
+      [
+        {
+          shopName: "Email Shop",
+          ownerName: "Owner One",
+          phoneNumber: "9000000001",
+          village: "Village",
+          email: "shop@example.com",
+        },
+      ],
+      "/api/masters/shops/bulk"
+    );
+    assert.equal(withEmail.created[0].email, "shop@example.com");
+  });
+
+  it("rejects a blank email", async () => {
+    const { body } = await expectBulkError(
+      [
+        {
+          shopName: "Blank Email Shop",
+          ownerName: "Owner Two",
+          phoneNumber: "9000000002",
+          village: "Village",
+          email: "",
+        },
+      ],
+      "/api/masters/shops/bulk",
+      400
+    );
+    assert.equal(body.details.errors[0].field, "email");
+    assert.match(body.details.errors[0].message, /Email ID is required/i);
+    assert.equal(await countRows("shops"), 0);
+  });
+
+  it("rejects a missing email field", async () => {
+    const { body } = await expectBulkError(
+      [
+        {
+          shopName: "Missing Email Shop",
+          ownerName: "Owner Four",
+          phoneNumber: "9000000004",
+          village: "Village",
+        },
+      ],
+      "/api/masters/shops/bulk",
+      400
+    );
+    assert.equal(body.details.errors[0].field, "email");
+    assert.match(body.details.errors[0].message, /Email ID is required|email is required/i);
+    assert.equal(await countRows("shops"), 0);
+  });
+
+  it("rejects an invalid email and inserts no rows", async () => {
+    const { body } = await expectBulkError(
+      [
+        {
+          shopName: "Bad Email Shop",
+          ownerName: "Owner Three",
+          phoneNumber: "9000000003",
+          village: "Village",
+          email: "not-an-email",
+        },
+      ],
+      "/api/masters/shops/bulk",
+      400
+    );
+    assert.equal(body.details.errors[0].field, "email");
+    assert.match(body.details.errors[0].message, /valid email/i);
+    assert.equal(await countRows("shops"), 0);
+  });
+});
+
+describe("shop singular email", () => {
+  const validShop = {
+    shopName: "Required Email Shop",
+    ownerName: "Owner Five",
+    phoneNumber: "9000000005",
+    village: "Village",
+    email: "required@example.com",
+  };
+
+  it("create: valid email passes; blank, missing, and invalid fail", async () => {
+    const ok = await postJson(baseUrl, "/api/masters/shops", validShop);
+    assert.equal(ok.status, 201);
+    assert.equal(ok.body.email, "required@example.com");
+
+    const blank = await postJson(baseUrl, "/api/masters/shops", { ...validShop, shopName: "Blank", email: "" });
+    assert.equal(blank.status, 400);
+    assert.match(String(blank.body.error), /Email ID is required/i);
+
+    const missing = await postJson(baseUrl, "/api/masters/shops", {
+      shopName: "Missing Email Create",
+      ownerName: "Owner Six",
+      phoneNumber: "9000000006",
+      village: "Village",
+    });
+    assert.equal(missing.status, 400);
+    assert.match(String(missing.body.error), /Email ID is required/i);
+
+    const invalid = await postJson(baseUrl, "/api/masters/shops", {
+      ...validShop,
+      shopName: "Invalid Email Create",
+      email: "not-an-email",
+    });
+    assert.equal(invalid.status, 400);
+    assert.match(String(invalid.body.error), /valid email/i);
+  });
+
+  it("update: valid email passes; blank and invalid fail", async () => {
+    const created = await postJson(baseUrl, "/api/masters/shops", {
+      ...validShop,
+      shopName: "Edit Email Shop",
+      phoneNumber: "9000000007",
+      email: "before@example.com",
+    });
+    assert.equal(created.status, 201);
+    const id = created.body.id as number;
+
+    const blank = await fetch(`${baseUrl}/api/masters/shops/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validShop, shopName: "Edit Email Shop", shopNo: created.body.shopNo, email: "" }),
+    });
+    assert.equal(blank.status, 400);
+    const blankBody = await blank.json() as { error: string };
+    assert.match(blankBody.error, /Email ID is required/i);
+
+    const invalid = await fetch(`${baseUrl}/api/masters/shops/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validShop, shopName: "Edit Email Shop", shopNo: created.body.shopNo, email: "bad" }),
+    });
+    assert.equal(invalid.status, 400);
+    const invalidBody = await invalid.json() as { error: string };
+    assert.match(invalidBody.error, /valid email/i);
+
+    const ok = await fetch(`${baseUrl}/api/masters/shops/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...validShop,
+        shopName: "Edit Email Shop",
+        shopNo: created.body.shopNo,
+        email: "after@example.com",
+      }),
+    });
+    assert.equal(ok.status, 200);
+    const okBody = await ok.json() as { email: string };
+    assert.equal(okBody.email, "after@example.com");
+  });
+});
 
 describe("existing singular master CRUD regression", () => {
   it("POST/PUT/DELETE still work for all five masters", async () => {

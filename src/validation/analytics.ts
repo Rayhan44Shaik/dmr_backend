@@ -37,6 +37,15 @@ export interface AnalyticsQuery {
  * so an omitted range never silently drifts to a different window than the
  * frontend uses.
  */
+/**
+ * Analytics-level safe maximum for a report window. Prevents an uncontrolled
+ * weekly series (and unbounded aggregation) from a pathological range.
+ * 50 years ≈ 2600 Sunday buckets — well within the memory/CPU budget while
+ * covering every realistic fleet report. Exceeding it is rejected with a clear
+ * 400 (global validation is left untouched).
+ */
+export const MAX_ANALYTICS_RANGE_DAYS = 50 * 366;
+
 export function parseAnalyticsQuery(query: Record<string, unknown>): AnalyticsQuery {
   const parsed = analyticsQuerySchema.safeParse(query);
   if (!parsed.success) {
@@ -63,6 +72,19 @@ export function parseAnalyticsQuery(query: Record<string, unknown>): AnalyticsQu
   }
   if (fromDate > toDate) {
     throw new AppError(400, "fromDate cannot be after toDate.");
+  }
+
+  const rangeDays =
+    Math.round(
+      (new Date(`${toDate}T00:00:00Z`).getTime() -
+        new Date(`${fromDate}T00:00:00Z`).getTime()) /
+        86_400_000
+    ) + 1;
+  if (rangeDays > MAX_ANALYTICS_RANGE_DAYS) {
+    throw new AppError(
+      400,
+      `Analytics date range is too large (${rangeDays} days). Maximum is ${MAX_ANALYTICS_RANGE_DAYS} days (~50 years).`
+    );
   }
 
   return { fromDate, toDate, vehicleId };
