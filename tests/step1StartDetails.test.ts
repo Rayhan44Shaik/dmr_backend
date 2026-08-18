@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { getJson, postJson, startApp, type TestApp } from "./helpers/app.js";
-import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
+import { applySchema, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
@@ -18,9 +18,7 @@ const { mastersService } = await import("../src/services/mastersService.js");
 const { tripsService } = await import("../src/services/tripsService.js");
 
 after(async () => {
-  await app.close();
-  await testDb.close();
-  await pool.end();
+  await shutdownTestEnv({ app, testDb, pool });
 });
 
 let seq = 0;
@@ -244,10 +242,7 @@ describe("Step 1 start details", () => {
     assert.equal(update.body.openingMeter, 1200);
   });
 
-  it(
-    "concurrent Step 1 submits for the same vehicle create only one trip",
-    { skip: "PGlite/pg-gateway does not serialize advisory locks across pool clients; production PostgreSQL does via pg_advisory_xact_lock in lockTripResourcesForWrite." },
-    async () => {
+  it("second Step 1 submit for the same vehicle is rejected (occupancy)", async () => {
     const m = await seedCrew();
     const m2 = await seedCrew();
     const a = startPayload(m, { tripDate: "2026-08-23" });
@@ -256,21 +251,22 @@ describe("Step 1 start details", () => {
       vehicleId: m.vehicle.id,
       vehicleNo: m.vehicle.vehicleNumber,
     };
-    const results = await Promise.allSettled([
-      tripsService.save(null, { ...a, startStepSubmitted: true, status: "Draft" }),
+    // PGlite/pg-gateway does not serialize pg_advisory_xact_lock across pool
+    // clients, so overlapping Promise.all can insert two drafts. Production
+    // PostgreSQL serializes via lockTripResourcesForWrite. This assertion still
+    // requires occupancy: the second save must fail after the first commits.
+    const first = await tripsService.save(null, { ...a, startStepSubmitted: true, status: "Draft" });
+    await assert.rejects(
       tripsService.save(null, { ...b, startStepSubmitted: true, status: "Draft" }),
-    ]);
-    const fulfilled = results.filter((r) => r.status === "fulfilled");
-    const rejected = results.filter((r) => r.status === "rejected");
-    assert.equal(fulfilled.length, 1, JSON.stringify(results.map((r) => r.status === "rejected" ? String(r.reason) : "ok")));
-    assert.equal(rejected.length, 1);
+      /already assigned/
+    );
     const created = await pool.query(
       `SELECT COUNT(*)::int AS n FROM trips WHERE vehicle_id = $1 AND start_step_submitted = TRUE AND deleted = FALSE`,
       [m.vehicle.id]
     );
     assert.equal(created.rows[0].n, 1);
-    }
-  );
+    assert.ok(first.id);
+  });
 
   it("retry after success does not create a duplicate trip number", async () => {
     const m = await seedCrew();

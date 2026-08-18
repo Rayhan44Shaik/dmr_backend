@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import { getJson, postJson, startApp, type TestApp } from "./helpers/app.js";
-import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
+import { applySchema, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
@@ -16,9 +16,7 @@ const { pool } = await import("../src/config/db.js");
 const { mastersService } = await import("../src/services/mastersService.js");
 
 after(async () => {
-  await app.close();
-  await testDb.close();
-  await pool.end();
+  await shutdownTestEnv({ app, testDb, pool });
 });
 
 const PHOTO =

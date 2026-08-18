@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import { startApp, type TestApp } from "./helpers/app.js";
-import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
+import { applySchema, markTripCompletedForTests, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
@@ -32,9 +32,7 @@ const { shopLedgerService } = await import("../src/services/shopLedgerService.js
 const { recalcTripDeliveryTotals } = await import("../src/utils/tripDeliverySync.js");
 
 after(async () => {
-  await app.close();
-  await testDb.close();
-  await pool.end();
+  await shutdownTestEnv({ app, testDb, pool });
 });
 
 let seq = 0;
@@ -103,7 +101,7 @@ async function makeCompletedTrip(
   sup: Awaited<ReturnType<typeof seedSupport>>,
   opts: { tripNo: string; tripDate: string; totalBirds: number; dcWeight: number }
 ) {
-  return tripsService.save(null, {
+  const trip = await tripsService.save(null, {
     tripNo: opts.tripNo,
     tripDate: opts.tripDate,
     status: "Completed",
@@ -126,6 +124,8 @@ async function makeCompletedTrip(
     totalBirds: opts.totalBirds,
     dcWeight: opts.dcWeight,
   } as unknown as Record<string, unknown>);
+  await markTripCompletedForTests(trip.id);
+  return { ...trip, status: "Completed" as const };
 }
 
 async function addDelivery(tripId: number, shopId: number, shopName: string, amount: number): Promise<number> {

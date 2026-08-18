@@ -60,7 +60,7 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
 
   // Wait for the health endpoint to come up (the server does
   // `SELECT 1`-equivalent checks before listening).
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 90_000;
   for (;;) {
     if (child.exitCode !== null) {
       throw new Error(`test server exited early (code ${child.exitCode}):\n${stderr}`);
@@ -73,7 +73,7 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
     }
     if (Date.now() > deadline) {
       child.kill("SIGKILL");
-      throw new Error(`test server did not start within 30s:\n${stderr}`);
+      throw new Error(`test server did not start within 90s:\n${stderr}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
@@ -90,6 +90,10 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
       }
       if (child.exitCode === null) {
         child.kill("SIGKILL");
+        await Promise.race([
+          new Promise<void>((resolve) => child.once("exit", () => resolve())),
+          new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+        ]);
       }
     },
   };

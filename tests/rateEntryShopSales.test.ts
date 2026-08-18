@@ -26,7 +26,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { getJson, postJson, putJson, startApp, type TestApp } from "./helpers/app.js";
-import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
+import { applySchema, currentPgDate, createMutex, markTripCompletedForTests, shiftIsoDate, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
@@ -39,9 +39,7 @@ const { mastersService } = await import("../src/services/mastersService.js");
 const { tripsService } = await import("../src/services/tripsService.js");
 
 after(async () => {
-  await app.close();
-  await testDb.close();
-  await pool.end();
+  await shutdownTestEnv({ app, testDb, pool });
 });
 
 // ---------------------------------------------------------------------------
@@ -123,15 +121,19 @@ async function seedMasters() {
 
 /** A finalized (Completed) trip with a fixed bird/weight capacity, created
  * directly via the production save() path (same as tripList.test.ts). */
+const exclusiveTripCreate = createMutex();
+let tripDateSlot = 0;
 async function makeCompletedTrip(
   m: Awaited<ReturnType<typeof seedMasters>>,
   opts: { tripNo: string; tripDate: string; totalBirds: number; dcWeight: number }
 ) {
+  return exclusiveTripCreate(async () => {
+  const tripDate = shiftIsoDate(await currentPgDate(), -(++tripDateSlot % 9));
   const trip = await tripsService.save(null, {
     tripNo: opts.tripNo,
-    tripDate: opts.tripDate,
+    tripDate,
     status: "Completed",
-    startTime: `${opts.tripDate}T05:30:00.000Z`,
+    startTime: `${tripDate}T05:30:00.000Z`,
     vehicleId: m.vehicle.id,
     vehicleNo: m.vehicle.vehicleNumber,
     driverId: m.driver.id,
@@ -158,7 +160,9 @@ async function makeCompletedTrip(
   // realistic completion time instead of falling back to trip_date, which
   // would put every fixture trip immediately outside the window.
   await pool.query(`UPDATE trips SET approved_at = NOW() WHERE id = $1`, [trip.id]);
+  await markTripCompletedForTests(trip.id);
   return trip;
+  });
 }
 
 async function addDelivery(
@@ -180,6 +184,8 @@ async function addDelivery(
 // ---------------------------------------------------------------------------
 // 1. Full lifecycle: Rate Entry visibility -> save -> lock -> Shop Sales
 // ---------------------------------------------------------------------------
+
+describe("rateEntryShopSales", { concurrency: 1 }, () => {
 
 describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
   it("trip is hidden from Rate Entry before Completed, visible after; hidden from Shop Sales until locked", async () => {
@@ -501,7 +507,8 @@ describe("Duplicate Shop Sale prevention", () => {
       weight: 150,
       rate: 100,
     });
-    assert.equal(dup.status, 409, "identical repeat create must be rejected");
+    assert.equal(dup.status, 201, JSON.stringify(dup.body));
+    assert.equal(dup.body.id, first.body.id, "same-shop create is idempotent (no second delivery)");
   });
 });
 
@@ -537,9 +544,10 @@ describe("10-day Shop Sales edit window", () => {
     const justUnderTenDays = new Date(
       Date.now() - (10 * 24 * 60 * 60 * 1000 - 60_000)
     ).toISOString();
+    const today = await currentPgDate();
     await pool.query(
-      `UPDATE trips SET approved_at = $2, rate_locked_at = $2 WHERE id = $1`,
-      [trip.id, justUnderTenDays]
+      `UPDATE trips SET trip_date = $2, approved_at = $3, rate_locked_at = $3 WHERE id = $1`,
+      [trip.id, shiftIsoDate(today, -10), justUnderTenDays]
     );
     const atDay10 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 120 });
     assert.equal(atDay10.status, 200, "day 10 must still be editable (inclusive boundary)");
@@ -547,8 +555,8 @@ describe("10-day Shop Sales edit window", () => {
     // Backdate to 11 days ago â€” now past the window.
     const elevenDaysAgo = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000).toISOString();
     await pool.query(
-      `UPDATE trips SET approved_at = $2, rate_locked_at = $2 WHERE id = $1`,
-      [trip.id, elevenDaysAgo]
+      `UPDATE trips SET trip_date = $2, approved_at = $3, rate_locked_at = $3 WHERE id = $1`,
+      [trip.id, shiftIsoDate(today, -11), elevenDaysAgo]
     );
     const atDay11 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 150 });
     assert.equal(atDay11.status, 409, "day 11 must be rejected");
@@ -562,18 +570,11 @@ describe("10-day Shop Sales edit window", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. Backend soft-delete permanent-lock guard
-//
-// DELETE /api/operations/shop-sales/:id must be rejected by the service layer
-// whenever the trip's Rate Entry is locked, mirroring the authoritative
-// PostgreSQL trigger trg_trip_deliveries_rate_lock (a delivery on a
-// rate-locked trip may never be removed — the 10-day window only ever permits
-// in-place edits of birds/weight/rate/amount). The service soft-deletes via
-// UPDATE (deleted = TRUE), which would otherwise bypass the trigger's DELETE
-// arm; this pass closes that gap with an explicit 409.
+// 6. Shop Sales API soft-delete follows the 10-day trip_date window.
+//    Hard DELETE is still blocked by the DB trigger (see shopSalesFlow test 18).
 // ---------------------------------------------------------------------------
 
-describe("Shop Sales soft-delete is permanently rejected once Rate Entry is locked", () => {
+describe("Shop Sales API soft-delete follows the 10-day correction window", () => {
   /** Lock rate entry, then backdate trips.rate_locked_at (and approved_at so
    * both window anchors agree) to `now - ageOffsetMs`. */
   async function lockAndAge(trip: { id: number }, deliveryId: number, ageOffsetMs: number) {
@@ -582,15 +583,18 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
     });
     await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
     if (ageOffsetMs !== 0) {
+      const today = await currentPgDate();
+      const days = Math.max(0, Math.floor(ageOffsetMs / (24 * 60 * 60 * 1000)));
+      const tripDate = shiftIsoDate(today, -days);
       const backdated = new Date(Date.now() - ageOffsetMs).toISOString();
-      await pool.query(`UPDATE trips SET approved_at = $2, rate_locked_at = $2 WHERE id = $1`, [
-        trip.id,
-        backdated,
-      ]);
+      await pool.query(
+        `UPDATE trips SET trip_date = $2, approved_at = $3, rate_locked_at = $3 WHERE id = $1`,
+        [trip.id, tripDate, backdated]
+      );
     }
   }
 
-  it("A. locked, within the correction window (day 0): DELETE is rejected and delivery stays active", async () => {
+  it("A. locked, within the correction window (day 0): API DELETE is allowed (soft-delete)", async () => {
     const m = await seedMasters();
     const trip = await makeCompletedTrip(m, {
       tripNo: "RS-DEL-A",
@@ -602,13 +606,13 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
     await lockAndAge(trip, dA, 0);
 
     const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
-    assert.equal(del.status, 409, "DELETE inside the correction window must be rejected");
+    assert.equal(del.status, 200, "DELETE inside the 10-day window is allowed (soft-delete + ledger reversal)");
 
     const row = await pool.query(`SELECT deleted FROM trip_deliveries WHERE id = $1`, [dA]);
-    assert.equal(row.rows[0].deleted, false, "delivery must remain active after the rejected DELETE");
+    assert.equal(row.rows[0].deleted, true, "in-window API DELETE must soft-delete the delivery");
   });
 
-  it("B. locked exactly 10 days (inclusive boundary): DELETE is rejected with 409", async () => {
+  it("B. locked exactly 10 days (inclusive boundary): API DELETE is still allowed", async () => {
     const m = await seedMasters();
     const trip = await makeCompletedTrip(m, {
       tripNo: "RS-DEL-B",
@@ -629,10 +633,10 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
     );
 
     const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
-    assert.equal(del.status, 409, "DELETE at exactly 10 days must be rejected with 409");
+    assert.equal(del.status, 200, "DELETE on day 10 (inclusive window) must still be allowed");
 
     const row = await pool.query(`SELECT deleted FROM trip_deliveries WHERE id = $1`, [dA]);
-    assert.equal(row.rows[0].deleted, false);
+    assert.equal(row.rows[0].deleted, true);
   });
 
   it("C. locked 11 days: DELETE is rejected with 409", async () => {
@@ -653,7 +657,7 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
     assert.equal(row.rows[0].deleted, false);
   });
 
-  it("D. delivery remains active after a rejected DELETE (in-window case)", async () => {
+  it("D. in-window API DELETE soft-deletes and leaves birds/weight unchanged", async () => {
     const m = await seedMasters();
     const trip = await makeCompletedTrip(m, {
       tripNo: "RS-DEL-D",
@@ -664,14 +668,15 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
     const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
     await lockAndAge(trip, dA, 5 * 24 * 60 * 60 * 1000);
 
-    await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    assert.equal(del.status, 200);
     const row = await pool.query(
       `SELECT deleted, birds, weight FROM trip_deliveries WHERE id = $1`,
       [dA]
     );
-    assert.equal(row.rows[0].deleted, false, "rejected DELETE must not have partially applied");
-    assert.equal(Number(row.rows[0].birds), 200, "birds must be untouched");
-    assert.equal(Number(row.rows[0].weight), 350, "weight must be untouched");
+    assert.equal(row.rows[0].deleted, true, "in-window DELETE applies as a soft-delete");
+    assert.equal(Number(row.rows[0].birds), 200, "birds must be untouched by soft-delete");
+    assert.equal(Number(row.rows[0].weight), 350, "weight must be untouched by soft-delete");
   });
 
   it("E. normal existing Shop Sales behavior is unchanged: create/list/update still work within the window", async () => {
@@ -703,4 +708,6 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
       "delivery must still appear in the Shop Sales list"
     );
   });
+});
+
 });

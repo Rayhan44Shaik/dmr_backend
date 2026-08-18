@@ -12,6 +12,7 @@ import {
   applySchema,
   countRows,
   resetMasters,
+  shutdownTestEnv,
   startTestDb,
   type TestDb,
 } from "./helpers/testDb.js";
@@ -29,9 +30,7 @@ const baseUrl = app.baseUrl;
 const { pool } = await import("../src/config/db.js");
 
 after(async () => {
-  await app.close();
-  await testDb.close();
-  await pool.end();
+  await shutdownTestEnv({ app, testDb, pool });
 });
 
 beforeEach(async () => {

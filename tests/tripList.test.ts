@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { getJson, postJson, startApp, type TestApp } from "./helpers/app.js";
-import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
+import { applySchema, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 // ---------------------------------------------------------------------------
 // Boot the test database + real app once for the whole file.
@@ -35,9 +35,7 @@ const { mastersService } = await import("../src/services/mastersService.js");
 const { tripsService } = await import("../src/services/tripsService.js");
 
 after(async () => {
-  await app.close();
-  await testDb.close();
-  await pool.end();
+  await shutdownTestEnv({ app, testDb, pool });
 });
 
 // ---------------------------------------------------------------------------

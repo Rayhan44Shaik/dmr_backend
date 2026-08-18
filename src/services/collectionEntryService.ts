@@ -20,6 +20,38 @@ import { parseBody } from "../validation/operations.js";
 import { collectionEntryUpdateSchema } from "../validation/collectionEntry.js";
 import { parseCollectionEntryBody } from "../validation/collectionEntry.js";
 
+/**
+ * Collection weekly figures (derived — not a second balance book).
+ *
+ * Shop Master opening_balance = initial / starting balance (never weekly).
+ * Weekly opening = previous week's closing
+ *   = shops.opening_balance + Σ(ledger debit − credit) WHERE entry_date < Monday.
+ * Current outstanding for the week = weekly opening + Shop Sales − approved collections.
+ * Pending collections are display-only and never reduce outstanding.
+ */
+export interface CollectionWeeklySummary {
+  shopId: number;
+  shopName: string;
+  weekStart: string;
+  weekEnd: string;
+  /** Previous week closing. NOT shops.opening_balance. */
+  openingBalance: number;
+  weeklySales: number;
+  approvedCollections: number;
+  pendingCollections: number;
+  currentOutstanding: number;
+  closingBalance: number;
+  isCurrentWeek: boolean;
+}
+
+const SHOP_SALES_ELIGIBLE = `
+  t.status = 'Completed'
+  AND COALESCE(t.deleted, FALSE) = FALSE
+  AND COALESCE(t.rate_completed, FALSE) = TRUE
+  AND COALESCE(t.delivery_step_submitted, FALSE) = TRUE
+  AND COALESCE(t.expenses_step_submitted, FALSE) = TRUE
+`;
+
 type Client = pg.PoolClient;
 
 const SEL = `
@@ -213,13 +245,6 @@ export const collectionEntryService = {
             shopId: data.shopId,
           });
         }
-        const currentOutstanding = shop.currentBalance;
-        if (data.amount > currentOutstanding) {
-          throw new AppError(
-            409,
-            `Collection ₹${data.amount} exceeds the shop's outstanding balance ₹${currentOutstanding}`
-          );
-        }
         const collectionDate = dateOnly(data.collectionDate);
         if (!collectionDate) throw new AppError(400, "Invalid collection date");
 
@@ -370,13 +395,9 @@ export const collectionEntryService = {
           throw new AppError(422, "Shop is inactive and cannot receive a collection", { shopId });
         }
 
+        // Snapshot of live outstanding immediately before this credit (may be
+        // negative after overpayment). Not the weekly opening.
         const opening = shop.currentBalance;
-        if (existing.amount > opening) {
-          throw new AppError(
-            409,
-            `Collection ₹${existing.amount} exceeds the shop's outstanding balance ₹${opening}`
-          );
-        }
         const closing = Number((opening - existing.amount).toFixed(2));
         const approvedBy = body.approvedBy ?? "system";
 
@@ -513,6 +534,18 @@ export const collectionEntryService = {
     if (status === "Deleted") return this.softDelete(id, { reason: patch?.reason, deletedBy: patch?.deletedBy });
     if (status === "Pending Approval" || status === "Pending") {
       return withTransaction(async (client) => {
+        const lockRow = await client.query(`${SEL} WHERE id = $1 FOR UPDATE`, [id]);
+        if (!lockRow.rowCount) throw new AppError(404, "Collection not found");
+        const existing = mapEntry(lockRow.rows[0]);
+        if (existing.deleted) {
+          throw new AppError(409, "Cannot move a deleted collection back to Pending Approval");
+        }
+        if (existing.isFinancial || existing.status === "Approved") {
+          throw new AppError(
+            409,
+            "Cannot move an Approved collection back to Pending Approval. Reject or delete it to reverse the credit."
+          );
+        }
         await client.query(
           `UPDATE collections SET status='Pending Approval', is_financial=FALSE,
              rejected_by=NULL, rejected_at=NULL, rejected_reason=NULL, deleted=FALSE
@@ -532,5 +565,154 @@ export const collectionEntryService = {
       });
     }
     throw new AppError(400, `Invalid status. Use: Pending Approval | Approved | Rejected | Deleted | Draft`);
+  },
+
+  /**
+   * Authoritative Monday–Sunday figures for Collection Entry.
+   * Weekly opening is previous-week closing (seed + ledger before Monday),
+   * never shops.current_balance and never a rewrite of shops.opening_balance.
+   * weeklySales is SUM of Shop Sales amounts (not ledger + sales).
+   */
+  async getWeeklySummary(shopId: number, date: string): Promise<CollectionWeeklySummary> {
+    const asOf = dateOnly(date);
+    if (!asOf) throw new AppError(400, "Invalid date. Use YYYY-MM-DD.");
+
+    const shopRow = await query<{
+      shop_name: string;
+      opening_balance: string;
+    }>(`SELECT shop_name, opening_balance FROM shops WHERE id = $1`, [shopId]);
+    if (!shopRow.rowCount) throw new AppError(422, "Shop not found", { shopId });
+
+    const bounds = await query<{
+      week_start: string;
+      week_end: string;
+      is_current_week: boolean;
+    }>(
+      `SELECT
+         ($1::date - ((EXTRACT(ISODOW FROM $1::date)::integer) - 1))::date AS week_start,
+         ($1::date - ((EXTRACT(ISODOW FROM $1::date)::integer) - 1) + 6)::date AS week_end,
+         (
+           ($1::date - ((EXTRACT(ISODOW FROM $1::date)::integer) - 1))::date <= CURRENT_DATE
+           AND ($1::date - ((EXTRACT(ISODOW FROM $1::date)::integer) - 1) + 6)::date >= CURRENT_DATE
+         ) AS is_current_week`,
+      [asOf]
+    );
+    const weekStart = dateOnly(bounds.rows[0].week_start) ?? asOf;
+    const weekEnd = dateOnly(bounds.rows[0].week_end) ?? asOf;
+    const isCurrentWeek = Boolean(bounds.rows[0].is_current_week);
+
+    const seedOpening = num(shopRow.rows[0].opening_balance);
+    const before = await query<{ n: string }>(
+      `SELECT COALESCE(SUM(debit - credit), 0)::text AS n
+         FROM shop_ledger
+        WHERE shop_id = $1
+          AND entry_date < $2::date`,
+      [shopId, weekStart]
+    );
+    const openingBalance = Number((seedOpening + Number(before.rows[0]?.n ?? 0)).toFixed(2));
+
+    const sales = await query<{ n: string }>(
+      `SELECT COALESCE(SUM(d.amount), 0)::text AS n
+         FROM trip_deliveries d
+         INNER JOIN trips t ON t.id = d.trip_id
+        WHERE d.shop_id = $1
+          AND COALESCE(d.deleted, FALSE) = FALSE
+          AND t.trip_date >= $2::date
+          AND t.trip_date <= $3::date
+          AND ${SHOP_SALES_ELIGIBLE}`,
+      [shopId, weekStart, weekEnd]
+    );
+    const weeklySales = Number(Number(sales.rows[0]?.n ?? 0).toFixed(2));
+
+    const approved = await query<{ n: string }>(
+      `SELECT COALESCE(SUM(COALESCE(amount, amount_collected)), 0)::text AS n
+         FROM collections
+        WHERE shop_id = $1
+          AND COALESCE(deleted, FALSE) = FALSE
+          AND status = 'Approved'
+          AND collection_date >= $2::date
+          AND collection_date <= $3::date`,
+      [shopId, weekStart, weekEnd]
+    );
+    const approvedCollections = Number(Number(approved.rows[0]?.n ?? 0).toFixed(2));
+
+    const pending = await query<{ n: string }>(
+      `SELECT COALESCE(SUM(COALESCE(amount, amount_collected)), 0)::text AS n
+         FROM collections
+        WHERE shop_id = $1
+          AND COALESCE(deleted, FALSE) = FALSE
+          AND status = 'Pending Approval'
+          AND collection_date >= $2::date
+          AND collection_date <= $3::date`,
+      [shopId, weekStart, weekEnd]
+    );
+    const pendingCollections = Number(Number(pending.rows[0]?.n ?? 0).toFixed(2));
+
+    const currentOutstanding = Number((openingBalance + weeklySales - approvedCollections).toFixed(2));
+
+    return {
+      shopId,
+      shopName: str(shopRow.rows[0].shop_name),
+      weekStart,
+      weekEnd,
+      openingBalance,
+      weeklySales,
+      approvedCollections,
+      pendingCollections,
+      currentOutstanding,
+      closingBalance: currentOutstanding,
+      isCurrentWeek,
+    };
+  },
+
+  /** Same derived weekly figures for every shop, keyed by shopId. */
+  async getWeeklySummaries(date: string): Promise<CollectionWeeklySummary[]> {
+    const asOf = dateOnly(date);
+    if (!asOf) throw new AppError(400, "Invalid date. Use YYYY-MM-DD.");
+
+    const shops = await query<{ id: string }>(
+      `SELECT id FROM shops WHERE status = 'Active' ORDER BY shop_name ASC`
+    );
+    const out: CollectionWeeklySummary[] = [];
+    for (const row of shops.rows) {
+      out.push(await this.getWeeklySummary(num(row.id), asOf));
+    }
+    return out;
+  },
+
+  /**
+   * Monday–Sunday window for a date. When date is omitted, PostgreSQL
+   * CURRENT_DATE is used — never the client clock.
+   */
+  async getWeekBounds(date?: string): Promise<{
+    asOfDate: string;
+    weekStart: string;
+    weekEnd: string;
+    isCurrentWeek: boolean;
+  }> {
+    const asOf = date ? dateOnly(date) : null;
+    if (date && !asOf) throw new AppError(400, "Invalid date. Use YYYY-MM-DD.");
+    const bounds = await query<{
+      as_of: string;
+      week_start: string;
+      week_end: string;
+      is_current_week: boolean;
+    }>(
+      `SELECT
+         COALESCE($1::date, CURRENT_DATE)::date AS as_of,
+         (COALESCE($1::date, CURRENT_DATE) - ((EXTRACT(ISODOW FROM COALESCE($1::date, CURRENT_DATE))::integer) - 1))::date AS week_start,
+         (COALESCE($1::date, CURRENT_DATE) - ((EXTRACT(ISODOW FROM COALESCE($1::date, CURRENT_DATE))::integer) - 1) + 6)::date AS week_end,
+         (
+           (COALESCE($1::date, CURRENT_DATE) - ((EXTRACT(ISODOW FROM COALESCE($1::date, CURRENT_DATE))::integer) - 1))::date <= CURRENT_DATE
+           AND (COALESCE($1::date, CURRENT_DATE) - ((EXTRACT(ISODOW FROM COALESCE($1::date, CURRENT_DATE))::integer) - 1) + 6)::date >= CURRENT_DATE
+         ) AS is_current_week`,
+      [asOf]
+    );
+    return {
+      asOfDate: dateOnly(bounds.rows[0].as_of) ?? "",
+      weekStart: dateOnly(bounds.rows[0].week_start) ?? "",
+      weekEnd: dateOnly(bounds.rows[0].week_end) ?? "",
+      isCurrentWeek: Boolean(bounds.rows[0].is_current_week),
+    };
   },
 };

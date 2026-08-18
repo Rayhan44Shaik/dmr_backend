@@ -444,6 +444,40 @@ operationsRouter.get(
 );
 
 operationsRouter.get(
+  "/collection-entry/weekly-summary",
+  asyncHandler(async (req, res) => {
+    const shopId = Number(req.query.shopId);
+    const date = typeof req.query.date === "string" ? req.query.date : "";
+    if (!Number.isInteger(shopId) || shopId <= 0) {
+      throw new AppError(400, "shopId is required and must be a positive integer");
+    }
+    if (!date) {
+      throw new AppError(400, "date is required (YYYY-MM-DD)");
+    }
+    res.json(await collectionEntryService.getWeeklySummary(shopId, date));
+  })
+);
+
+operationsRouter.get(
+  "/collection-entry/week-bounds",
+  asyncHandler(async (req, res) => {
+    const date = typeof req.query.date === "string" && req.query.date ? req.query.date : undefined;
+    res.json(await collectionEntryService.getWeekBounds(date));
+  })
+);
+
+operationsRouter.get(
+  "/collection-entry/weekly-summaries",
+  asyncHandler(async (req, res) => {
+    const date = typeof req.query.date === "string" ? req.query.date : "";
+    if (!date) {
+      throw new AppError(400, "date is required (YYYY-MM-DD)");
+    }
+    res.json(await collectionEntryService.getWeeklySummaries(date));
+  })
+);
+
+operationsRouter.get(
   "/collection-entry/:id",
   asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.getById(Number(req.params.id)));

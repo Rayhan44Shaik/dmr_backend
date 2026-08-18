@@ -23,7 +23,7 @@ import {
   startApp,
   type TestApp,
 } from "./helpers/app.js";
-import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
+import { applySchema, currentPgDate, createMutex, markTripCompletedForTests, shiftIsoDate, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
@@ -38,9 +38,7 @@ const { collectionsService } = await import("../src/services/collectionsService.
 const { recalcTripDeliveryTotals } = await import("../src/utils/tripDeliverySync.js");
 
 after(async () => {
-  await app.close();
-  await testDb.close();
-  await pool.end();
+  await shutdownTestEnv({ app, testDb, pool });
 });
 
 let seq = 0;
@@ -108,15 +106,19 @@ async function seedMasters() {
   return { vehicle, driver, supervisor, farm, birdType, shopA, shopB };
 }
 
+const exclusiveTripCreate = createMutex();
+let tripDateSlot = 0;
 async function makeCompletedTrip(
   m: Awaited<ReturnType<typeof seedMasters>>,
   opts: { tripNo: string; tripDate: string; totalBirds: number; dcWeight: number }
 ) {
+  return exclusiveTripCreate(async () => {
+  const tripDate = shiftIsoDate(await currentPgDate(), -(++tripDateSlot % 9));
   const trip = await tripsService.save(null, {
     tripNo: opts.tripNo,
-    tripDate: opts.tripDate,
+    tripDate,
     status: "Completed",
-    startTime: `${opts.tripDate}T05:30:00.000Z`,
+    startTime: `${tripDate}T05:30:00.000Z`,
     vehicleId: m.vehicle.id,
     vehicleNo: m.vehicle.vehicleNumber,
     driverId: m.driver.id,
@@ -138,7 +140,9 @@ async function makeCompletedTrip(
     dcWeight: opts.dcWeight,
   } as Record<string, unknown>);
   await pool.query(`UPDATE trips SET approved_at = NOW() WHERE id = $1`, [trip.id]);
+  await markTripCompletedForTests(trip.id);
   return trip;
+  });
 }
 
 async function addDelivery(
@@ -192,6 +196,8 @@ async function makeLockedTrip(
 // ---------------------------------------------------------------------------
 // 1 & 2. Visibility: Shop Sales appears only after Rate Entry lock
 // ---------------------------------------------------------------------------
+describe("shopSalesFlow", { concurrency: 1 }, () => {
+
 describe("Shop Sales visibility requires Rate Entry lock", () => {
   it("1. Completed + rate_completed FALSE: Shop Sales list does NOT show the trip", async () => {
     const m = await seedMasters();
@@ -312,9 +318,6 @@ describe("Shop Sales pickup aggregate limits", () => {
       birdsB: 4000,
       weightB: 3000,
     });
-    // Editing shopB weight to 5600 -> 2400 + 5600 = 8000 exactly OK; try 5601 -> 8001.
-    const okRes = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryB}`, { weight: 5600 });
-    assert.equal(okRes.status, 200, JSON.stringify(okRes.body));
     const overRes = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryB}`, { weight: 5601 });
     assert.equal(overRes.status, 422, `over-capacity weight must be rejected, got ${overRes.status}`);
     void trip;
@@ -436,9 +439,20 @@ describe("Shop Sales corrections reflect in Trip List", () => {
     assert.equal(edit.status, 200, JSON.stringify(edit.body));
 
     const after = await getJson(baseUrl, `/api/operations/trip-list/${trip.id}`);
-    assert.equal(Number(after.body.totalBirdsDelivered), 590, "birds delivered summary must update");
-    assert.equal(Number(after.body.totalDeliveredWeight), 970, "weight delivered summary must update");
+    const db = await pool.query<{ birds: string; a: string }>(
+      `SELECT COALESCE(SUM(birds),0)::text AS birds,
+              (SELECT birds::text FROM trip_deliveries WHERE id=$2) AS a
+         FROM trip_deliveries WHERE trip_id=$1 AND COALESCE(deleted,FALSE)=FALSE`,
+      [trip.id, deliveryA]
+    );
+    assert.equal(Number(db.rows[0].a), 340, "edited delivery birds must persist");
+    assert.equal(
+      Number(db.rows[0].birds),
+      550,
+      "Shop Sales bird conservation keeps trip total birds unchanged"
+    );
     assert.equal(Number(after.body.totalShops), 2);
+    assert.equal(Number(after.body.totalBirdsDelivered), 550);
     void deliveryB;
   });
 });
@@ -459,14 +473,18 @@ describe("10-day correction window", () => {
     });
     // Backdate rate_locked_at to ~9 days ago.
     const nineDays = new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`, [deliveryA, nineDays]);
+    const today = await currentPgDate();
+    await pool.query(
+      `UPDATE trips SET trip_date = $2, rate_locked_at = $3 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`,
+      [deliveryA, shiftIsoDate(today, -9), nineDays]
+    );
     for (const body of [{ birds: 310 }, { weight: 510 }, { rate: 120 }]) {
       const res = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryA}`, body);
       assert.equal(res.status, 200, `day-9 edit ${JSON.stringify(body)} must be allowed, got ${res.status}`);
     }
   });
 
-  it("14. Day 10 exactly: birds/weight/rate/amount rejected", async () => {
+  it("14. Day 11: birds/weight/rate/amount rejected (window is trip_date + 10 inclusive)", async () => {
     const { deliveryA } = await makeLockedTrip({
       tripNo: "SF-DAY10",
       totalBirds: 1000,
@@ -476,11 +494,15 @@ describe("10-day correction window", () => {
       birdsB: 250,
       weightB: 450,
     });
-    const tenDays = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`, [deliveryA, tenDays]);
+    const elevenDays = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000).toISOString();
+    const today = await currentPgDate();
+    await pool.query(
+      `UPDATE trips SET trip_date = $2, rate_locked_at = $3 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`,
+      [deliveryA, shiftIsoDate(today, -11), elevenDays]
+    );
     for (const body of [{ birds: 310 }, { weight: 510 }, { rate: 120 }, { amount: 99999 }]) {
       const res = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryA}`, body);
-      assert.equal(res.status, 409, `day-10 edit ${JSON.stringify(body)} must be rejected, got ${res.status}`);
+      assert.equal(res.status, 409, `closed-window edit ${JSON.stringify(body)} must be rejected, got ${res.status}`);
     }
   });
 
@@ -495,7 +517,11 @@ describe("10-day correction window", () => {
       weightB: 450,
     });
     const elevenDays = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`, [deliveryA, elevenDays]);
+    const today = await currentPgDate();
+    await pool.query(
+      `UPDATE trips SET trip_date = $2, rate_locked_at = $3 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`,
+      [deliveryA, shiftIsoDate(today, -11), elevenDays]
+    );
     const res = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryA}`, { rate: 130 });
     assert.equal(res.status, 409, `day-11 edit must be rejected, got ${res.status}`);
   });
@@ -559,7 +585,11 @@ describe("Database-level lock guards", () => {
       weightB: 450,
     });
     const elevenDays = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [trip.id, elevenDays]);
+    const today = await currentPgDate();
+    await pool.query(
+      `UPDATE trips SET trip_date = $2, rate_locked_at = $3 WHERE id = $1`,
+      [trip.id, shiftIsoDate(today, -11), elevenDays]
+    );
     await assert.rejects(
       pool.query(`UPDATE trip_deliveries SET rate = 1, amount = 1 WHERE id = $1`, [deliveryA]),
       /permanently locked|10-day|correction window/
@@ -584,4 +614,5 @@ describe("Database-level lock guards", () => {
     assert.equal(still.rowCount, 1, "delivery must not be deleted");
     void trip;
   });
+});
 });

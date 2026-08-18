@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
+import { applySchema, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
@@ -25,8 +25,7 @@ const { mastersService } = await import("../src/services/mastersService.js");
 const { dutyPlannerService } = await import("../src/services/dutyPlannerService.js");
 
 after(async () => {
-  await testDb.close();
-  await pool.end();
+  await shutdownTestEnv({ testDb, pool });
 });
 
 // Local-calendar date strings, matching dateOnly()/server "today".

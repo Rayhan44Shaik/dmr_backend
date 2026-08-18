@@ -41,3 +41,21 @@ export const collectionEntryStatusSchema = z.object({
 export function parseCollectionEntryBody(body: unknown): CollectionEntryBody {
   return parseBody(collectionEntryBodySchema, body);
 }
+
+/** Query params for GET /collection-entry/weekly-summary */
+export const weeklySummaryQuerySchema = z.object({
+  shopId: z.coerce.number().int().positive("shopId is required"),
+  date: z.string().min(1, "date is required"),
+});
+
+export function parseWeeklySummaryQuery(query: unknown): { shopId: number; date: string } {
+  return parseBody(weeklySummaryQuerySchema, query);
+}
+
+export const weeklySummariesQuerySchema = z.object({
+  date: z.string().min(1, "date is required"),
+});
+
+export function parseWeeklySummariesQuery(query: unknown): { date: string } {
+  return parseBody(weeklySummariesQuerySchema, query);
+}
