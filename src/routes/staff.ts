@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { staffService } from "../services/staffService.js";
+import { staffPerformanceService } from "../services/staffPerformanceService.js";
 import { dutyPlannerService } from "../services/dutyPlannerService.js";
 import {
   parseBody,
@@ -13,6 +14,14 @@ import type {
   SalaryGenerateBody,
   SalaryListQuery,
 } from "../validation/salary.js";
+import {
+  driverPerformanceQuerySchema,
+  supervisorPerformanceQuerySchema,
+} from "../validation/performance.js";
+import type {
+  DriverPerformanceQuery,
+  SupervisorPerformanceQuery,
+} from "../validation/performance.js";
 import {
   leaveCreateSchema,
   leaveListQuerySchema,
@@ -127,6 +136,19 @@ staffRouter.post(
   })
 );
 
+// Bulk lifecycle transition (Mark Paid / Mark Unpaid on many records at once).
+// One transaction; every record is pre-validated with the same per-record
+// business rules as the single-record endpoints; any violation aborts the
+// whole batch atomically.
+staffRouter.post(
+  "/salaries/bulk-status",
+  asyncHandler(async (req, res) => {
+    const body = req.body as { ids?: unknown };
+    const ids = Array.isArray(body?.ids) ? body.ids.filter((x) => typeof x === "string") : [];
+    res.json(await staffService.bulkUpdateSalaryStatus(ids as string[], req.body));
+  })
+);
+
 staffRouter.post(
   "/salaries",
   asyncHandler(async (req, res) => {
@@ -238,6 +260,27 @@ staffRouter.post(
   "/attendance",
   asyncHandler(async (req, res) => {
     res.status(201).json(await staffService.upsertAttendance(req.body));
+  })
+);
+
+// ============ DRIVER / SUPERVISOR PERFORMANCE (read-only) ============
+// GET /api/staff/performance/drivers?fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD
+//   &search=&driverId=&vehicleId=
+staffRouter.get(
+  "/performance/drivers",
+  asyncHandler(async (req, res) => {
+    const query = parseBody(driverPerformanceQuerySchema, req.query) as DriverPerformanceQuery;
+    res.json(await staffPerformanceService.getDriverPerformance(query));
+  })
+);
+
+// GET /api/staff/performance/supervisors?fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD
+//   &search=&supervisorId=&vehicleId=
+staffRouter.get(
+  "/performance/supervisors",
+  asyncHandler(async (req, res) => {
+    const query = parseBody(supervisorPerformanceQuerySchema, req.query) as SupervisorPerformanceQuery;
+    res.json(await staffPerformanceService.getSupervisorPerformance(query));
   })
 );
 
