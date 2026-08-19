@@ -30,6 +30,14 @@ const { tripsService } = await import("../src/services/tripsService.js");
 const { deliveryEmailService, sanitizeAttachmentShopName } = await import(
   "../src/services/deliveryEmailService.js"
 );
+const {
+  smtpService,
+  SMTP_NOT_CONFIGURED_MESSAGE,
+  SMTP_SEND_FAILED_MESSAGE,
+  containsSmtpSecret,
+  logSmtpStartupStatus,
+  toSafeSmtpUserMessage,
+} = await import("../src/services/smtpService.js");
 const { env } = await import("../src/config/env.js");
 
 after(async () => {
@@ -354,8 +362,152 @@ describe("delivery email", () => {
     assert.ok(listed.body.every((r: { status: string }) => r.status === "sent"));
   });
 
-  it("SMTP failure marks email failed and leaves the trip Completed", async () => {
+  it("SMTP missing returns a clean configuration error without secrets", async () => {
     const ctx = await makeTripWithDeliveries([]);
+    const prev = {
+      host: env.smtpHost,
+      user: env.smtpUser,
+      pass: env.smtpPass,
+      from: env.smtpFrom,
+    };
+    env.smtpHost = "";
+    env.smtpUser = "secret-user@example.com";
+    env.smtpPass = "super-secret-smtp-password";
+    env.smtpFrom = "secret-user@example.com";
+    const logs: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    const origWarn = console.warn;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    };
+    console.error = (...args: unknown[]) => {
+      logs.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    };
+    console.warn = (...args: unknown[]) => {
+      logs.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    };
+    try {
+      const result = await deliveryEmailService.sendDeliveryEmail(
+        ctx.trip.id,
+        ctx.deliveries[0].id,
+        { pdfBase64: PDF_B64 }
+      );
+      assert.equal(result.success, false);
+      assert.equal(result.status, "failed");
+      assert.equal(result.message, SMTP_NOT_CONFIGURED_MESSAGE);
+      const payload = JSON.stringify(result);
+      assert.ok(!payload.includes("super-secret-smtp-password"));
+      assert.ok(!payload.includes("SMTP_HOST"));
+      assert.ok(!payload.includes("SMTP_PASS"));
+      assert.ok(!payload.includes("secret-user@example.com"));
+      const joined = logs.join("\n");
+      assert.ok(!joined.includes("super-secret-smtp-password"));
+      const trip = await pool.query(`SELECT status FROM trips WHERE id = $1`, [ctx.trip.id]);
+      assert.equal(String(trip.rows[0].status), "Completed");
+      const st = await pool.query(
+        `SELECT status, failure_reason FROM trip_delivery_emails WHERE trip_id = $1 AND delivery_id = $2`,
+        [ctx.trip.id, ctx.deliveries[0].id]
+      );
+      assert.equal(st.rows[0].status, "failed");
+      assert.equal(st.rows[0].failure_reason, SMTP_NOT_CONFIGURED_MESSAGE);
+      assert.ok(!containsSmtpSecret(String(st.rows[0].failure_reason)));
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      console.warn = origWarn;
+      env.smtpHost = prev.host;
+      env.smtpUser = prev.user;
+      env.smtpPass = prev.pass;
+      env.smtpFrom = prev.from;
+    }
+  });
+
+  it("invalid SMTP credentials return a clean failure without leaking secrets", async () => {
+    const ctx = await makeTripWithDeliveries([]);
+    const secret = "super-secret-smtp-password";
+    const prevPass = env.smtpPass;
+    const prevHost = env.smtpHost;
+    env.smtpHost = "json";
+    env.smtpPass = secret;
+    const original = smtpService.sendMail;
+    smtpService.sendMail = async () => {
+      throw new Error(
+        `Invalid login: 535-5.7.8 Username and Password not accepted SMTP_USER=${env.smtpUser} SMTP_PASS=${secret}`
+      );
+    };
+    const logs: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    };
+    console.error = (...args: unknown[]) => {
+      logs.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    };
+    try {
+      const result = await deliveryEmailService.sendDeliveryEmail(
+        ctx.trip.id,
+        ctx.deliveries[0].id,
+        { pdfBase64: PDF_B64 }
+      );
+      assert.equal(result.success, false);
+      assert.equal(result.status, "failed");
+      assert.equal(result.message, SMTP_SEND_FAILED_MESSAGE);
+      const payload = JSON.stringify(result);
+      assert.ok(!payload.includes(secret));
+      assert.ok(!payload.toLowerCase().includes("smtp_pass"));
+      assert.ok(!logs.join("\n").includes(secret));
+    } finally {
+      smtpService.sendMail = original;
+      env.smtpPass = prevPass;
+      env.smtpHost = prevHost;
+      console.log = origLog;
+      console.error = origErr;
+    }
+  });
+
+  it("attaches a valid PDF for the selected shop delivery", async () => {
+    const prev = {
+      host: env.smtpHost,
+      user: env.smtpUser,
+      pass: env.smtpPass,
+      from: env.smtpFrom,
+    };
+    env.smtpHost = "json";
+    env.smtpUser = "test@example.com";
+    env.smtpPass = "not-a-secret-for-tests";
+    env.smtpFrom = "test@example.com";
+    const captured: { filename: string; content: Buffer; contentType?: string }[] = [];
+    const original = smtpService.sendMail;
+    smtpService.sendMail = async (input) => {
+      captured.push(...input.attachments);
+      return original.call(smtpService, input);
+    };
+    try {
+      const ctx = await makeTripWithDeliveries([]);
+      const result = await deliveryEmailService.sendDeliveryEmail(
+        ctx.trip.id,
+        ctx.deliveries[0].id,
+        { pdfBase64: PDF_B64 }
+      );
+      assert.equal(result.success, true);
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0].contentType, "application/pdf");
+      assert.match(captured[0].filename, /^Delivery-.*\.pdf$/);
+      assert.equal(captured[0].content.subarray(0, 4).toString("utf8"), "%PDF");
+    } finally {
+      smtpService.sendMail = original;
+      env.smtpHost = prev.host;
+      env.smtpUser = prev.user;
+      env.smtpPass = prev.pass;
+      env.smtpFrom = prev.from;
+    }
+  });
+
+  it("retries successfully after SMTP becomes available without duplicating the delivery", async () => {
+    const ctx = await makeTripWithDeliveries([]);
+    const id = ctx.deliveries[0].id;
     const prev = {
       host: env.smtpHost,
       user: env.smtpUser,
@@ -366,26 +518,106 @@ describe("delivery email", () => {
     env.smtpUser = "";
     env.smtpPass = "";
     env.smtpFrom = "";
+    const first = await deliveryEmailService.sendDeliveryEmail(ctx.trip.id, id, {
+      pdfBase64: PDF_B64,
+    });
+    assert.equal(first.success, false);
+    env.smtpHost = "json";
+    env.smtpUser = "test@example.com";
+    env.smtpPass = "not-a-secret-for-tests";
+    env.smtpFrom = "test@example.com";
     try {
-      const result = await deliveryEmailService.sendDeliveryEmail(
-        ctx.trip.id,
-        ctx.deliveries[0].id,
-        { pdfBase64: PDF_B64 }
+      const before = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM trip_deliveries WHERE trip_id = $1`,
+        [ctx.trip.id]
       );
-      assert.equal(result.success, false);
-      assert.equal(result.status, "failed");
-      const trip = await pool.query(`SELECT status FROM trips WHERE id = $1`, [ctx.trip.id]);
-      assert.equal(String(trip.rows[0].status), "Completed");
-      const st = await pool.query(
-        `SELECT status FROM trip_delivery_emails WHERE trip_id = $1 AND delivery_id = $2`,
-        [ctx.trip.id, ctx.deliveries[0].id]
+      const second = await deliveryEmailService.sendDeliveryEmail(ctx.trip.id, id, {
+        pdfBase64: PDF_B64,
+      });
+      assert.equal(second.success, true);
+      assert.equal(second.status, "sent");
+      const after = await pool.query(
+        `SELECT COUNT(*)::int AS n FROM trip_deliveries WHERE trip_id = $1`,
+        [ctx.trip.id]
       );
-      assert.equal(st.rows[0].status, "failed");
+      assert.equal(after.rows[0].n, before.rows[0].n);
+      const emails = await pool.query(
+        `SELECT COUNT(*)::int AS n, MAX(status) AS status FROM trip_delivery_emails WHERE trip_id = $1 AND delivery_id = $2`,
+        [ctx.trip.id, id]
+      );
+      assert.equal(emails.rows[0].n, 1);
+      assert.equal(emails.rows[0].status, "sent");
     } finally {
       env.smtpHost = prev.host;
       env.smtpUser = prev.user;
       env.smtpPass = prev.pass;
       env.smtpFrom = prev.from;
+    }
+  });
+
+  it("PDF validation still runs when SMTP is unavailable", async () => {
+    const ctx = await makeTripWithDeliveries([]);
+    const prevHost = env.smtpHost;
+    env.smtpHost = "";
+    try {
+      const res = await deliveryEmailService.sendDeliveryEmail(ctx.trip.id, ctx.deliveries[0].id, {
+        pdfBase64: "",
+      });
+      assert.fail(`expected PDF validation to throw, got ${JSON.stringify(res)}`);
+    } catch (err) {
+      assert.equal((err as { status?: number }).status, 422);
+      assert.match(String((err as Error).message), /PDF/i);
+    } finally {
+      env.smtpHost = prevHost;
+    }
+  });
+
+  it("startup SMTP status never logs credentials", () => {
+    const prev = {
+      host: env.smtpHost,
+      user: env.smtpUser,
+      pass: env.smtpPass,
+    };
+    const lines: string[] = [];
+    const origLog = console.log;
+    const origWarn = console.warn;
+    console.log = (msg?: unknown) => {
+      lines.push(String(msg ?? ""));
+    };
+    console.warn = (msg?: unknown) => {
+      lines.push(String(msg ?? ""));
+    };
+    try {
+      env.smtpHost = "smtp.example.com";
+      env.smtpUser = "real-user@example.com";
+      env.smtpPass = "hunter2-secret";
+      logSmtpStartupStatus();
+      env.smtpPass = "";
+      logSmtpStartupStatus();
+      const joined = lines.join("\n");
+      assert.ok(!joined.includes("hunter2-secret"));
+      assert.ok(!joined.includes("real-user@example.com"));
+      assert.match(joined, /SMTP_PASS/);
+    } finally {
+      console.log = origLog;
+      console.warn = origWarn;
+      env.smtpHost = prev.host;
+      env.smtpUser = prev.user;
+      env.smtpPass = prev.pass;
+    }
+  });
+
+  it("toSafeSmtpUserMessage never echoes provider secrets", () => {
+    const prevHost = env.smtpHost;
+    env.smtpHost = "json";
+    try {
+      const message = toSafeSmtpUserMessage(
+        new Error(`auth failed SMTP_PASS=${env.smtpPass || "x"}`)
+      );
+      assert.equal(message, SMTP_SEND_FAILED_MESSAGE);
+      assert.ok(!message.includes("SMTP_PASS"));
+    } finally {
+      env.smtpHost = prevHost;
     }
   });
 });

@@ -5,6 +5,7 @@ import { env } from "./config/env.js";
 import { pool } from "./config/db.js";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
+import { logSmtpStartupStatus, smtpService } from "./services/smtpService.js";
 
 const app = express();
 
@@ -82,6 +83,15 @@ async function start() {
   server.listen(env.port, () => {
     console.log(`DMR backend listening on http://localhost:${env.port}`);
     console.log(`PostgreSQL: ${env.databaseUrl.replace(/:[^:@]+@/, ":***@")}`);
+    logSmtpStartupStatus();
+    void smtpService.verifyConnection().then((result) => {
+      if (!result.configured) return;
+      if (result.connected) {
+        console.log("SMTP: connection verified");
+        return;
+      }
+      console.warn("SMTP: connection failed. Emails will not send until SMTP credentials are corrected.");
+    });
   });
 }
 

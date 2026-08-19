@@ -1,6 +1,12 @@
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
-import { smtpService } from "./smtpService.js";
+import {
+  SMTP_NOT_CONFIGURED_MESSAGE,
+  SMTP_SEND_FAILED_MESSAGE,
+  containsSmtpSecret,
+  smtpService,
+  toSafeSmtpUserMessage,
+} from "./smtpService.js";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -42,11 +48,34 @@ function failResponse(message: string, extra: Record<string, unknown> = {}) {
   return { success: false as const, status: "failed" as const, message, ...extra };
 }
 
+const SECRET_LOG_KEYS = new Set([
+  "smtpPass",
+  "smtpPassword",
+  "password",
+  "pass",
+  "credentials",
+  "smtpUser",
+  "user",
+  "auth",
+]);
+
+function sanitizeFailureReason(message: string): string {
+  if (!message.trim()) return SMTP_SEND_FAILED_MESSAGE;
+  if (/not configured/i.test(message)) return SMTP_NOT_CONFIGURED_MESSAGE;
+  if (containsSmtpSecret(message)) return SMTP_SEND_FAILED_MESSAGE;
+  return message;
+}
+
 function logEmail(info: Record<string, unknown>) {
-  const safe = { ...info };
-  delete safe.smtpPass;
-  delete safe.password;
-  delete safe.credentials;
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(info)) {
+    if (SECRET_LOG_KEYS.has(key)) continue;
+    if (typeof value === "string" && containsSmtpSecret(value)) {
+      safe[key] = SMTP_SEND_FAILED_MESSAGE;
+      continue;
+    }
+    safe[key] = value;
+  }
   console.log("[delivery-email]", JSON.stringify(safe));
 }
 
@@ -79,7 +108,8 @@ export const deliveryEmailService = {
       status: (row.status as DeliveryEmailStatus | null) ?? "pending",
       recipient: row.recipient == null ? null : String(row.recipient),
       sentAt: row.sent_at ?? null,
-      failureReason: row.failure_reason ?? null,
+      failureReason:
+        row.failure_reason == null ? null : sanitizeFailureReason(String(row.failure_reason)),
     }));
   },
 
@@ -213,10 +243,7 @@ export const deliveryEmailService = {
         attachments: [{ filename: fileName, content: pdf, contentType: "application/pdf" }],
       });
     } catch (err) {
-      const message =
-        err instanceof AppError
-          ? err.message
-          : "Unable to send delivery email. Check internet and SMTP settings.";
+      const message = sanitizeFailureReason(toSafeSmtpUserMessage(err));
       await query(
         `UPDATE public.trip_delivery_emails
             SET status = 'failed', failure_reason = $3, updated_at = NOW()
