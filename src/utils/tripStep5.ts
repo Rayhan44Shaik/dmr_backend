@@ -190,6 +190,12 @@ export function validateExpensePayload(body: Record<string, unknown>) {
     others5Amt: "Others",
   };
   for (const field of EXPENSE_FIELDS) {
+    if (body[field] === undefined) continue;
+    const n = Number(body[field]);
+    if (Number.isFinite(n) && n === 0) {
+      delete body[field];
+      continue;
+    }
     if (body[field] !== undefined) validateExpenseAmount(body[field], labels[field]);
   }
 }

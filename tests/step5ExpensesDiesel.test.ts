@@ -76,6 +76,7 @@ async function seed() {
     ownerName: "Owner",
     phoneNumber: `7600000${n}`,
     village: "Village",
+    email: `s5shop${n}@example.com`,
     status: "Active",
   });
   const trip = await tripsService.save(null, {
@@ -280,6 +281,35 @@ describe("Step 5 final submit", () => {
     assert.equal(loaded.body.expensesStepSubmitted, true);
     assert.equal(loaded.body.expensesStepSubmittedAt, ts);
     assert.equal(Number(loaded.body.dieselLtr1), 40);
+  });
+
+  it("combines general 600 + other 150 into one expense total and omits zero categories", async () => {
+    const { trip } = await seed();
+    const exp = `/api/trips/${trip.id}/steps/expenses`;
+    const ok = await postJson(baseUrl, exp, {
+      endMeter: 51000,
+      destinationTolls: 0,
+      meals: 600,
+      others1Amt: 150,
+      othersRC: 0,
+      loading: 0,
+    });
+    assert.equal(ok.status, 200, ok.body?.error || JSON.stringify(ok.body));
+    assert.equal(Number(ok.body.meals), 600);
+    assert.equal(Number(ok.body.others1Amt), 150);
+    const categoryTotal =
+      Number(ok.body.meals || 0) +
+      Number(ok.body.loading || 0) +
+      Number(ok.body.mealsTiffin || 0) +
+      Number(ok.body.vehicleMaintenance || 0) +
+      Number(ok.body.othersRC || 0) +
+      Number(ok.body.others1Amt || 0) +
+      Number(ok.body.others2Amt || 0) +
+      Number(ok.body.others3Amt || 0) +
+      Number(ok.body.others4Amt || 0) +
+      Number(ok.body.others5Amt || 0);
+    assert.equal(categoryTotal, 750);
+    assert.notEqual(categoryTotal, 600);
   });
 
   it("rejects Step 5 submit when Step 4 is missing", async () => {

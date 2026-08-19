@@ -5,6 +5,9 @@ import type { TripWizardStep } from "../utils/tripResume.js";
 /** Empty/blank → null. Numeric 0 is preserved (not coerced to null). */
 function emptyToNullNumber(v: unknown): unknown {
   if (v === undefined || v === null || v === "") return null;
+  if (typeof v === "number") {
+    return Number.isFinite(v) ? v : null;
+  }
   if (typeof v === "string") {
     const trimmed = v.trim();
     if (trimmed === "") return null;
@@ -15,32 +18,43 @@ function emptyToNullNumber(v: unknown): unknown {
 }
 
 const boxDetailSchema = z.object({
-  boxNo: z.coerce.number().int().positive(),
-  birds: z.coerce.number().int().nonnegative().optional(),
-  weight: z.coerce.number().nonnegative().optional(),
-  avgWeight: z.coerce.number().nonnegative().nullable().optional(),
+  boxNo: z.preprocess(emptyToNullNumber, z.number().int().positive()),
+  birds: z.preprocess(emptyToNullNumber, z.number().int().nonnegative().optional()),
+  weight: z.preprocess(emptyToNullNumber, z.number().nonnegative().optional()),
+  avgWeight: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
 });
 
 // Used for autosave (very permissive)
+const requiredPositiveId = (message: string) =>
+  z.preprocess(
+    emptyToNullNumber,
+    z
+      .number({ required_error: message, invalid_type_error: message })
+      .int()
+      .positive(message)
+  );
+
 const deliverySchema = z.object({
   id: z.coerce.number().int().optional(),
-  serialNo: z.coerce.number().int().nullable().optional(),
-  boxNo: z.coerce.number().int().nullable().optional(),
-  shopId: z.coerce.number().int().nullable().optional(),
+  serialNo: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
+  boxNo: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
+  shopId: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
   shopName: z.string().optional(),
-  birdTypeId: z.coerce.number().int().nullable().optional(),
+  birdTypeId: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
   birdType: z.string().optional(),
-  birds: z.coerce.number().int().nonnegative("Bird count cannot be negative").optional(),
-  weight: z.coerce.number().nonnegative("Weight cannot be negative").optional(),
-  mortality: z.coerce.number().int().nonnegative("Mortality cannot be negative").optional(),
-  mortKg: z.coerce.number().nonnegative("Mortality weight cannot be negative").nullable().optional(),
-  rate: z.coerce.number().nonnegative().nullable().optional(),
-  amount: z.coerce.number().nonnegative().optional(),
+  birds: z.preprocess(emptyToNullNumber, z.number().int().nonnegative("Bird count cannot be negative").optional()),
+  weight: z.preprocess(emptyToNullNumber, z.number().nonnegative("Weight cannot be negative").optional()),
+  mortality: z.preprocess(emptyToNullNumber, z.number().int().nonnegative("Mortality cannot be negative").optional()),
+  mortKg: z.preprocess(emptyToNullNumber, z.number().nonnegative("Mortality weight cannot be negative").nullable().optional()),
+  rate: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
+  // Amount is computed server-side from weight × rate when omitted. Do not coerce
+  // missing/undefined with z.coerce.number() — that becomes NaN ("Expected number, received nan").
+  amount: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
   remarks: z.string().optional(),
   deliveryMode: z.enum(["box", "weight"]).optional(),
   selectedBoxIds: z.array(z.coerce.number().int()).optional(),
-  farmBirds: z.coerce.number().int().nullable().optional(),
-  farmWeight: z.coerce.number().nullable().optional(),
+  farmBirds: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
+  farmWeight: z.preprocess(emptyToNullNumber, z.number().nullable().optional()),
   perBoxData: z.array(boxDetailSchema).optional(),
   autoCaptureTime: z.string().nullable().optional(),
 });
@@ -175,9 +189,9 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
     .object({
       deliveries: z.array(
         deliverySchema.extend({
-          // FIXED: Moved required_error inside z.coerce.number()
-          shopId: z.coerce.number({ required_error: "Shop is required for a delivery" }).int(),
-          amount: z.coerce.number({ required_error: "Amount is required" }).nonnegative(),
+          shopId: requiredPositiveId("Shop is required for a delivery"),
+          birdTypeId: requiredPositiveId("Bird Type is required."),
+          amount: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
         })
       ).min(1, "At least one delivery is required"),
     })

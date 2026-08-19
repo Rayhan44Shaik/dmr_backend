@@ -280,6 +280,27 @@ describe("delivery email", () => {
     assert.equal(deliveries.rows[0].n, ctx.deliveries.length);
   });
 
+  it("does not send twice for concurrent requests of the same delivery", async () => {
+    const ctx = await makeTripWithDeliveries([]);
+    const id = ctx.deliveries[0].id;
+    const [a, b] = await Promise.all([
+      postJson(app.baseUrl, emailPath(ctx.trip.id, id), { pdfBase64: PDF_B64 }),
+      postJson(app.baseUrl, emailPath(ctx.trip.id, id), { pdfBase64: PDF_B64 }),
+    ]);
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    const count = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM trip_delivery_emails WHERE trip_id = $1 AND delivery_id = $2`,
+      [ctx.trip.id, id]
+    );
+    assert.equal(count.rows[0].n, 1);
+    const st = await pool.query(
+      `SELECT status FROM trip_delivery_emails WHERE trip_id = $1 AND delivery_id = $2`,
+      [ctx.trip.id, id]
+    );
+    assert.ok(["sent", "sending"].includes(String(st.rows[0].status)));
+  });
+
   it("retries a failed row without duplicating the delivery", async () => {
     const ctx = await makeTripWithDeliveries([]);
     const id = ctx.deliveries[0].id;

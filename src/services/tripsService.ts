@@ -762,7 +762,7 @@ async function replaceDeliveries(
          trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
          birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
          farm_birds, farm_weight, auto_capture_time, client_key
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,COALESCE($19::timestamptz, NOW()),$20)
        RETURNING id`,
       [
         tripId,
@@ -2274,7 +2274,7 @@ export const tripsService = {
                trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
                birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
                farm_birds, farm_weight, auto_capture_time, client_key
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,COALESCE($19::timestamptz, NOW()),$20)
              RETURNING id`,
             [
               tripId,
@@ -2351,6 +2351,12 @@ export const tripsService = {
                  WHEN deliveries_step_submitted_at IS NULL THEN NOW()
                  ELSE deliveries_step_submitted_at END
              WHERE id = $1`,
+            [tripId]
+          );
+          await client.query(
+            `UPDATE trip_deliveries
+                SET auto_capture_time = NOW()
+              WHERE trip_id = $1 AND auto_capture_time IS NULL`,
             [tripId]
           );
         } catch (err) {

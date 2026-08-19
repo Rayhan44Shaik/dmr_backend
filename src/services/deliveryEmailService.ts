@@ -1,4 +1,4 @@
-import { query } from "../config/db.js";
+import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { smtpService } from "./smtpService.js";
 
@@ -61,7 +61,7 @@ export const deliveryEmailService = {
               d.shop_id, d.shop_name, d.sale_no,
               s.email AS shop_email
          FROM trip_deliveries d
-         LEFT JOIN trip_delivery_emails e
+         LEFT JOIN public.trip_delivery_emails e
            ON e.delivery_id = d.id AND e.trip_id = d.trip_id
          LEFT JOIN shops s ON s.id = d.shop_id
         WHERE d.trip_id = $1
@@ -137,29 +137,50 @@ export const deliveryEmailService = {
       throw new AppError(422, "Shop email is invalid.");
     }
 
-    const existing = await query(
-      `SELECT id, status FROM trip_delivery_emails
-        WHERE trip_id = $1 AND delivery_id = $2`,
-      [tripId, deliveryId]
-    );
-    if (existing.rowCount && String(existing.rows[0].status) === "sent") {
-      logEmail({ tripId, deliveryId, shop: shop.shop_name, status: "sent", duplicate: true });
+    const claimed = await withTransaction(async (client) => {
+      const existing = await client.query(
+        `SELECT id, status FROM public.trip_delivery_emails
+          WHERE trip_id = $1 AND delivery_id = $2
+          FOR UPDATE`,
+        [tripId, deliveryId]
+      );
+      if (existing.rowCount) {
+        const status = String(existing.rows[0].status);
+        if (status === "sent" || status === "sending") {
+          return { skip: true as const, reason: status };
+        }
+      }
+      const upsert = await client.query(
+        `INSERT INTO public.trip_delivery_emails (trip_id, delivery_id, status, recipient, updated_at)
+         VALUES ($1, $2, 'sending', $3, NOW())
+         ON CONFLICT (trip_id, delivery_id)
+         DO UPDATE SET status = 'sending', recipient = EXCLUDED.recipient,
+                       failure_reason = NULL, updated_at = NOW()
+         WHERE public.trip_delivery_emails.status IN ('pending', 'failed')
+         RETURNING id`,
+        [tripId, deliveryId, recipient]
+      );
+      if (!upsert.rowCount) {
+        return { skip: true as const, reason: "sending" as const };
+      }
+      return { skip: false as const };
+    });
+
+    if (claimed.skip) {
+      logEmail({
+        tripId,
+        deliveryId,
+        shop: shop.shop_name,
+        status: claimed.reason,
+        duplicate: true,
+      });
       return {
         success: true as const,
-        status: "sent" as const,
+        status: claimed.reason === "sending" ? ("sending" as const) : ("sent" as const),
         tripId,
         deliveryId,
       };
     }
-
-    await query(
-      `INSERT INTO trip_delivery_emails (trip_id, delivery_id, status, recipient, updated_at)
-       VALUES ($1, $2, 'sending', $3, NOW())
-       ON CONFLICT (trip_id, delivery_id)
-       DO UPDATE SET status = 'sending', recipient = EXCLUDED.recipient,
-                     failure_reason = NULL, updated_at = NOW()`,
-      [tripId, deliveryId, recipient]
-    );
 
     const tripNo = String(trip.trip_no ?? tripId);
     const deliveryNo = String(delivery.sale_no ?? `${tripNo}-D${deliveryId}`);
@@ -197,7 +218,7 @@ export const deliveryEmailService = {
           ? err.message
           : "Unable to send delivery email. Check internet and SMTP settings.";
       await query(
-        `UPDATE trip_delivery_emails
+        `UPDATE public.trip_delivery_emails
             SET status = 'failed', failure_reason = $3, updated_at = NOW()
           WHERE trip_id = $1 AND delivery_id = $2`,
         [tripId, deliveryId, message]
@@ -214,7 +235,7 @@ export const deliveryEmailService = {
     }
 
     await query(
-      `UPDATE trip_delivery_emails
+      `UPDATE public.trip_delivery_emails
           SET status = 'sent', sent_at = NOW(), failure_reason = NULL, updated_at = NOW()
         WHERE trip_id = $1 AND delivery_id = $2`,
       [tripId, deliveryId]

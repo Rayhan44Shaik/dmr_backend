@@ -81,6 +81,7 @@ async function seedMasters() {
     phoneNumber: `90000000${String(vehicleSeq).padStart(2, "0")}`,
     village: "Village",
     status: "Active",
+    email: `shop-a-${vehicleSeq}@example.com`,
   });
   const shopB = await mastersService.upsertShop({
     shopName: `Shop Beta ${vehicleSeq}`,
@@ -88,8 +89,14 @@ async function seedMasters() {
     phoneNumber: `91000000${String(vehicleSeq).padStart(2, "0")}`,
     village: "Village",
     status: "Active",
+    email: `shop-b-${vehicleSeq}@example.com`,
   });
-  return { vehicle, driver, supervisor, farm, shopA, shopB };
+  const birdType = await mastersService.upsertBirdType({
+    birdType: `S4 Bird ${vehicleSeq}`,
+    averageWeight: 1.5,
+    status: "Active",
+  });
+  return { vehicle, driver, supervisor, farm, shopA, shopB, birdType };
 }
 
 /** Creates a trip with Steps 1-3 complete and pickup boxes persisted. */
@@ -139,6 +146,17 @@ function delivery(overrides: Partial<ShopDelivery> = {}): ShopDelivery {
     perBoxData: [],
     ...overrides,
   };
+}
+
+function submittedDelivery(
+  m: Awaited<ReturnType<typeof seedMasters>>,
+  overrides: Partial<ShopDelivery> = {}
+): ShopDelivery {
+  return delivery({
+    birdTypeId: m.birdType.id,
+    birdType: m.birdType.birdType,
+    ...overrides,
+  });
 }
 
 async function rowsFor(tripId: number) {
@@ -612,7 +630,7 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
     const id = first.deliveries[0].id;
     const submitted = await tripsService.submitStep(trip.id, "deliveries", {
       deliveries: [
-        delivery({
+        submittedDelivery(m, {
           clientKey: "ck-stable-id",
           shopId: m.shopA.id,
           shopName: m.shopA.shopName,
@@ -621,7 +639,6 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
           mortality: 10,
           mortKg: 20,
           selectedBoxIds: [1],
-          amount: 0,
         }),
       ],
       deliveryStepSubmitted: true,
@@ -850,7 +867,7 @@ describe("Step 4 timestamp semantics", () => {
 
     const submitted = await tripsService.submitStep(trip.id, "deliveries", {
       deliveries: [
-        delivery({
+        submittedDelivery(m, {
           clientKey: "ck-ts",
           shopId: m.shopA.id,
           shopName: m.shopA.shopName,
@@ -859,7 +876,6 @@ describe("Step 4 timestamp semantics", () => {
           selectedBoxIds: [1],
           farmBirds: 100,
           farmWeight: 200,
-          amount: 0,
         }),
       ],
       deliveryStepSubmitted: true,
@@ -874,7 +890,7 @@ describe("Step 4 timestamp semantics", () => {
     // Editing the submitted delivery must NOT change the timestamp.
     const edited = await tripsService.submitStep(trip.id, "deliveries", {
       deliveries: [
-        delivery({
+        submittedDelivery(m, {
           clientKey: "ck-ts",
           shopId: m.shopA.id,
           shopName: m.shopA.shopName,
@@ -885,7 +901,6 @@ describe("Step 4 timestamp semantics", () => {
           selectedBoxIds: [1],
           farmBirds: 100,
           farmWeight: 200,
-          amount: 0,
         }),
       ],
       deliveryStepSubmitted: true,
@@ -915,7 +930,7 @@ describe("Step 4 timestamp semantics", () => {
       () =>
         tripsService.submitStep(trip.id, "deliveries", {
           deliveries: [
-            delivery({
+            submittedDelivery(m, {
               clientKey: "ck-incomplete",
               shopId: m.shopA.id,
               shopName: m.shopA.shopName,
@@ -933,6 +948,56 @@ describe("Step 4 timestamp semantics", () => {
       [trip.id]
     );
     assert.equal(flag.rows[0].delivery_step_submitted, false, "failed submit must not mark the step");
+  });
+
+  it("final submit accepts omitted amount (server computes it) and does not fail with NaN", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-14",
+      boxes: [{ boxNo: 1, birds: 100, weight: 200 }],
+    });
+    const row = submittedDelivery(m, {
+      clientKey: "ck-no-amount",
+      shopId: m.shopA.id,
+      shopName: m.shopA.shopName,
+      birds: 100,
+      weight: 200,
+      selectedBoxIds: [1],
+    });
+    delete (row as { amount?: unknown }).amount;
+    const submitted = await tripsService.submitStep(trip.id, "deliveries", {
+      deliveries: [row],
+      deliveryStepSubmitted: true,
+    } as Record<string, unknown>);
+    assert.equal(submitted.deliveryStepSubmitted, true);
+    assert.equal(submitted.deliveries[0].amount, 0);
+  });
+
+  it("final submit rejects a delivery without Bird Type", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-15",
+      boxes: [{ boxNo: 1, birds: 100, weight: 200 }],
+    });
+    await assert.rejects(
+      () =>
+        tripsService.submitStep(trip.id, "deliveries", {
+          deliveries: [
+            delivery({
+              clientKey: "ck-no-bird",
+              shopId: m.shopA.id,
+              shopName: m.shopA.shopName,
+              birdTypeId: null,
+              birdType: "",
+              birds: 100,
+              weight: 200,
+              selectedBoxIds: [1],
+            }),
+          ],
+          deliveryStepSubmitted: true,
+        } as Record<string, unknown>),
+      /Bird Type is required/i
+    );
   });
 });
 
