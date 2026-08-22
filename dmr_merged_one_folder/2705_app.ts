@@ -1,0 +1,166 @@
+/**
+ * Boots the production server (src/index.ts, unmodified) as a child process
+ * on an ephemeral port and exposes an HTTP test client.
+ *
+ * Spawning a child process keeps the production entry point untouched — tests
+ * talk to the exact same server the app runs in production.
+ */
+import { spawn, type ChildProcess } from "node:child_process";
+import net from "node:net";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
+
+export interface TestApp {
+  baseUrl: string;
+  close: () => Promise<void>;
+}
+
+function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const address = srv.address();
+      if (address === null || typeof address === "string") {
+        srv.close();
+        reject(new Error("could not allocate test port"));
+        return;
+      }
+      srv.close(() => resolve(address.port));
+    });
+  });
+}
+
+export async function startApp(env: Record<string, string>): Promise<TestApp> {
+  const port = await getFreePort();
+
+  const child: ChildProcess = spawn(
+    process.execPath,
+    ["--import", "tsx", "tests/helpers/runTestServer.ts"],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PORT: String(port),
+        CORS_ORIGIN: "*",
+        ...env,
+      },
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    }
+  );
+
+  let stderr = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  // Wait for the health endpoint to come up (the server does
+  // `SELECT 1`-equivalent checks before listening).
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    if (child.exitCode !== null) {
+      throw new Error(`test server exited early (code ${child.exitCode}):\n${stderr}`);
+    }
+    try {
+      const res = await fetch(`${baseUrl}/api/health`);
+      if (res.ok) break;
+    } catch {
+      /* not up yet */
+    }
+    if (Date.now() > deadline) {
+      child.kill("SIGKILL");
+      throw new Error(`test server did not start within 90s:\n${stderr}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+
+  return {
+    baseUrl,
+    close: async () => {
+      if (child.exitCode === null) {
+        if (typeof child.send === "function") {
+          child.send("shutdown");
+        } else {
+          child.kill("SIGTERM");
+        }
+        await Promise.race([
+          new Promise<void>((resolve) => child.once("exit", () => resolve())),
+          new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+        ]);
+      }
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+        await Promise.race([
+          new Promise<void>((resolve) => child.once("exit", () => resolve())),
+          new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+        ]);
+      }
+    },
+  };
+}
+
+export async function postJson(
+  baseUrl: string,
+  apiPath: string,
+  body: unknown
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${apiPath}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+export async function putJson(
+  baseUrl: string,
+  apiPath: string,
+  body: unknown
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${apiPath}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+export async function patchJson(
+  baseUrl: string,
+  apiPath: string,
+  body: unknown
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${apiPath}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
+export async function deleteJson(
+  baseUrl: string,
+  apiPath: string
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${apiPath}`, { method: "DELETE" });
+  const text = await res.text();
+  let body: any = {};
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { raw: text };
+  }
+  return { status: res.status, body };
+}
+
+export async function getJson(
+  baseUrl: string,
+  apiPath: string
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${baseUrl}${apiPath}`);
+  return { status: res.status, body: await res.json() };
+}

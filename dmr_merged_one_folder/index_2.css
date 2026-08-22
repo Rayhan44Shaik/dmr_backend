@@ -1,0 +1,131 @@
+/* src/styles/index.css */
+
+/* ✅ Tailwind CSS v4 */
+@import "tailwindcss";
+
+/* React Datepicker styles */
+@import "react-datepicker/dist/react-datepicker.css";
+
+/* ============================================================
+   DATE RANGE PICKER OVERRIDES
+   ============================================================ */
+
+.rdrDateRangePickerWrapper {
+  padding: 0 !important;
+  width: 100% !important;
+}
+
+.rdrCalendarWrapper {
+  background: white !important;
+  font-size: 0.7rem !important;
+  width: 100% !important;
+}
+
+.rdrMonth {
+  padding: 4px 0 !important;
+}
+
+.rdrMonthAndYearWrapper {
+  padding: 4px 0 !important;
+  height: 32px !important;
+}
+
+.rdrWeekDays {
+  padding: 0 4px !important;
+}
+
+.rdrWeekDay {
+  height: 28px !important;
+  flex-basis: 14.2857% !important;
+  width: auto !important;
+  font-size: 0.6rem !important;
+  font-weight: 500 !important;
+}
+
+.rdrDay {
+  height: 28px !important;
+  flex-basis: 14.2857% !important;
+  width: auto !important;
+}
+
+.rdrDayNumber {
+  font-size: 0.65rem !important;
+}
+
+.rdrDayNumber span {
+  color: #1a1a1a !important;
+  font-weight: 600 !important;
+}
+
+.rdrDaySelected .rdrDayNumber span,
+.rdrDayInRange .rdrDayNumber span,
+.rdrDayStartEdge .rdrDayNumber span,
+.rdrDayEndEdge .rdrDayNumber span {
+  color: white !important;
+}
+
+.rdrDayToday .rdrDayNumber span {
+  color: #1a1a1a !important;
+  font-weight: 700 !important;
+}
+
+.rdrDayToday.rdrDaySelected .rdrDayNumber span,
+.rdrDayToday.rdrDayStartEdge .rdrDayNumber span,
+.rdrDayToday.rdrDayEndEdge .rdrDayNumber span,
+.rdrDayToday.rdrDayInRange .rdrDayNumber span {
+  color: white !important;
+  font-weight: 700 !important;
+}
+
+.rdrDefinedRangesWrapper,
+.rdrMonthName {
+  display: none !important;
+}
+
+.rdrNextPrevButton,
+.rdrPprevButton,
+.rdrNextButton {
+  width: 24px !important;
+  height: 24px !important;
+}
+
+.rdrDayStartEdge,
+.rdrDayEndEdge,
+.rdrDayInRange {
+  border-radius: 4px !important;
+}
+
+.rdrDayStartEdge,
+.rdrDayEndEdge,
+.rdrStartEdge,
+.rdrEndEdge {
+  background: #1e40af !important;
+}
+
+.rdrDayInRange,
+.rdrInRange {
+  background: rgba(59, 130, 246, 0.3) !important;
+}
+
+/* ============================================================
+   BUTTON ANIMATIONS
+   ============================================================ */
+
+button,
+button[class*="px-"][class*="py-"] {
+  transition: all 0.2s ease-in-out;
+}
+
+button:hover {
+  transform: scale(1.03);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+button:active {
+  transform: scale(0.97);
+}
+
+button:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}

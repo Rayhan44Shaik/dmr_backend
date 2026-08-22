@@ -1,0 +1,43 @@
+{
+  "name": "dmr-poultries-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "db:migrate": "tsx src/scripts/migrate.ts",
+    "db:reset": "tsx src/scripts/migrate.ts --reset",
+    "db:seed": "tsx src/scripts/seed.ts",
+    "seed:demo": "tsx src/scripts/seed-demo-data.ts",
+    "fuel:reconcile": "tsx src/scripts/reconcileTripFuel.ts",
+    "smtp:verify": "tsx src/scripts/verifySmtp.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/tripList.test.ts tests/bulkImport.test.ts tests/salaryLifecycle.test.ts tests/salaryBulk.test.ts tests/staffPerformance.test.ts tests/dutyPlannerWeekly.test.ts tests/rateEntryShopSales.test.ts tests/tripDeliveryCapacity.test.ts tests/shopSalesFlow.test.ts tests/collectionEntry.test.ts tests/shopLedger.test.ts tests/step4DeliveryPersistence.test.ts tests/fuelExpenses.test.ts tests/analytics.test.ts tests/emiContract.test.ts tests/deliveryEmail.test.ts tests/smtpConfig.test.ts tests/mobileAuth.test.ts",
+    "test:typecheck": "tsc -p tsconfig.tests.json"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.2.0",
+    "nodemailer": "^6.10.1",
+    "pg": "^8.13.3",
+    "swagger-ui-express": "^5.0.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.5",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^2.2.0",
+    "@types/node": "^22.13.10",
+    "@types/nodemailer": "^6.4.24",
+    "@types/pg": "^8.11.11",
+    "@types/swagger-ui-express": "^4.1.8",
+    "pg-gateway": "^0.3.0-beta.4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
