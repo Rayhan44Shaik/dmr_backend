@@ -327,6 +327,13 @@ export async function replaceDiesel(
   }
 }
 
+function normalizeTimestamp(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  const parsed = new Date(String(value));
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
 async function parseDieselBody(client: Client, body: Record<string, unknown>) {
   const litres = validatePositiveNumber(body.litres ?? body.dieselLtr, "Diesel litres");
   const rate = validatePositiveNumber(body.rate ?? body.dieselRate, "Fuel rate");
@@ -354,7 +361,7 @@ async function parseDieselBody(client: Client, body: Record<string, unknown>) {
     meter,
     bunk,
     gps,
-    gpsCapturedAt: body.gpsCapturedAt ?? body.fuelGpsCapturedAt ?? body.dieselGpsCapturedAt ?? null,
+    gpsCapturedAt: normalizeTimestamp(body.gpsCapturedAt ?? body.fuelGpsCapturedAt ?? body.dieselGpsCapturedAt),
     imageData,
     imageName: (() => {
       const name = body.imageName ?? body.dieselImageName;

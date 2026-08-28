@@ -2520,7 +2520,9 @@ export const tripsService = {
     if (step === "expenses") {
       stripProtectedStep5Fields(body);
       validateExpensePayload(body);
-      body.skipDiesel = true;
+      if (!isSaveMode) {
+        body.skipDiesel = true;
+      }
     }
 
     // "Save Progress" is a permissive autosave: it must never run strict step
