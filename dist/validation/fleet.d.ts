@@ -8,8 +8,8 @@ export declare const fleetMaintenancePartSchema: z.ZodObject<{
     rate: z.ZodDefault<z.ZodNumber>;
     amount: z.ZodOptional<z.ZodNumber>;
 }, "strip", z.ZodTypeAny, {
-    rate: number;
     name: string;
+    rate: number;
     quantity: number;
     amount?: number | undefined;
     specification?: string | undefined;
@@ -39,8 +39,8 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
         rate: z.ZodDefault<z.ZodNumber>;
         amount: z.ZodOptional<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
-        rate: number;
         name: string;
+        rate: number;
         quantity: number;
         amount?: number | undefined;
         specification?: string | undefined;
@@ -55,38 +55,38 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     remarks: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     createdBy: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
-    vehicleId: number;
     date: string;
+    vehicleId: number;
     currentKM: number;
     maintenanceType: string | string[];
     serviceType: string;
     vehicleNo?: string | null | undefined;
     driverId?: number | null | undefined;
+    driverName?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    driverName?: string | null | undefined;
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
     parts?: {
-        rate: number;
         name: string;
+        rate: number;
         quantity: number;
         amount?: number | undefined;
         specification?: string | undefined;
     }[] | undefined;
     totalCost?: number | undefined;
 }, {
-    vehicleId: number;
     date: string;
+    vehicleId: number;
     currentKM: number;
     maintenanceType: string | string[];
     serviceType: string;
     vehicleNo?: string | null | undefined;
     driverId?: number | null | undefined;
+    driverName?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    driverName?: string | null | undefined;
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
@@ -120,8 +120,8 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
         rate: z.ZodDefault<z.ZodNumber>;
         amount: z.ZodOptional<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
-        rate: number;
         name: string;
+        rate: number;
         quantity: number;
         amount?: number | undefined;
         specification?: string | undefined;
@@ -139,12 +139,12 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     removeDocumentIds: z.ZodOptional<z.ZodArray<z.ZodNumber, "many">>;
 }, "strip", z.ZodTypeAny, {
     vehicleNo?: string | null | undefined;
+    date?: string | undefined;
     vehicleId?: number | undefined;
     driverId?: number | null | undefined;
+    driverName?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    date?: string | undefined;
-    driverName?: string | null | undefined;
     currentKM?: number | undefined;
     nextServiceKM?: number | null | undefined;
     maintenanceType?: string | string[] | undefined;
@@ -152,8 +152,8 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     garage?: string | undefined;
     mechanic?: string | undefined;
     parts?: {
-        rate: number;
         name: string;
+        rate: number;
         quantity: number;
         amount?: number | undefined;
         specification?: string | undefined;
@@ -162,12 +162,12 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     removeDocumentIds?: number[] | undefined;
 }, {
     vehicleNo?: string | null | undefined;
+    date?: string | undefined;
     vehicleId?: number | undefined;
     driverId?: number | null | undefined;
+    driverName?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    date?: string | undefined;
-    driverName?: string | null | undefined;
     currentKM?: number | undefined;
     nextServiceKM?: number | null | undefined;
     maintenanceType?: string | string[] | undefined;

@@ -68,9 +68,13 @@ export declare const emiUpdateSchema: z.ZodObject<{
 /** Payment body — marking the next pending installment as paid. */
 export declare const emiPaySchema: z.ZodObject<{
     paidBy: z.ZodOptional<z.ZodString>;
+    /** Client-stable key so a lost HTTP response can be retried without a second pay. */
+    idempotencyKey: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     paidBy?: string | undefined;
+    idempotencyKey?: string | undefined;
 }, {
     paidBy?: string | undefined;
+    idempotencyKey?: string | undefined;
 }>;
 export { parseBody };

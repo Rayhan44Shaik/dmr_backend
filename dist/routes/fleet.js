@@ -9,7 +9,7 @@ import { vehicleEmiService } from "../services/vehicleEmiService.js";
 import { coercePermitMultipartBody } from "../validation/permits.js";
 import { coerceMultipartBody, MAINTENANCE_DOCUMENT_MAX_BYTES, MAINTENANCE_DOCUMENT_MAX_FILES, } from "../utils/fleetMultipart.js";
 import { parsePagination } from "../utils/pagination.js";
-import { getLatestVehicleMeter, listVehicleMeterHistory, } from "../utils/vehicleMeterLedger.js";
+import { getLatestVehicleMeter, listLatestVehicleMeters, listVehicleMeterHistory, } from "../utils/vehicleMeterLedger.js";
 export const fleetRouter = Router();
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -46,6 +46,11 @@ function bodyAndFiles(req) {
 // Backs the Vehicle History meter timeline and the "Latest Meter: X KM" hint
 // shown on Fuel Entry / Maintenance Entry vehicle selection. Read-only —
 // derived from trips + fuel_expenses + fleet_maintenance, never written to.
+// NOTE: registered before the /:vehicleId routes so "meter-summary" is never
+// parsed as a vehicle id.
+fleetRouter.get("/vehicles/meter-summary", asyncHandler(async (_req, res) => {
+    res.json(await listLatestVehicleMeters());
+}));
 fleetRouter.get("/vehicles/:vehicleId/meter-history", asyncHandler(async (req, res) => {
     res.json(await listVehicleMeterHistory(Number(req.params.vehicleId)));
 }));
@@ -167,6 +172,13 @@ fleetRouter.get("/emis", asyncHandler(async (req, res) => {
 // NOTE: must be registered before /emis/:id so "vehicle" is not parsed as an id.
 fleetRouter.get("/emis/vehicle/:vehicleId", asyncHandler(async (req, res) => {
     res.json(await vehicleEmiService.getByVehicleId(Number(req.params.vehicleId)));
+}));
+// EMI Management overview — every ACTIVE vehicle from the Vehicle Master with
+// its EMI status (purchase amount/date, total EMI, completed/pending, next EMI
+// date) derived from the master + existing payment schedule. Read-only. Must be
+// registered before /emis/:id so "overview" is not parsed as an EMI id.
+fleetRouter.get("/emis/overview", asyncHandler(async (_req, res) => {
+    res.json(await vehicleEmiService.overview());
 }));
 fleetRouter.get("/emis/:id", asyncHandler(async (req, res) => {
     res.json(await vehicleEmiService.getById(Number(req.params.id)));

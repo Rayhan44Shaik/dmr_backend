@@ -240,6 +240,13 @@ class RowContext {
 // Per-kind normalizers
 // ---------------------------------------------------------------------------
 function normalizeShop(ctx) {
+    const email = ctx.str("email");
+    if (!email) {
+        ctx.fail("email", "Email ID is required.");
+    }
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        ctx.fail("email", "Please enter a valid email address.");
+    }
     return {
         shopNo: ctx.optionalNo("shopNo"),
         shopName: ctx.requiredStr("shopName"),
@@ -247,6 +254,7 @@ function normalizeShop(ctx) {
         phoneNumber: ctx.phone("phoneNumber"),
         village: ctx.str("village"),
         address: ctx.nullableStr("address"),
+        email,
         status: ctx.status("status", ACTIVE_STATUSES),
     };
 }

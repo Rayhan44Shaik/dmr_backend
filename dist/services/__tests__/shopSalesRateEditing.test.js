@@ -40,17 +40,34 @@ const DAY = 24 * 60 * 60 * 1000;
  * edits in the rate-focused tests never accidentally hit the capacity gate. */
 async function makeRateEditableTrip(f, opts = {}) {
     const shopId = await makeShop(f);
-    const t = await pool.query(`INSERT INTO trips (trip_no, trip_date, status, deleted, approved_at, total_birds, dc_weight)
-     VALUES ($1, CURRENT_DATE, 'Completed', FALSE, NOW() - ($2 || ' milliseconds')::interval, 1000, 2000)
-     RETURNING id`, [`T-RATEEDIT-${uniqueInt()}`, String(opts.ageOffsetMs ?? 0)]);
+    const ageDays = Math.round((opts.ageOffsetMs ?? 0) / DAY);
+    const t = await pool.query(`INSERT INTO trips (
+       trip_no, trip_date, status, deleted, approved_at, total_birds, dc_weight,
+       delivery_step_submitted, expenses_step_submitted
+     )
+     VALUES (
+       $1,
+       (CURRENT_DATE - ($2::int * INTERVAL '1 day'))::date,
+       'Completed', FALSE, NOW(), 1000, 2000, TRUE, TRUE
+     )
+     RETURNING id`, [`T-RATEEDIT-${uniqueInt()}`, String(ageDays)]);
     const tripId = t.rows[0].id;
     f.tripIds.push(tripId);
     const d = await pool.query(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate)
      VALUES ($1, $2, $3, $4, $5, $6, NULL)
      RETURNING id`, [tripId, `SALE-${uniqueInt()}`, shopId, "rate-edit-shop", opts.birds ?? 25, opts.weight ?? 48]);
     const deliveryId = d.rows[0].id;
+    const balancer = await makeShop(f);
+    const d2 = await pool.query(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate)
+     VALUES ($1, $2, $3, $4, 200, 400, NULL)
+     RETURNING id`, [tripId, `SALE-${uniqueInt()}`, balancer, "rate-edit-balancer"]);
     const rate = opts.initialRate ?? 90;
-    await rateEntryService.save(tripId, { rates: [{ deliveryId, rate }] });
+    await rateEntryService.save(tripId, {
+        rates: [
+            { deliveryId, rate },
+            { deliveryId: d2.rows[0].id, rate },
+        ],
+    });
     await rateEntryService.lock(tripId, { lockedBy: "rate-edit-tester" });
     return { tripId, shopId, deliveryId };
 }
@@ -261,8 +278,8 @@ describe("Combined field edits within the 10-day window", () => {
         assert.equal(delivery?.birds, 33);
         assert.equal(delivery?.weight, 61);
         assert.equal(delivery?.rate, 115);
-        assert.equal(trip.totalBirdsDelivered, 33);
-        assert.equal(trip.totalDeliveredWeight, 61);
+        assert.equal(trip.totalBirdsDelivered, 225);
+        assert.equal(trip.totalDeliveredWeight, 448);
     });
     test("An invalid combined edit (bad rate) rolls back the WHOLE request — birds/weight are not partially applied", async (t) => {
         const f = newFixture();

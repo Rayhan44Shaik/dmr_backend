@@ -1,4 +1,4 @@
-import type { VehicleEMI, VehicleEMIInstallment } from "../types/fleet.js";
+import type { EmiOverview, VehicleEMI, VehicleEMIInstallment } from "../types/fleet.js";
 export declare const vehicleEmiService: {
     /**
      * All EMI records across every vehicle, joined with the Vehicle Master for
@@ -11,6 +11,21 @@ export declare const vehicleEmiService: {
         status?: string;
         search?: string;
     }): Promise<VehicleEMI[]>;
+    /**
+     * EMI Management overview — read-only, derived from the Vehicle Master.
+     *
+     * Every ACTIVE vehicle from `vehicles` is returned (whether or not it has an
+     * EMI payment record yet). The authoritative vehicle facts — vehicle number,
+     * purchase amount, purchase date, total EMI, EMI day — are read from the
+     * Vehicle Master; the completed/payment state is LEFT JOINed from the
+     * existing EMI payment schedule (vehicle_emis + vehicle_emi_installments)
+     * when one exists. Status is restricted to pending | completed.
+     *
+     * The EMI page consumes ONLY this endpoint for its table and dashboard
+     * cards. It never creates a separate vehicle or an EMI-specific copy of the
+     * master data, and it never persists vehicle-master facts here.
+     */
+    overview(): Promise<EmiOverview[]>;
     getById(id: number): Promise<VehicleEMI>;
     /** EMI record for a specific vehicle (used by vehicle-wise EMI views). */
     getByVehicleId(vehicleId: number): Promise<VehicleEMI>;
@@ -42,6 +57,10 @@ export declare const vehicleEmiService: {
      * aggregates (paidEMIs, nextEMIDate, status) in the same transaction so the
      * payment, the pending count, the next due date and the overall status can
      * never drift out of sync. Fully-paid EMIs reject further payments (409).
+     *
+     * When `idempotencyKey` is present, a retry of the same logical payment
+     * returns the already-applied result and does not pay another installment.
+     * The EMI row is locked so concurrent requests cannot double-apply.
      */
     pay(id: number, body: unknown): Promise<VehicleEMI>;
     /**

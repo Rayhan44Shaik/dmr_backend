@@ -16,6 +16,7 @@ export interface NormalizedShopRow {
     phoneNumber: string;
     village: string;
     address: string | null;
+    email: string;
     status: "Active" | "Inactive";
 }
 export interface NormalizedVehicleRow {

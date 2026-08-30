@@ -112,6 +112,22 @@ export async function validateVehicleMeter(client, opts) {
         throw new AppError(422, `${opts.context} of ${opts.newMeter} KM exceeds a later recorded reading of ${next.meter} KM (${SOURCE_LABELS[next.sourceType]} ${next.ref}) and would break the vehicle's chronological meter history.`, { nextMeter: next.meter, nextSource: next.sourceType, nextRef: next.ref });
     }
 }
+/**
+ * Latest accepted meter event for EVERY vehicle in one query (DISTINCT ON the
+ * same authoritative ordering as getLatestVehicleMeter). Backs the Upcoming
+ * Service calculation so the frontend receives one batch from the database
+ * instead of N per-vehicle calls — there is exactly ONE meter history and it
+ * lives here. Read-only; reuses the vehicle_meter_events view.
+ */
+export async function listLatestVehicleMeters() {
+    const result = await query(`SELECT * FROM (
+       SELECT DISTINCT ON (vehicle_id) *
+       FROM vehicle_meter_events
+       ORDER BY vehicle_id, event_date DESC, event_instant DESC, created_at DESC, record_id DESC
+     ) latest
+     ORDER BY vehicle_id ASC`);
+    return result.rows.map(mapEvent);
+}
 /** Full ordered timeline for a vehicle — backs the Vehicle History UI. */
 export async function listVehicleMeterHistory(vehicleId) {
     const result = await query(`SELECT * FROM vehicle_meter_events

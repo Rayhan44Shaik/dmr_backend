@@ -7,12 +7,14 @@ import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import { computeFarmAmount, computeTotalKm, computeTripKpis, sumDieselFuel, } from "../utils/tripCalculations.js";
 import { loadDcPhoto, syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
-import { assertWithinCapacity, generateSaleNo } from "../utils/tripDeliverySync.js";
+import { computeMileageKmL, extractDieselFromBody, flattenDiesel, loadDieselEntries, mapDieselRow, replaceDiesel, stripProtectedStep5Fields, submitDieselEntry, updateDieselEntry, deleteDieselEntry, validateExpensePayload, validateFinalStep5, withSerializedTripDiesel, } from "../utils/tripStep5.js";
+import { assertPickupBoxNumbers, loadVehicleBoxCapacity, persistPickupPhotos, recalcPickupTotals, removePickupBoxes, replacePickupBoxes, upsertPickupBoxes, } from "../utils/tripPickup.js";
+import { assertWithinCapacity, generateSaleNo, recalcTripDeliveryTotals, remainingPickupBox, sumActiveDeliveries } from "../utils/tripDeliverySync.js";
 import { getLatestVehicleMeter, lockVehicleForMeterWrite, preciseIsoOrUndefined, validateVehicleMeter, } from "../utils/vehicleMeterLedger.js";
-import { assertStepOrder, getResumeLabel, getResumeStep, getWizardProgress, } from "../utils/tripResume.js";
-import { assertTripResourcesAvailable } from "../validation/tripResourceValidation.js";
+import { assertStepOrder, getResumeLabel, getResumeStep, getWizardProgress, TRIP_STEP_LABELS, } from "../utils/tripResume.js";
+import { assertTripResourcesAvailable, lockTripResourcesForWrite, } from "../validation/tripResourceValidation.js";
 import { assertTripStatus } from "../validation/operations.js";
-import { assertTripReadyForCompletion, assertTripStatusTransition, parseTripAutosave, validateStepSubmit, } from "../validation/trips.js";
+import { assertTripReadyForCompletion, assertTripStatusTransition, parseDeliverySave, parseTripAutosave, validateStepSubmit, } from "../validation/trips.js";
 function mapTripBase(row) {
     return {
         id: num(row.id),
@@ -27,7 +29,7 @@ function mapTripBase(row) {
         supervisorId: numOrNull(row.supervisor_id),
         supervisorName: row.supervisor_name == null ? null : str(row.supervisor_name),
         openingMeter: numOrNull(row.opening_meter),
-        advanceAmount: num(row.advance_amount),
+        advanceAmount: numOrNull(row.advance_amount),
         startStepSubmitted: Boolean(row.start_step_submitted),
         startStepSubmittedAt: isoOrNull(row.start_step_submitted_at),
         sourceFarmId: numOrNull(row.source_farm_id),
@@ -44,6 +46,10 @@ function mapTripBase(row) {
         farmLoadWeight: numOrNull(row.farm_load_weight),
         farmRate: numOrNull(row.farm_rate),
         farmAmount: numOrNull(row.farm_amount),
+        farmGpsLat: numOrNull(row.farm_gps_lat),
+        farmGpsLon: numOrNull(row.farm_gps_lon),
+        farmGpsAccuracy: numOrNull(row.farm_gps_accuracy),
+        farmGpsTime: isoOrNull(row.farm_gps_time),
         farmStepSubmitted: Boolean(row.farm_step_submitted),
         farmStepSubmittedAt: isoOrNull(row.farm_step_submitted_at),
         dcWeight: num(row.dc_weight),
@@ -250,11 +256,19 @@ async function loadTripExtras(client, tripId) {
     const loaders = crew.rows
         .filter((r) => r.role === "loader")
         .map((r) => str(r.employee_name));
-    const boxDetails = boxes.rows.map((r) => ({
-        boxNo: num(r.box_no),
-        birds: num(r.birds),
-        weight: num(r.weight),
-    }));
+    const boxDetails = boxes.rows.map((r) => {
+        const birds = num(r.birds);
+        const weight = num(r.weight);
+        // Old rows have no avg_weight — derive it safely (never divide by zero).
+        const avgWeight = numOrNull(r.avg_weight) ??
+            (birds > 0 ? Number((weight / birds).toFixed(3)) : null);
+        return {
+            boxNo: num(r.box_no),
+            birds,
+            weight,
+            avgWeight,
+        };
+    });
     const boxesByDelivery = new Map();
     for (const row of deliveryBoxes.rows) {
         const id = num(row.delivery_id);
@@ -296,31 +310,31 @@ async function loadTripExtras(client, tripId) {
             farmWeight: numOrNull(r.farm_weight),
             perBoxData: perBoxByDelivery.get(id) ?? [],
             autoCaptureTime: isoOrNull(r.auto_capture_time),
+            clientKey: r.client_key == null ? null : str(r.client_key),
         };
     });
-    const dieselEntries = diesel.rows.map((r) => ({
-        rowIndex: num(r.row_index),
-        litres: numOrNull(r.litres),
-        rate: numOrNull(r.rate),
-        meter: numOrNull(r.meter),
-        bunkName: r.bunk_name == null ? null : str(r.bunk_name),
-        bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
-        imageData: r.image_data == null ? null : str(r.image_data),
-        imageName: r.image_name == null ? null : str(r.image_name),
-    }));
+    const dieselEntries = diesel.rows.map((r) => mapDieselRow(r));
     return { helpers, loaders, boxDetails, deliveries: mappedDeliveries, dieselEntries };
 }
 async function hydrateTrip(client, row, options = {}) {
     const base = mapTripBase(row);
     const extras = await loadTripExtras(client, base.id);
+    const submittedDiesel = extras.dieselEntries.filter((d) => d.submitted !== false);
+    const dieselLitres = submittedDiesel.reduce((s, d) => s + Number(d.litres ?? 0), 0);
+    const mileageKmL = computeMileageKmL(base.openingMeter, base.closingMeter ?? base.endMeter, dieselLitres);
+    const vehicleBoxCapacity = await loadVehicleBoxCapacity(client, base.vehicleId);
     let dcPhoto = {
-        dcPhotoData: null,
+        dcPhotoKey: base.dcPhotoKey ?? null,
         dcPhotoMime: null,
+        dcPhotoData: null,
+        dcPhotoKey2: null,
+        dcPhotoMime2: null,
+        dcPhotoData2: null,
     };
-    if (options.includeDcPhoto && base.dcPhotoKey) {
-        dcPhoto = await loadDcPhoto(client, base.id, base.dcPhotoKey);
+    if (options.includeDcPhoto) {
+        dcPhoto = await loadDcPhoto(client, base.id, base.dcPhotoKey ?? null);
     }
-    return { ...base, ...extras, ...dcPhoto };
+    return { ...base, ...extras, ...dcPhoto, vehicleBoxCapacity, mileageKmL };
 }
 async function generateTripNo(client, tripDate) {
     await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`trip_no_${tripDate}`]);
@@ -401,10 +415,7 @@ async function replaceCrew(client, tripId, helpers = [], loaders = []) {
     }
 }
 async function replaceBoxes(client, tripId, boxes = []) {
-    await client.query(`DELETE FROM trip_boxes WHERE trip_id = $1`, [tripId]);
-    for (const box of boxes) {
-        await client.query(`INSERT INTO trip_boxes (trip_id, box_no, birds, weight) VALUES ($1,$2,$3,$4)`, [tripId, box.boxNo, box.birds ?? 0, box.weight ?? 0]);
-    }
+    await replacePickupBoxes(client, tripId, boxes);
 }
 /**
  * Trip Entry Step 4 (Deliveries) capacity guard â€” backend-authoritative,
@@ -486,8 +497,8 @@ async function replaceDeliveries(client, tripId, deliveries = []) {
         const inserted = await client.query(`INSERT INTO trip_deliveries (
          trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
          birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
-         farm_birds, farm_weight, auto_capture_time
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         farm_birds, farm_weight, auto_capture_time, client_key
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,COALESCE($19::timestamptz, NOW()),$20)
        RETURNING id`, [
             tripId,
             saleNo,
@@ -508,6 +519,7 @@ async function replaceDeliveries(client, tripId, deliveries = []) {
             d.farmBirds ?? null,
             d.farmWeight ?? null,
             normalizeTripTimestamp(d.autoCaptureTime),
+            d.clientKey ?? null,
         ]);
         const deliveryId = num(inserted.rows[0].id);
         for (const boxNo of d.selectedBoxIds ?? []) {
@@ -519,67 +531,6 @@ async function replaceDeliveries(client, tripId, deliveries = []) {
          VALUES ($1,$2,$3,$4)`, [deliveryId, pb.boxNo, pb.birds ?? 0, pb.weight ?? 0]);
         }
     }
-}
-async function replaceDiesel(client, tripId, entries = []) {
-    await client.query(`DELETE FROM trip_diesel_entries WHERE trip_id = $1`, [tripId]);
-    for (const e of entries) {
-        await client.query(`INSERT INTO trip_diesel_entries (
-         trip_id, row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [
-            tripId,
-            e.rowIndex,
-            e.litres ?? null,
-            e.rate ?? null,
-            e.meter ?? null,
-            e.bunkName ?? null,
-            e.bunkGps ?? null,
-            e.imageData ?? null,
-            e.imageName ?? null,
-        ]);
-    }
-}
-function extractDieselFromBody(body) {
-    if (Array.isArray(body.dieselEntries)) {
-        return body.dieselEntries;
-    }
-    const indices = new Set();
-    for (const key of Object.keys(body)) {
-        const match = key.match(/^dieselLtr(\d+)$/);
-        if (match)
-            indices.add(Number(match[1]));
-    }
-    return [...indices]
-        .sort((a, b) => a - b)
-        .map((rowIndex) => ({
-        rowIndex,
-        litres: numOrNull(body[`dieselLtr${rowIndex}`]),
-        rate: numOrNull(body[`dieselRate${rowIndex}`]),
-        meter: numOrNull(body[`dieselMeter${rowIndex}`]),
-        bunkName: body[`dieselBunk${rowIndex}`]
-            ? str(body[`dieselBunk${rowIndex}`])
-            : null,
-        bunkGps: body[`dieselBunkGps${rowIndex}`]
-            ? str(body[`dieselBunkGps${rowIndex}`])
-            : null,
-        imageData: body[`dieselImage${rowIndex}`]
-            ? str(body[`dieselImage${rowIndex}`])
-            : null,
-        imageName: body[`dieselImageName${rowIndex}`]
-            ? str(body[`dieselImageName${rowIndex}`])
-            : null,
-    }));
-}
-function flattenDiesel(entries) {
-    const out = {};
-    for (const e of entries) {
-        out[`dieselLtr${e.rowIndex}`] = e.litres;
-        out[`dieselRate${e.rowIndex}`] = e.rate;
-        out[`dieselMeter${e.rowIndex}`] = e.meter;
-        out[`dieselBunk${e.rowIndex}`] = e.bunkName;
-        out[`dieselImage${e.rowIndex}`] = e.imageData;
-        out[`dieselImageName${e.rowIndex}`] = e.imageName;
-    }
-    return out;
 }
 function buildListWhere(filters) {
     const clauses = [];
@@ -693,6 +644,9 @@ function applyComputedFields(body, boxDetails, deliveries) {
         body.boxes = kpis.boxes;
         body.totalBirds = kpis.totalBirds;
         body.avgWeight = kpis.avgWeight;
+        // DC weight is derived from the persisted box rows (authoritative).
+        body.dcWeight = kpis.totalWeight;
+        body.totalWeight = kpis.totalWeight;
     }
     if (deliveries.length) {
         body.deliveries = kpis.deliveries;
@@ -830,6 +784,42 @@ export const tripsService = {
             };
         });
     },
+    async submitDiesel(tripId, body) {
+        return withSerializedTripDiesel(tripId, () => withTransaction(async (client) => {
+            const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+            if (!existing.rowCount)
+                throw new AppError(404, `Trip ${tripId} not found`);
+            await submitDieselEntry(client, existing.rows[0], body);
+            const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+            const trip = await hydrateTrip(client, row.rows[0], { includeDcPhoto: true });
+            return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
+        }));
+    },
+    async updateDiesel(tripId, entryId, body) {
+        return withSerializedTripDiesel(tripId, () => withTransaction(async (client) => {
+            const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+            if (!existing.rowCount)
+                throw new AppError(404, `Trip ${tripId} not found`);
+            await updateDieselEntry(client, existing.rows[0], entryId, body);
+            const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+            const trip = await hydrateTrip(client, row.rows[0], { includeDcPhoto: true });
+            return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
+        }));
+    },
+    async deleteDiesel(tripId, entryId) {
+        return withSerializedTripDiesel(tripId, () => withTransaction(async (client) => {
+            const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+            if (!existing.rowCount)
+                throw new AppError(404, `Trip ${tripId} not found`);
+            if (Boolean(existing.rows[0].deleted)) {
+                throw new AppError(422, "Cannot modify a deleted trip");
+            }
+            await deleteDieselEntry(client, tripId, entryId);
+            const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+            const trip = await hydrateTrip(client, row.rows[0], { includeDcPhoto: true });
+            return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
+        }));
+    },
     async createDraft(body = {}) {
         return withTransaction(async (client) => {
             try {
@@ -894,21 +884,26 @@ export const tripsService = {
                 // consumed per trip date and a deleted trip keeps its number).
                 await validateTripForeignKeys(body, client);
                 await enrichMasterDenorm(client, body);
-                // Resource availability is DB-backed and transaction-safe. A single
-                // trip occupies its resources while Step 1 is submitted through Step 5
-                // (status 'Draft'); Step 5 success flips status to 'Pending' and frees
-                // them. The current trip is excluded so an edit never conflicts with
-                // itself. Throws 409 with a clear message on conflict.
+                // Resource availability is DB-backed and transaction-safe. Lock the
+                // selected vehicle/employees FIRST so two concurrent Step 1 submits
+                // cannot both pass the availability SELECT and insert two trips.
+                // Re-check occupancy while those rows are locked. Self-exclusion uses
+                // the current trip id so Edit can keep its own resources.
                 if (body.vehicleId != null || body.driverId != null || body.supervisorId != null ||
                     body.helpers?.length || body.loaders?.length) {
-                    await assertTripResourcesAvailable({
+                    const resourceInput = {
                         tripId: tripId ?? 0,
                         vehicleId: body.vehicleId ?? null,
                         driverId: body.driverId ?? null,
                         supervisorId: body.supervisorId ?? null,
                         helpers: body.helpers ?? [],
                         loaders: body.loaders ?? [],
-                    }, client);
+                    };
+                    await lockTripResourcesForWrite(resourceInput, client);
+                    await assertTripResourcesAvailable(resourceInput, client);
+                }
+                if (!tripId && body.status === "Pending" && body.expensesStepSubmitted !== true) {
+                    body.status = "Draft";
                 }
                 if (!tripId) {
                     const tripDate = dateOnly(body.tripDate) ??
@@ -924,6 +919,44 @@ export const tripsService = {
                 const dieselEntries = extractDieselFromBody(body);
                 const boxDetails = body.boxDetails ?? [];
                 const deliveries = body.deliveries ?? [];
+                if (body.step5Finalize === true && tripId) {
+                    await client.query(`SELECT pg_advisory_xact_lock($1)`, [tripId]);
+                    await client.query(`SELECT id FROM trips WHERE id = $1 FOR UPDATE`, [tripId]);
+                    const live = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+                    const persistedDiesel = (await loadDieselEntries(client, tripId)).filter((d) => d.submitted);
+                    validateFinalStep5(live.rows[0], body, persistedDiesel);
+                    const sums = await client.query(`SELECT COALESCE(SUM(amount), 0)::text AS amt
+               FROM trip_diesel_entries WHERE trip_id = $1 AND submitted = TRUE`, [tripId]);
+                    body.fuel = Number(sums.rows[0].amt);
+                    const endMeter = numOrNull(body.endMeter ?? body.closingMeter);
+                    body.closingMeter = endMeter;
+                    body.endMeter = endMeter;
+                    body.totalKm = computeTotalKm(numOrNull(live.rows[0].opening_meter), endMeter);
+                    body.skipDiesel = true;
+                    delete body.step5Finalize;
+                }
+                // Draft stays Draft through Steps 1–4. Only a successful Step 5 submit
+                // (expensesStepSubmitted=true in this same transaction) moves the trip
+                // to Pending. Wizard writes must not invent Pending without Step 5, and
+                // must not clobber Pending/Completed once Step 5 is already in.
+                const existingStatus = existing?.rowCount ? str(existing.rows[0].status) : "Draft";
+                const expensesAlready = Boolean(existing?.rows[0]?.expenses_step_submitted);
+                const submittingExpenses = body.expensesStepSubmitted === true;
+                if (submittingExpenses && existingStatus !== "Completed" && existingStatus !== "Deleted") {
+                    body.status = "Pending";
+                }
+                else if (!submittingExpenses && !expensesAlready) {
+                    if (body.status === "Pending" || existingStatus === "Pending") {
+                        body.status = "Draft";
+                    }
+                }
+                else if (!submittingExpenses &&
+                    (existingStatus === "Pending" || existingStatus === "Completed" || existingStatus === "Deleted") &&
+                    body.status != null &&
+                    body.status !== existingStatus &&
+                    body.status !== "Deleted") {
+                    delete body.status;
+                }
                 // ---- Universal vehicle meter validation ----
                 // Only runs on a real step submission (start/expenses), never on
                 // "Save Progress" autosave (submitStep already strips these flags for
@@ -1064,6 +1097,9 @@ export const tripsService = {
                 await client.query(`UPDATE trips SET
             trip_date = COALESCE($2, trip_date),
             status = COALESCE($3, status),
+            -- start_time is NEVER taken from the client: the official Step 1
+            -- timestamp is captured server-side (DB NOW()) on first submission
+            -- in the guarded block below, and is immutable on edit.
             start_time = COALESCE($4, start_time),
             vehicle_id = COALESCE($5, vehicle_id),
             vehicle_no = COALESCE($6, vehicle_no),
@@ -1071,8 +1107,12 @@ export const tripsService = {
             driver_name = COALESCE($8, driver_name),
             supervisor_id = COALESCE($9, supervisor_id),
             supervisor_name = COALESCE($10, supervisor_name),
-            opening_meter = COALESCE($11, opening_meter),
-            advance_amount = COALESCE($12, advance_amount),
+            -- A Step 1 submit always carries opening_meter / advance_amount
+            -- (number or NULL when left empty). $67/$68 flag "explicitly
+            -- provided" so an empty field actually CLEARS the column (writes
+            -- NULL) instead of COALESCE silently keeping the old/default value.
+            opening_meter = CASE WHEN $67::boolean THEN $11 ELSE opening_meter END,
+            advance_amount = CASE WHEN $68::boolean THEN $12 ELSE advance_amount END,
             start_step_submitted = COALESCE($13, start_step_submitted),
             source_farm_id = COALESCE($14, source_farm_id),
             source_farm = COALESCE($15, source_farm),
@@ -1132,12 +1172,20 @@ export const tripsService = {
             rate_completed = COALESCE($63, rate_completed),
             deleted = COALESCE($64, deleted),
             deleted_reason = COALESCE($65, deleted_reason),
+            -- Step 2 GPS: COALESCE so omitted/failed capture never overwrites
+            -- already-persisted coordinates. Client reached_time is never used.
+            farm_gps_lat = COALESCE($69, farm_gps_lat),
+            farm_gps_lon = COALESCE($70, farm_gps_lon),
+            farm_gps_accuracy = COALESCE($71, farm_gps_accuracy),
+            farm_gps_time = COALESCE($72, farm_gps_time),
             approved_by = COALESCE($66, approved_by)
            WHERE id = $1`, [
                     tripId,
                     dateOnly(body.tripDate),
                     body.status ?? null,
-                    normalizeTripTimestamp(body.startTime),
+                    // start_time is never trusted from the client — the official Step 1
+                    // timestamp is set server-side on first submission (guarded block).
+                    null,
                     body.vehicleId ?? null,
                     body.vehicleNo ?? null,
                     body.driverId ?? null,
@@ -1149,7 +1197,9 @@ export const tripsService = {
                     body.startStepSubmitted ?? null,
                     body.sourceFarmId ?? null,
                     body.sourceFarm ?? null,
-                    normalizeTripTimestamp(body.reachedTime),
+                    // reached_time is never trusted from the client — the official Step 2
+                    // timestamp is set server-side on first submission (guarded block).
+                    null,
                     body.destMeter ?? null,
                     body.pickupTolls ?? null,
                     body.farmAddress ?? null,
@@ -1160,7 +1210,10 @@ export const tripsService = {
                     body.totalBirds ?? null,
                     body.boxes ?? null,
                     body.avgWeight ?? null,
-                    normalizeTripTimestamp(body.pickupLoadTime),
+                    // pickup_load_time is never trusted from the client — the official
+                    // Step 3 timestamp is set server-side on first submission (guarded
+                    // block) and is immutable on edit.
+                    null,
                     body.dcPhotoKey ?? null,
                     body.pickupStepSubmitted ?? null,
                     body.deliveryStepSubmitted ?? null,
@@ -1205,6 +1258,13 @@ export const tripsService = {
                     body.deleted ?? null,
                     body.deletedReason ?? null,
                     body.approvedBy ?? null,
+                    // Explicitly-provided flags for the nullable meter/advance fields.
+                    body.openingMeter !== undefined,
+                    body.advanceAmount !== undefined,
+                    body.farmGpsLat ?? null,
+                    body.farmGpsLon ?? null,
+                    body.farmGpsAccuracy ?? null,
+                    normalizeTripTimestamp(body.farmGpsTime),
                 ]);
                 try {
                     await client.query(`UPDATE trips SET
@@ -1239,21 +1299,43 @@ export const tripsService = {
                 // Guarded so code keeps working if the 011 migration hasn't been applied yet.
                 try {
                     await client.query(`UPDATE trips SET
+               -- Official Step 1 timestamp: captured server-side (DB NOW()) ONLY
+               -- on the first successful Submit Start Details (Save Progress strips
+               -- the step flag, so this never fires for a partial save). Immutable
+               -- on edit; the client clock is never the source of truth.
+               start_time = CASE
+                 WHEN COALESCE($2::boolean, FALSE) AND start_time IS NULL THEN NOW()
+                 ELSE start_time END,
                start_step_submitted_at = CASE
                  WHEN COALESCE($2::boolean, FALSE) AND start_step_submitted_at IS NULL THEN NOW()
                  ELSE start_step_submitted_at END,
                farm_step_submitted_at = CASE
                  WHEN COALESCE($3::boolean, FALSE) AND farm_step_submitted_at IS NULL THEN NOW()
                  ELSE farm_step_submitted_at END,
+               -- Official Step 2 timestamp: captured server-side ONLY on the first
+               -- successful Submit Farm Details (Save Progress strips the step
+               -- flag, so this never fires for a partial save). Immutable on edit.
+               reached_time = CASE
+                 WHEN COALESCE($3::boolean, FALSE) AND reached_time IS NULL THEN NOW()
+                 ELSE reached_time END,
                pickup_step_submitted_at = CASE
                  WHEN COALESCE($4::boolean, FALSE) AND pickup_step_submitted_at IS NULL THEN NOW()
                  ELSE pickup_step_submitted_at END,
+               -- Official Step 3 (Pickup) time: server NOW() only on the first
+               -- successful Submit; immutable on edit; never captured by Save
+               -- Progress (the step flag is stripped in save mode).
+               pickup_load_time = CASE
+                 WHEN COALESCE($4::boolean, FALSE) AND pickup_load_time IS NULL THEN NOW()
+                 ELSE pickup_load_time END,
                deliveries_step_submitted_at = CASE
                  WHEN COALESCE($5::boolean, FALSE) AND deliveries_step_submitted_at IS NULL THEN NOW()
                  ELSE deliveries_step_submitted_at END,
                expenses_step_submitted_at = CASE
                  WHEN COALESCE($6::boolean, FALSE) AND expenses_step_submitted_at IS NULL THEN NOW()
-                 ELSE expenses_step_submitted_at END
+                 ELSE expenses_step_submitted_at END,
+               end_time = CASE
+                 WHEN COALESCE($6::boolean, FALSE) AND end_time IS NULL THEN NOW()
+                 ELSE end_time END
              WHERE id = $1`, [
                         tripId,
                         body.startStepSubmitted ?? null,
@@ -1271,28 +1353,55 @@ export const tripsService = {
                 if (body.helpers || body.loaders) {
                     await replaceCrew(client, tripId, body.helpers ?? [], body.loaders ?? []);
                 }
-                if (body.boxDetails) {
-                    await replaceBoxes(client, tripId, body.boxDetails);
+                if (Array.isArray(body.boxDetails)) {
+                    const writeMode = str(body.pickupBoxWrite);
+                    if (writeMode === "upsert") {
+                        if (body.boxDetails.length) {
+                            await upsertPickupBoxes(client, tripId, body.boxDetails);
+                        }
+                        const removed = Array.isArray(body.removedBoxNos)
+                            ? body.removedBoxNos
+                                .map((n) => Number(n))
+                                .filter((n) => Number.isInteger(n) && n > 0)
+                            : [];
+                        if (removed.length) {
+                            await removePickupBoxes(client, tripId, removed);
+                        }
+                        if (body.boxDetails.length || removed.length) {
+                            await recalcPickupTotals(client, tripId);
+                        }
+                    }
+                    else if (body.boxDetails.length || writeMode === "replace") {
+                        await replaceBoxes(client, tripId, body.boxDetails);
+                        await recalcPickupTotals(client, tripId);
+                    }
                 }
-                if (body.deliveries) {
+                if (body.deliveries && body.replaceDeliveries === true) {
                     if (existing && existing.rowCount && Boolean(existing.rows[0].rate_completed)) {
                         throw new AppError(409, "Cannot modify deliveries — trip rates are locked by Rate Entry", { tripId });
                     }
                     await replaceDeliveries(client, tripId, body.deliveries);
                 }
-                if (dieselEntries.length || body.dieselEntries) {
+                if (!body.skipDiesel && (dieselEntries.length || body.dieselEntries)) {
                     await replaceDiesel(client, tripId, dieselEntries);
                 }
-                if (body.dcPhotoData && body.dcPhotoKey) {
-                    await client.query(`INSERT INTO trip_media (trip_id, media_key, media_type, mime_type, data_base64)
-             VALUES ($1,$2,'image',$3,$4)
-             ON CONFLICT (trip_id, media_key) DO UPDATE
-               SET data_base64 = EXCLUDED.data_base64, mime_type = EXCLUDED.mime_type`, [
-                        tripId,
-                        str(body.dcPhotoKey),
-                        body.dcPhotoMime ?? "image/jpeg",
-                        str(body.dcPhotoData),
-                    ]);
+                const pickupPhotoSync = body.syncPickupPhotos === true;
+                const pickupPhotoTouched = pickupPhotoSync ||
+                    Boolean(body.dcPhotoData) ||
+                    Boolean(body.dcPhotoData2) ||
+                    Boolean(body.dcPhotoKey) ||
+                    Boolean(body.dcPhotoKey2);
+                let persistedPhotoCount = 0;
+                if (pickupPhotoTouched) {
+                    persistedPhotoCount = await persistPickupPhotos(client, tripId, body, pickupPhotoSync);
+                }
+                if (body.pickupPhotoRequired === true) {
+                    if (!pickupPhotoTouched) {
+                        persistedPhotoCount = await persistPickupPhotos(client, tripId, body, true);
+                    }
+                    if (persistedPhotoCount < 1 || persistedPhotoCount > 2) {
+                        throw new AppError(422, "Step 3 requires between 1 and 2 actual uploaded photos.");
+                    }
                 }
                 const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
                 const tripRow = row.rows[0];
@@ -1337,10 +1446,487 @@ export const tripsService = {
             }
         });
     },
+    /**
+     * Step 4 per-shop persistence (PUT /trips/:id/deliveries).
+     *
+     * Save Progress / single-shop save ONLY — never submits Step 4, never
+     * captures the official Step 4 timestamp, and never runs final-submit
+     * validation. Final submit still goes through submitStep → saveDeliveries({ finalize: true }).
+     * (full-replace + strict completeness + server NOW() timestamp).
+     *
+     * Upserts the submitted deliveries idempotently:
+     *  - a row matching (trip_id, client_key) is UPDATED — a double-click,
+     *    network timeout, browser retry or repeated Save never creates a
+     *    duplicate (the partial unique index is the DB-level backstop);
+     *  - a row without a client_key is matched by its server id when present;
+     *  - anything else is INSERTed.
+     *
+     * Rows NOT present in the payload are left untouched — saving one shop
+     * never wipes shops already saved (per-shop persistence requirement).
+     *
+     * Runs inside one transaction with the trip row locked FOR UPDATE so
+     * concurrent saves for the same trip serialize, and every capacity /
+     * box-availability / active-shop check is re-run against the LIVE
+     * persisted rows — never trusted from the client.
+     */
+    async saveDeliveries(tripId, body = {}, options = {}) {
+        const { deliveries } = parseDeliverySave(body);
+        return withTransaction(async (client) => {
+            const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+            if (!existing.rowCount)
+                throw new AppError(404, `Trip ${tripId} not found`);
+            const tripRow = existing.rows[0];
+            if (Boolean(tripRow.deleted)) {
+                throw new AppError(422, "Cannot modify a deleted trip", { tripId });
+            }
+            if (!Boolean(tripRow.pickup_step_submitted)) {
+                throw new AppError(422, `Complete ${TRIP_STEP_LABELS.pickup} before ${TRIP_STEP_LABELS.deliveries}`, {
+                    resumeStep: "pickup",
+                    requestedStep: "deliveries",
+                });
+            }
+            if (Boolean(tripRow.rate_completed)) {
+                throw new AppError(409, "Cannot modify deliveries — trip rates are locked by Rate Entry", { tripId });
+            }
+            // Serialize concurrent saves for this trip (read-modify-write below).
+            await client.query(`SELECT id FROM trips WHERE id = $1 FOR UPDATE`, [tripId]);
+            // Step 3 Pickup is the only Step 4 capacity source — never Step 2 farm load.
+            const capacityBirds = num(tripRow.total_birds);
+            const capacityWeight = num(tripRow.dc_weight);
+            if (capacityBirds <= 0 && capacityWeight <= 0) {
+                throw new AppError(422, "Step 3 (Pickup) must be completed before saving shop deliveries.");
+            }
+            // Live pickup boxes (Step 3 — read-only source of truth for allocation).
+            const boxRes = await client.query(`SELECT box_no, birds, weight FROM trip_boxes WHERE trip_id = $1 ORDER BY box_no`, [tripId]);
+            const boxesByNo = new Map();
+            for (const r of boxRes.rows) {
+                boxesByNo.set(num(r.box_no), { birds: num(r.birds), weight: num(r.weight) });
+            }
+            // Live deliveries for this trip.
+            const delRes = await client.query(`SELECT id, client_key, shop_id, serial_no, birds, weight, mortality, mort_kg
+           FROM trip_deliveries WHERE trip_id = $1`, [tripId]);
+            const existingRows = delRes.rows.map((r) => ({
+                id: num(r.id),
+                clientKey: r.client_key == null ? null : str(r.client_key),
+                shopId: numOrNull(r.shop_id),
+                serialNo: numOrNull(r.serial_no),
+                birds: num(r.birds),
+                weight: num(r.weight),
+                mortality: num(r.mortality),
+                mortKg: num(r.mort_kg),
+            }));
+            const findBy = (d) => {
+                const key = d.clientKey ? str(d.clientKey) : null;
+                if (key) {
+                    const byKey = existingRows.find((r) => r.clientKey === key);
+                    if (byKey)
+                        return byKey;
+                }
+                if (d.id != null) {
+                    const byId = existingRows.find((r) => r.id === Number(d.id));
+                    if (byId)
+                        return byId;
+                }
+                return null;
+            };
+            // Dedupe the payload by stable identity — the resolved existing row id
+            // first (two rows that both map to the same DB row must collapse), then
+            // clientKey, then server id, then position. Keeps the last occurrence so
+            // a retry that repeats a row must not double-count birds/weight.
+            const deduped = [];
+            const seenKeys = new Set();
+            for (let i = deliveries.length - 1; i >= 0; i--) {
+                const d = deliveries[i];
+                const match = findBy(d);
+                const key = match
+                    ? `m:${match.id}`
+                    : d.clientKey
+                        ? `k:${str(d.clientKey)}`
+                        : d.id != null
+                            ? `i:${Number(d.id)}`
+                            : `x:${i}`;
+                if (seenKeys.has(key))
+                    continue;
+                seenKeys.add(key);
+                deduped.unshift(d);
+            }
+            const excludedIds = new Set();
+            for (const d of deduped) {
+                const match = findBy(d);
+                if (match)
+                    excludedIds.add(match.id);
+            }
+            // Boxes already committed to deliveries NOT being overwritten.
+            const excluded = [...excludedIds];
+            const exclClause = excluded.length ? `AND d.id <> ALL($2::int[])` : "";
+            const boxParams = [tripId];
+            if (excluded.length)
+                boxParams.push(excluded);
+            const otherBoxes = await client.query(`SELECT d.id AS delivery_id, db.box_no
+           FROM trip_delivery_boxes db
+           JOIN trip_deliveries d ON d.id = db.delivery_id
+          WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE ${exclClause}`, boxParams);
+            const otherPerBox = await client.query(`SELECT d.id AS delivery_id, pb.box_no, pb.birds, pb.weight
+           FROM trip_delivery_per_box pb
+           JOIN trip_deliveries d ON d.id = pb.delivery_id
+          WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE ${exclClause}`, boxParams);
+            const otherSelected = new Map();
+            for (const r of otherBoxes.rows) {
+                const id = num(r.delivery_id);
+                const list = otherSelected.get(id) ?? [];
+                list.push(num(r.box_no));
+                otherSelected.set(id, list);
+            }
+            const otherPer = new Map();
+            for (const r of otherPerBox.rows) {
+                const id = num(r.delivery_id);
+                const list = otherPer.get(id) ?? [];
+                list.push({ boxNo: num(r.box_no), birds: num(r.birds), weight: num(r.weight) });
+                otherPer.set(id, list);
+            }
+            const usedRemaining = new Map();
+            const addUsage = (boxNo, birds, weight) => {
+                const cur = usedRemaining.get(boxNo) ?? { birds: 0, weight: 0 };
+                usedRemaining.set(boxNo, { birds: cur.birds + birds, weight: cur.weight + weight });
+            };
+            for (const row of existingRows) {
+                if (excludedIds.has(row.id))
+                    continue;
+                const per = otherPer.get(row.id) ?? [];
+                const selected = otherSelected.get(row.id) ?? [];
+                if (per.length) {
+                    for (const pb of per)
+                        addUsage(pb.boxNo, Number(pb.birds ?? 0), Number(pb.weight ?? 0));
+                }
+                else if (selected.length === 1) {
+                    addUsage(selected[0], row.birds + row.mortality, row.weight + row.mortKg);
+                }
+                else {
+                    const farmBirds = selected.reduce((s, n) => s + (boxesByNo.get(n)?.birds ?? 0), 0);
+                    const farmWeight = selected.reduce((s, n) => s + (boxesByNo.get(n)?.weight ?? 0), 0);
+                    for (const n of selected) {
+                        const box = boxesByNo.get(n);
+                        if (!box)
+                            continue;
+                        const bShare = farmBirds > 0 ? row.birds * (box.birds / farmBirds) : 0;
+                        const wShare = farmWeight > 0 ? row.weight * (box.weight / farmWeight) : 0;
+                        addUsage(n, bShare, wShare);
+                    }
+                }
+            }
+            // Cross-shop totals from live persisted rows, minus the rows we replace.
+            const base = await sumActiveDeliveries(client, tripId);
+            let totalBirds = base.birds + base.mortalityCount;
+            let totalWeight = base.weight + base.mortalityWeight;
+            for (const id of excludedIds) {
+                const r = existingRows.find((x) => x.id === id);
+                if (!r)
+                    continue;
+                totalBirds -= r.birds + r.mortality;
+                totalWeight -= r.weight + r.mortKg;
+            }
+            const tripNo = tripRow.trip_no ? str(tripRow.trip_no) : `TR-${tripId}`;
+            let maxSerial = 0;
+            for (const r of existingRows) {
+                if (r.serialNo != null && r.serialNo > maxSerial)
+                    maxSerial = r.serialNo;
+            }
+            for (const d of deduped) {
+                const match = findBy(d);
+                const mode = d.deliveryMode === "weight" ? "weight" : "box";
+                const birds = Number(d.birds ?? 0);
+                const weight = Number(d.weight ?? 0);
+                const mortality = Number(d.mortality ?? 0);
+                const mortKg = Number(d.mortKg ?? 0);
+                const shopId = d.shopId != null ? Number(d.shopId) : null;
+                const selectedBoxIds = Array.isArray(d.selectedBoxIds)
+                    ? [...new Set(d.selectedBoxIds.map(Number))]
+                    : [];
+                const perBoxData = Array.isArray(d.perBoxData) ? d.perBoxData : [];
+                // Basic type/safety (Save Progress): non-negative whole birds,
+                // non-negative weight. Never accept impossible negative values.
+                if (!Number.isInteger(birds) || birds < 0) {
+                    throw new AppError(422, `Shop delivery birds must be a non-negative whole number (got ${d.birds}).`);
+                }
+                if (!Number.isFinite(weight) || weight < 0) {
+                    throw new AppError(422, `Shop delivery weight must be a non-negative number (got ${d.weight}).`);
+                }
+                if (!Number.isInteger(mortality) || mortality < 0) {
+                    throw new AppError(422, `Mortality birds must be a non-negative whole number (got ${d.mortality}).`);
+                }
+                if (!Number.isFinite(mortKg) || mortKg < 0) {
+                    throw new AppError(422, `Mortality weight must be a non-negative number (got ${d.mortKg}).`);
+                }
+                if (shopId == null) {
+                    if (options.finalize) {
+                        throw new AppError(422, "Shop is required for a delivery.");
+                    }
+                }
+                else {
+                    const shopRes = await client.query(`SELECT status FROM shops WHERE id = $1`, [shopId]);
+                    if (!shopRes.rowCount) {
+                        throw new AppError(422, `Shop ${shopId} does not exist.`);
+                    }
+                    const shopStatus = str(shopRes.rows[0].status);
+                    const shopChanged = match ? match.shopId !== shopId : true;
+                    if (shopChanged && shopStatus !== "Active") {
+                        throw new AppError(422, "Shop is no longer available for new selection.");
+                    }
+                }
+                if (options.finalize && mode === "box" && selectedBoxIds.length === 0) {
+                    throw new AppError(422, "Box mode requires a valid Pickup Box from this trip.");
+                }
+                for (const boxNo of selectedBoxIds) {
+                    if (!boxesByNo.has(boxNo)) {
+                        throw new AppError(422, `Selected box #${boxNo} is not part of this trip's Step 3 pickup.`);
+                    }
+                }
+                const farmBirds = selectedBoxIds.reduce((s, n) => s + (boxesByNo.get(n)?.birds ?? 0), 0);
+                const farmWeight = selectedBoxIds.reduce((s, n) => s + (boxesByNo.get(n)?.weight ?? 0), 0);
+                const remainingOf = (boxNo) => {
+                    const pickup = boxesByNo.get(boxNo) ?? { birds: 0, weight: 0 };
+                    const used = usedRemaining.get(boxNo) ?? { birds: 0, weight: 0 };
+                    return remainingPickupBox(pickup, used);
+                };
+                // Shop-level bounds against remaining selected-box capacity (partial consumption).
+                const remainBirds = selectedBoxIds.reduce((s, n) => s + remainingOf(n).birds, 0);
+                const remainWeight = selectedBoxIds.reduce((s, n) => s + remainingOf(n).weight, 0);
+                if (selectedBoxIds.length && birds + mortality > remainBirds) {
+                    throw new AppError(422, `Delivered birds plus mortality cannot exceed available birds (${remainBirds}).`);
+                }
+                if (selectedBoxIds.length && weight + mortKg > remainWeight + 0.0001) {
+                    throw new AppError(422, `Delivery weight cannot exceed the selected box available weight (${remainWeight.toFixed(2)} kg).`);
+                }
+                if (mode === "weight") {
+                    for (const pb of perBoxData) {
+                        const box = boxesByNo.get(Number(pb.boxNo));
+                        if (!box) {
+                            throw new AppError(422, `Per-box entry #${pb.boxNo} is not part of this trip's Step 3 pickup.`);
+                        }
+                        const remain = remainingOf(Number(pb.boxNo));
+                        if (Number(pb.birds) > remain.birds) {
+                            throw new AppError(422, `Box #${pb.boxNo} delivered birds exceed its available birds (${remain.birds}).`);
+                        }
+                        if (Number(pb.weight) > remain.weight) {
+                            throw new AppError(422, `Box #${pb.boxNo} delivered weight exceeds its available weight (${remain.weight.toFixed(2)} kg).`);
+                        }
+                    }
+                }
+                if (perBoxData.length) {
+                    for (const pb of perBoxData)
+                        addUsage(Number(pb.boxNo), Number(pb.birds ?? 0), Number(pb.weight ?? 0));
+                }
+                else if (selectedBoxIds.length === 1) {
+                    addUsage(selectedBoxIds[0], birds + mortality, weight + mortKg);
+                }
+                else {
+                    for (const n of selectedBoxIds) {
+                        const box = boxesByNo.get(n);
+                        if (!box)
+                            continue;
+                        const bShare = farmBirds > 0 ? birds * (box.birds / farmBirds) : 0;
+                        const wShare = farmWeight > 0 ? weight * (box.weight / farmWeight) : 0;
+                        addUsage(n, bShare, wShare);
+                    }
+                }
+                // Cross-shop totals (live persisted rows + this payload).
+                totalBirds += birds + mortality;
+                totalWeight += weight + mortKg;
+                assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
+                assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
+                const amount = d.amount != null && Number(d.amount) > 0
+                    ? Number(d.amount)
+                    : Number((weight * Number(d.rate ?? 0)).toFixed(2));
+                let deliveryId;
+                if (match) {
+                    deliveryId = match.id;
+                    await client.query(`UPDATE trip_deliveries SET
+               serial_no = $2,
+               box_no = $3,
+               shop_id = $4,
+               shop_name = $5,
+               bird_type_id = $6,
+               bird_type = $7,
+               birds = $8,
+               weight = $9,
+               mortality = $10,
+               mort_kg = $11,
+               rate = $12,
+               amount = $13,
+               remarks = $14,
+               delivery_mode = $15,
+               farm_birds = $16,
+               farm_weight = $17,
+               client_key = $18
+             WHERE id = $1`, [
+                        deliveryId,
+                        d.serialNo ?? match.serialNo,
+                        selectedBoxIds.length,
+                        shopId,
+                        d.shopName ?? "",
+                        d.birdTypeId != null ? Number(d.birdTypeId) : null,
+                        d.birdType ?? "",
+                        birds,
+                        weight,
+                        mortality,
+                        mortKg,
+                        d.rate != null ? Number(d.rate) : null,
+                        amount,
+                        d.remarks ?? "",
+                        mode,
+                        farmBirds,
+                        farmWeight,
+                        d.clientKey ? str(d.clientKey) : null,
+                    ]);
+                }
+                else {
+                    const saleNo = await generateSaleNo(client, tripId, tripNo);
+                    maxSerial += 1;
+                    const inserted = await client.query(`INSERT INTO trip_deliveries (
+               trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
+               birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
+               farm_birds, farm_weight, auto_capture_time, client_key
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,COALESCE($19::timestamptz, NOW()),$20)
+             RETURNING id`, [
+                        tripId,
+                        saleNo,
+                        d.serialNo ?? maxSerial,
+                        selectedBoxIds.length,
+                        shopId,
+                        d.shopName ?? "",
+                        d.birdTypeId != null ? Number(d.birdTypeId) : null,
+                        d.birdType ?? "",
+                        birds,
+                        weight,
+                        mortality,
+                        mortKg,
+                        d.rate != null ? Number(d.rate) : null,
+                        amount,
+                        d.remarks ?? "",
+                        mode,
+                        farmBirds,
+                        farmWeight,
+                        null,
+                        d.clientKey ? str(d.clientKey) : null,
+                    ]);
+                    deliveryId = num(inserted.rows[0].id);
+                }
+                // Replace the delivery's child rows (selected boxes + per-box breakdown).
+                await client.query(`DELETE FROM trip_delivery_boxes WHERE delivery_id = $1`, [deliveryId]);
+                for (const boxNo of selectedBoxIds) {
+                    await client.query(`INSERT INTO trip_delivery_boxes (delivery_id, box_no) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [deliveryId, boxNo]);
+                }
+                await client.query(`DELETE FROM trip_delivery_per_box WHERE delivery_id = $1`, [deliveryId]);
+                for (const pb of perBoxData) {
+                    await client.query(`INSERT INTO trip_delivery_per_box (delivery_id, box_no, birds, weight) VALUES ($1,$2,$3,$4)`, [deliveryId, Number(pb.boxNo), Number(pb.birds ?? 0), Number(pb.weight ?? 0)]);
+                }
+            }
+            if (options.finalize) {
+                const live = await client.query(`SELECT d.shop_id, d.birds, d.weight, d.mortality, d.mort_kg, d.delivery_mode,
+                  (SELECT COUNT(*) FROM trip_delivery_boxes b WHERE b.delivery_id = d.id) AS box_count
+             FROM trip_deliveries d
+            WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE`, [tripId]);
+                if (!live.rowCount) {
+                    throw new AppError(422, "At least one valid shop delivery is required to submit Step 4.");
+                }
+                let complete = 0;
+                for (const r of live.rows) {
+                    if (numOrNull(r.shop_id) == null) {
+                        throw new AppError(422, "Shop is required for a delivery.");
+                    }
+                    if (str(r.delivery_mode) === "box" && num(r.box_count) < 1) {
+                        throw new AppError(422, "Box mode requires a valid Pickup Box from this trip.");
+                    }
+                    if (num(r.birds) > 0 && num(r.weight) > 0)
+                        complete += 1;
+                }
+                if (complete < 1) {
+                    throw new AppError(422, "At least one valid shop delivery is required to submit Step 4.");
+                }
+                try {
+                    await client.query(`UPDATE trips SET
+               delivery_step_submitted = TRUE,
+               deliveries_step_submitted_at = CASE
+                 WHEN deliveries_step_submitted_at IS NULL THEN NOW()
+                 ELSE deliveries_step_submitted_at END
+             WHERE id = $1`, [tripId]);
+                    await client.query(`UPDATE trip_deliveries
+                SET auto_capture_time = NOW()
+              WHERE trip_id = $1 AND auto_capture_time IS NULL`, [tripId]);
+                }
+                catch (err) {
+                    const code = err.code;
+                    if (code !== "42703")
+                        throw err;
+                    await client.query(`UPDATE trips SET delivery_step_submitted = TRUE WHERE id = $1`, [tripId]);
+                }
+            }
+            // Recompute delivery-side KPIs from the live rows (source of truth).
+            await recalcTripDeliveryTotals(client, tripId);
+            const finalRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+            const trip = await hydrateTrip(client, finalRow.rows[0], { includeDcPhoto: true });
+            const flags = {
+                startStepSubmitted: trip.startStepSubmitted,
+                farmStepSubmitted: trip.farmStepSubmitted,
+                pickupStepSubmitted: trip.pickupStepSubmitted,
+                deliveryStepSubmitted: trip.deliveryStepSubmitted,
+                expensesStepSubmitted: trip.expensesStepSubmitted,
+                endStepSubmitted: trip.endStepSubmitted,
+                status: trip.status,
+                deleted: trip.deleted,
+            };
+            return {
+                ...trip,
+                ...flattenDiesel(trip.dieselEntries ?? []),
+                resumeStep: getResumeStep(flags),
+                resumeStepLabel: getResumeLabel(flags),
+                wizardProgress: getWizardProgress(flags),
+                stepStatuses: computeStepStatuses(trip, {
+                    boxCount: trip.boxDetails.length,
+                    deliveryCount: trip.deliveries.length,
+                    dieselCount: (trip.dieselEntries ?? []).length,
+                }),
+            };
+        });
+    },
     async submitStep(id, step, body) {
         const isSaveMode = body.mode === "save";
-        if (!isSaveMode) {
+        if (step === "farm" || step === "pickup" || step === "deliveries" || step === "expenses") {
+            const gate = await query(`SELECT start_step_submitted, farm_step_submitted, pickup_step_submitted, delivery_step_submitted FROM trips WHERE id = $1`, [id]);
+            if (!gate.rowCount)
+                throw new AppError(404, `Trip ${id} not found`);
+            if (step === "farm" && !Boolean(gate.rows[0].start_step_submitted)) {
+                throw new AppError(422, `Complete ${TRIP_STEP_LABELS.start} before ${TRIP_STEP_LABELS.farm}`, {
+                    resumeStep: "start",
+                    requestedStep: "farm",
+                });
+            }
+            if (step === "pickup" && !Boolean(gate.rows[0].farm_step_submitted)) {
+                throw new AppError(422, `Complete ${TRIP_STEP_LABELS.farm} before ${TRIP_STEP_LABELS.pickup}`, {
+                    resumeStep: "farm",
+                    requestedStep: "pickup",
+                });
+            }
+            if (step === "deliveries" && !Boolean(gate.rows[0].pickup_step_submitted)) {
+                throw new AppError(422, `Complete ${TRIP_STEP_LABELS.pickup} before ${TRIP_STEP_LABELS.deliveries}`, {
+                    resumeStep: "pickup",
+                    requestedStep: "deliveries",
+                });
+            }
+            if (step === "expenses" && !Boolean(gate.rows[0].delivery_step_submitted) && !isSaveMode) {
+                throw new AppError(422, `Complete ${TRIP_STEP_LABELS.deliveries} before ${TRIP_STEP_LABELS.expenses}`, {
+                    resumeStep: "deliveries",
+                    requestedStep: "expenses",
+                });
+            }
+        }
+        if (!isSaveMode && step !== "deliveries") {
             validateStepSubmit(step, body);
+        }
+        if (!isSaveMode && step === "deliveries") {
+            if (Array.isArray(body.deliveries) && body.deliveries.length) {
+                validateStepSubmit(step, body);
+            }
         }
         const existing = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
         if (!existing.rowCount)
@@ -1356,6 +1942,68 @@ export const tripsService = {
             status: str(current.status),
             deleted: Boolean(current.deleted),
         };
+        // Step 2 (farm) only: negative pickup tolls → 0. Empty/null is left alone so
+        // COALESCE in save() preserves previously stored Step 2 tolls. Never applied
+        // to pickup/deliveries/expenses.
+        if (step === "farm") {
+            const farmTolls = numOrNull(body.pickupTolls);
+            if (farmTolls != null && farmTolls < 0) {
+                body.pickupTolls = 0;
+            }
+            delete body.farmCompletedTrips;
+            delete body.farmRate;
+            delete body.reachedTime;
+            const lat = numOrNull(body.farmGpsLat);
+            const lon = numOrNull(body.farmGpsLon);
+            const acc = numOrNull(body.farmGpsAccuracy);
+            const gpsInvalid = (lat != null && (lat < -90 || lat > 90)) ||
+                (lon != null && (lon < -180 || lon > 180)) ||
+                (acc != null && acc < 0) ||
+                (lat === 0 && lon === 0);
+            if (gpsInvalid) {
+                delete body.farmGpsLat;
+                delete body.farmGpsLon;
+                delete body.farmGpsAccuracy;
+                delete body.farmGpsTime;
+            }
+        }
+        if (step === "pickup") {
+            delete body.pickupLoadTime;
+            delete body.dcWeight;
+            delete body.totalBirds;
+            delete body.boxes;
+            delete body.avgWeight;
+            const boxDetails = body.boxDetails ?? [];
+            const vehCap = current.vehicle_id
+                ? await query(`SELECT no_of_boxes FROM vehicles WHERE id = $1`, [current.vehicle_id])
+                : { rowCount: 0, rows: [] };
+            const vehicleCapacity = vehCap.rowCount ? num(vehCap.rows[0].no_of_boxes) : 0;
+            if (isSaveMode) {
+                if (boxDetails.length) {
+                    assertPickupBoxNumbers(boxDetails, vehicleCapacity, "save");
+                }
+                body.pickupBoxWrite = "upsert";
+            }
+            else {
+                assertPickupBoxNumbers(boxDetails, vehicleCapacity, "submit");
+                body.pickupBoxWrite = "replace";
+                body.syncPickupPhotos = true;
+                body.pickupPhotoRequired = true;
+            }
+        }
+        if (step === "deliveries") {
+            delete body.autoCaptureTime;
+            if (isSaveMode) {
+                return this.saveDeliveries(id, body);
+            }
+        }
+        if (step === "expenses") {
+            stripProtectedStep5Fields(body);
+            validateExpensePayload(body);
+            if (!isSaveMode) {
+                body.skipDiesel = true;
+            }
+        }
         // "Save Progress" is a permissive autosave: it must never run strict step
         // validation, enforce step order, or lock/submit a step.
         if (isSaveMode) {
@@ -1370,8 +2018,50 @@ export const tripsService = {
             return this.save(id, autosaveBody);
         }
         assertStepOrder(step, flags);
+        if (step === "deliveries") {
+            return this.saveDeliveries(id, body, { finalize: true });
+        }
+        if (step === "expenses") {
+            stripProtectedStep5Fields(body);
+            validateExpensePayload(body);
+            body.skipDiesel = true;
+            delete body.endTime;
+            delete body.submittedAt;
+        }
+        // Backend-authoritative Step 2 (Farm) validation — never trust the frontend.
+        // Farm Meter must be present and STRICTLY greater than the Step 1 start meter
+        // (equality is rejected). Runs only on submit, never on Save Progress.
+        if (step === "farm") {
+            const tolls = numOrNull(body.pickupTolls);
+            if (tolls == null || tolls < 0) {
+                body.pickupTolls = 0;
+            }
+            const farmId = numOrNull(body.sourceFarmId);
+            if (farmId == null || farmId <= 0) {
+                throw new AppError(422, "Farm is required.");
+            }
+            const farmAddress = body.farmAddress == null ? "" : str(body.farmAddress).trim();
+            if (!farmAddress) {
+                throw new AppError(422, "Farm address is required.");
+            }
+            const avgBird = numOrNull(body.avgBirdWeight);
+            if (avgBird == null || avgBird <= 0) {
+                throw new AppError(422, "Average Bird Weight is required.");
+            }
+            const startMeter = numOrNull(current.opening_meter);
+            const farmMeter = numOrNull(body.destMeter);
+            if (farmMeter == null || farmMeter <= 0) {
+                throw new AppError(422, "Farm meter is required for Step 2 submission.");
+            }
+            if (startMeter != null && farmMeter <= startMeter) {
+                throw new AppError(422, `Farm meter (${farmMeter} KM) must be strictly greater than the Step 1 starting meter (${startMeter} KM).`);
+            }
+            delete body.reachedTime;
+            delete body.farmCompletedTrips;
+            delete body.farmRate;
+        }
         const stepFlags = {
-            start: { startStepSubmitted: true, status: body.status ?? "Draft" },
+            start: { startStepSubmitted: true },
             farm: { farmStepSubmitted: true },
             pickup: { pickupStepSubmitted: true },
             deliveries: { deliveryStepSubmitted: true },
@@ -1379,14 +2069,16 @@ export const tripsService = {
                 expensesStepSubmitted: true,
                 endStepSubmitted: true,
                 status: "Pending",
-                // submitted_at is a first-submission marker: never overwrite it.
-                submittedAt: current.expenses_step_submitted
-                    ? undefined
-                    : (body.submittedAt ?? new Date().toISOString()),
-                syncFuel: true,
+                skipDiesel: true,
+                step5Finalize: true,
             },
         };
-        return this.save(id, { ...body, ...stepFlags[step] });
+        const merged = { ...body, ...stepFlags[step] };
+        if (step === "start") {
+            delete merged.startTime;
+            merged.startStepSubmitted = true;
+        }
+        return this.save(id, merged);
     },
     async softDelete(id, reason) {
         return withTransaction(async (client) => {
@@ -1413,6 +2105,14 @@ export const tripsService = {
             // is already flagged as deleted but whose `status` was left inconsistent.
             if (currentDeleted && status !== "Deleted") {
                 throw new AppError(422, "Cannot restore a deleted trip", { tripId: id });
+            }
+            if (status === "Pending") {
+                const step5Submitted = Boolean(existing.rows[0].expenses_step_submitted || existing.rows[0].end_step_submitted);
+                if (!step5Submitted) {
+                    throw new AppError(422, "Complete Step 5 before moving the trip to Pending", {
+                        tripId: id,
+                    });
+                }
             }
             if (status === "Completed") {
                 assertTripReadyForCompletion({
@@ -1474,6 +2174,97 @@ export const tripsService = {
             ref: latest.ref,
             tripNo: latest.sourceType === "TRIP_END" || latest.sourceType === "TRIP_START" ? latest.ref : null,
             tripDate: latest.eventDate,
+        };
+    },
+    /**
+     * Available masters for Step 1 — the dropdown source of truth.
+     * Returns only resources NOT currently occupied by an active trip (status
+     * 'Draft' + start_step_submitted = TRUE, matching the resource lock rule).
+     * Pass tripId when editing so the trip's own resources stay selectable.
+     */
+    async availableResources(tripId) {
+        const excludeId = tripId && tripId > 0 ? tripId : 0;
+        const occupied = `
+      WHERE status = 'Draft'
+        AND start_step_submitted = TRUE
+        AND deleted = FALSE
+        AND id <> $1`;
+        const vehicles = await query(`SELECT id, vehicle_number
+         FROM vehicles
+        WHERE id NOT IN (
+          SELECT vehicle_id FROM trips
+          ${occupied} AND vehicle_id IS NOT NULL
+        )
+        ORDER BY vehicle_number`, [excludeId]);
+        const drivers = await query(`SELECT id, employee_name, department
+         FROM employees
+        WHERE department = 'Driver'
+          AND id NOT IN (
+            SELECT driver_id FROM trips
+            ${occupied} AND driver_id IS NOT NULL
+          )
+        ORDER BY employee_name`, [excludeId]);
+        const supervisors = await query(`SELECT id, employee_name, department
+         FROM employees
+        WHERE department = 'Supervisor'
+          AND id NOT IN (
+            SELECT supervisor_id FROM trips
+            ${occupied} AND supervisor_id IS NOT NULL
+          )
+        ORDER BY employee_name`, [excludeId]);
+        // Helpers/loaders are persisted by NAME in trip_crew; exclude by name so the
+        // available list stays aligned with the name-based resource lock.
+        const helpers = await query(`SELECT e.id, e.employee_name, e.department
+         FROM employees e
+        WHERE e.department IN ('Helper', 'Labor')
+          AND e.employee_name NOT IN (
+            SELECT tc.employee_name FROM trip_crew tc
+            JOIN trips t ON t.id = tc.trip_id
+            WHERE t.status = 'Draft'
+              AND t.start_step_submitted = TRUE
+              AND t.deleted = FALSE
+              AND t.id <> $1
+              AND tc.role = 'helper'
+          )
+        ORDER BY e.employee_name`, [excludeId]);
+        const loaders = await query(`SELECT e.id, e.employee_name, e.department
+         FROM employees e
+        WHERE e.department = 'Loader'
+          AND e.employee_name NOT IN (
+            SELECT tc.employee_name FROM trip_crew tc
+            JOIN trips t ON t.id = tc.trip_id
+            WHERE t.status = 'Draft'
+              AND t.start_step_submitted = TRUE
+              AND t.deleted = FALSE
+              AND t.id <> $1
+              AND tc.role = 'loader'
+          )
+        ORDER BY e.employee_name`, [excludeId]);
+        return {
+            vehicles: vehicles.rows.map((r) => ({
+                id: num(r.id),
+                vehicleNumber: str(r.vehicle_number),
+            })),
+            drivers: drivers.rows.map((r) => ({
+                id: num(r.id),
+                employeeName: str(r.employee_name),
+                department: str(r.department),
+            })),
+            supervisors: supervisors.rows.map((r) => ({
+                id: num(r.id),
+                employeeName: str(r.employee_name),
+                department: str(r.department),
+            })),
+            helpers: helpers.rows.map((r) => ({
+                id: num(r.id),
+                employeeName: str(r.employee_name),
+                department: str(r.department),
+            })),
+            loaders: loaders.rows.map((r) => ({
+                id: num(r.id),
+                employeeName: str(r.employee_name),
+                department: str(r.department),
+            })),
         };
     },
 };

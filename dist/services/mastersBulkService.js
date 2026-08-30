@@ -12,8 +12,8 @@ const SHOP_CONFIG = {
     noField: "shopNo",
     noOf: (row) => row.shopNo,
     insert: (client, row, no) => client.query(`INSERT INTO shops (
-         shop_no, shop_name, owner_name, phone_number, village, address, status
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [no, row.shopName, row.ownerName, row.phoneNumber, row.village, row.address, row.status]),
+         shop_no, shop_name, owner_name, phone_number, village, address, status, email
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [no, row.shopName, row.ownerName, row.phoneNumber, row.village, row.address, row.status, row.email]),
     map: mapShop,
 };
 const VEHICLE_CONFIG = {

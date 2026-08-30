@@ -59,6 +59,7 @@ export interface Shop {
     shopName: string;
     ownerName: string;
     phoneNumber: string;
+    email?: string | null;
     village: string;
     address?: string | null;
     status: ActiveStatus;
@@ -116,6 +117,7 @@ export interface BoxDetail {
     boxNo: number;
     birds: number;
     weight: number;
+    avgWeight?: number | null;
 }
 export interface ShopDelivery {
     id: number;
@@ -138,16 +140,27 @@ export interface ShopDelivery {
     farmWeight?: number | null;
     perBoxData?: BoxDetail[];
     autoCaptureTime?: string | null;
+    /** Stable client-generated idempotency key (Step 4 per-shop save). */
+    clientKey?: string | null;
 }
 export interface DieselEntry {
+    id?: number;
     rowIndex: number;
     litres?: number | null;
     rate?: number | null;
+    amount?: number | null;
     meter?: number | null;
     bunkName?: string | null;
     bunkGps?: string | null;
+    gpsLat?: number | null;
+    gpsLon?: number | null;
+    gpsAccuracy?: number | null;
+    gpsCapturedAt?: string | null;
     imageData?: string | null;
     imageName?: string | null;
+    submitted?: boolean;
+    submittedAt?: string | null;
+    clientKey?: string | null;
 }
 export interface Trip {
     id: number;
@@ -164,7 +177,7 @@ export interface Trip {
     helpers: string[];
     loaders: string[];
     openingMeter: number | null;
-    advanceAmount: number;
+    advanceAmount: number | null;
     startStepSubmitted: boolean;
     startStepSubmittedAt: string | null;
     sourceFarmId: number | null;
@@ -181,6 +194,10 @@ export interface Trip {
     farmLoadWeight?: number | null;
     farmRate?: number | null;
     farmAmount?: number | null;
+    farmGpsLat?: number | null;
+    farmGpsLon?: number | null;
+    farmGpsAccuracy?: number | null;
+    farmGpsTime?: string | null;
     farmStepSubmitted: boolean;
     farmStepSubmittedAt: string | null;
     dcWeight: number;
@@ -190,8 +207,10 @@ export interface Trip {
     pickupLoadTime: string | null;
     boxDetails: BoxDetail[];
     dcPhotoKey?: string | null;
+    dcPhotoKey2?: string | null;
     pickupStepSubmitted: boolean;
     pickupStepSubmittedAt: string | null;
+    vehicleBoxCapacity?: number;
     deliveries: ShopDelivery[];
     deliveryStepSubmitted: boolean;
     deliveriesStepSubmittedAt: string | null;
@@ -221,6 +240,7 @@ export interface Trip {
     endStepSubmitted: boolean;
     expensesStepSubmitted: boolean;
     expensesStepSubmittedAt: string | null;
+    mileageKmL?: number | null;
     totalKm: number;
     totalShops: number;
     totalWeight: number;

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { deliveryEmailService } from "../services/deliveryEmailService.js";
+import { deliveryWhatsAppService } from "../services/deliveryWhatsAppService.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { validateStepSubmit } from "../validation/trips.js";
@@ -144,6 +145,25 @@ tripsRouter.post(
   "/:id/deliveries/:deliveryId/email",
   asyncHandler(async (req, res) => {
     const result = await deliveryEmailService.sendDeliveryEmail(
+      Number(req.params.id),
+      Number(req.params.deliveryId),
+      req.body ?? {}
+    );
+    res.json(result);
+  })
+);
+
+tripsRouter.get(
+  "/:id/delivery-whatsapp",
+  asyncHandler(async (req, res) => {
+    res.json(await deliveryWhatsAppService.listForTrip(Number(req.params.id)));
+  })
+);
+
+tripsRouter.post(
+  "/:id/deliveries/:deliveryId/whatsapp",
+  asyncHandler(async (req, res) => {
+    const result = await deliveryWhatsAppService.sendDeliveryWhatsApp(
       Number(req.params.id),
       Number(req.params.deliveryId),
       req.body ?? {}

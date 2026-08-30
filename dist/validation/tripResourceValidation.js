@@ -18,6 +18,10 @@ import { AppError } from "../middleware/errorHandler.js";
 /** Trips that still occupy their resources = Draft (Steps 1–5 in progress). */
 const OCCUPIED_STATUS = "Draft";
 const SOFT_DELETED_EXCLUSION = "t.deleted = FALSE";
+// A trip only OCCUPIES its resources after Step 1 is actually submitted. A bare
+// Draft row created by an autosave/draft endpoint (start_step_submitted = FALSE)
+// must NOT lock a vehicle/driver/supervisor/helper/loader.
+const STEP1_SUBMITTED = "t.start_step_submitted = TRUE";
 /**
  * Placeholder indexes are computed from the ACTUAL params array so every
  * $n reference lines up with the param passed at position n. Previously the
@@ -38,6 +42,45 @@ function pushConflicts(conflicts, row, kind) {
     }
 }
 /**
+ * Serialize concurrent Step 1 submits that share a vehicle or employee so
+ * availability can be re-checked after the lock is held (same transaction).
+ */
+export async function lockTripResourcesForWrite(input, client) {
+    if (!input)
+        return;
+    const lock = (key) => client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [key]);
+    if (input.vehicleId) {
+        await lock(`trip_resource_vehicle_${input.vehicleId}`);
+        const vehicle = await client.query(`SELECT id FROM vehicles WHERE id = $1 FOR UPDATE`, [
+            input.vehicleId,
+        ]);
+        if (!vehicle.rowCount) {
+            throw new AppError(422, "Invalid vehicle", { vehicleId: input.vehicleId });
+        }
+    }
+    const employeeIds = [input.driverId, input.supervisorId].filter((id) => typeof id === "number" && id > 0);
+    employeeIds.sort((a, b) => a - b);
+    for (const id of employeeIds) {
+        await lock(`trip_resource_employee_${id}`);
+    }
+    if (employeeIds.length) {
+        await client.query(`SELECT id FROM employees WHERE id = ANY($1::int[]) FOR UPDATE`, [
+            employeeIds,
+        ]);
+    }
+    const names = [
+        ...new Set([...(input.helpers ?? []), ...(input.loaders ?? [])]
+            .map((n) => n?.trim())
+            .filter((n) => Boolean(n))),
+    ].sort();
+    for (const name of names) {
+        await lock(`trip_resource_crew_${name}`);
+    }
+    if (names.length) {
+        await client.query(`SELECT id FROM employees WHERE employee_name = ANY($1::text[]) FOR UPDATE`, [names]);
+    }
+}
+/**
  * Throw an HTTP 409 with a clear message if any of the supplied resources is
  * already assigned to another active (Draft) trip. Returns normally otherwise.
  */
@@ -54,6 +97,7 @@ export async function assertTripResourcesAvailable(input, client) {
          FROM trips t JOIN vehicles v ON v.id = t.vehicle_id
         WHERE t.vehicle_id = $1
           AND ${SOFT_DELETED_EXCLUSION}
+          AND ${STEP1_SUBMITTED}
           AND t.status = ${statusParam}::trip_status
           ${selfExclude}
         LIMIT 1`, params);
@@ -67,6 +111,7 @@ export async function assertTripResourcesAvailable(input, client) {
          FROM trips t JOIN employees e ON e.id = t.driver_id
         WHERE t.driver_id = $1
           AND ${SOFT_DELETED_EXCLUSION}
+          AND ${STEP1_SUBMITTED}
           AND t.status = ${statusParam}::trip_status
           ${selfExclude}
         LIMIT 1`, params);
@@ -80,6 +125,7 @@ export async function assertTripResourcesAvailable(input, client) {
          FROM trips t JOIN employees e ON e.id = t.supervisor_id
         WHERE t.supervisor_id = $1
           AND ${SOFT_DELETED_EXCLUSION}
+          AND ${STEP1_SUBMITTED}
           AND t.status = ${statusParam}::trip_status
           ${selfExclude}
         LIMIT 1`, params);
@@ -107,6 +153,7 @@ export async function assertTripResourcesAvailable(input, client) {
         WHERE tc.role = ${roleParam}::crew_role
           AND tc.employee_name = ANY($1)
           AND ${SOFT_DELETED_EXCLUSION}
+          AND ${STEP1_SUBMITTED}
           AND t.status = ${statusParam}::trip_status
           ${selfExclude}
         LIMIT 1`, params);

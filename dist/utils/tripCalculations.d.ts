@@ -41,6 +41,7 @@ export declare function computeTripKpis(opts: {
         farmWeight?: number | null;
         perBoxData?: BoxDetail[];
         autoCaptureTime?: string | null;
+        clientKey?: string | null;
     }[];
     boxes: number;
     totalBirds: number;

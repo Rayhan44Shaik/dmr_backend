@@ -71,4 +71,15 @@ export declare function assertWithinCapacity(opts: {
     alreadyAllocated: number;
     requested: number;
 }): void;
+/** Remaining Step 3 pickup-box birds/weight after other shops' allocations. */
+export declare function remainingPickupBox(pickup: {
+    birds: number;
+    weight: number;
+}, used: {
+    birds: number;
+    weight: number;
+}): {
+    birds: number;
+    weight: number;
+};
 export {};

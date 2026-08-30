@@ -51,7 +51,7 @@ export declare const tripsService: {
         helpers: string[];
         loaders: string[];
         openingMeter: number | null;
-        advanceAmount: number;
+        advanceAmount: number | null;
         startStepSubmitted: boolean;
         startStepSubmittedAt: string | null;
         sourceFarmId: number | null;
@@ -68,6 +68,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
         farmStepSubmitted: boolean;
         farmStepSubmittedAt: string | null;
         dcWeight: number;
@@ -77,8 +81,10 @@ export declare const tripsService: {
         pickupLoadTime: string | null;
         boxDetails: BoxDetail[];
         dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
         pickupStepSubmitted: boolean;
         pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
         deliveries: ShopDelivery[];
         deliveryStepSubmitted: boolean;
         deliveriesStepSubmittedAt: string | null;
@@ -108,6 +114,7 @@ export declare const tripsService: {
         endStepSubmitted: boolean;
         expensesStepSubmitted: boolean;
         expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
         totalKm: number;
         totalShops: number;
         totalWeight: number;
@@ -132,6 +139,8 @@ export declare const tripsService: {
         stepStatuses?: TripStepStatuses;
         dcPhotoData?: string | null;
         dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
     }>;
     getById(id: number): Promise<{
         resumeStep: TripWizardStep | null;
@@ -152,7 +161,7 @@ export declare const tripsService: {
         helpers: string[];
         loaders: string[];
         openingMeter: number | null;
-        advanceAmount: number;
+        advanceAmount: number | null;
         startStepSubmitted: boolean;
         startStepSubmittedAt: string | null;
         sourceFarmId: number | null;
@@ -169,6 +178,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
         farmStepSubmitted: boolean;
         farmStepSubmittedAt: string | null;
         dcWeight: number;
@@ -178,8 +191,10 @@ export declare const tripsService: {
         pickupLoadTime: string | null;
         boxDetails: BoxDetail[];
         dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
         pickupStepSubmitted: boolean;
         pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
         deliveries: ShopDelivery[];
         deliveryStepSubmitted: boolean;
         deliveriesStepSubmittedAt: string | null;
@@ -209,6 +224,7 @@ export declare const tripsService: {
         endStepSubmitted: boolean;
         expensesStepSubmitted: boolean;
         expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
         totalKm: number;
         totalShops: number;
         totalWeight: number;
@@ -232,6 +248,326 @@ export declare const tripsService: {
         updatedAt?: string | null;
         dcPhotoData?: string | null;
         dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
+    }>;
+    submitDiesel(tripId: number, body: Record<string, unknown>): Promise<{
+        id: number;
+        tripNo: string;
+        tripDate: string;
+        status: TripStatus;
+        startTime: string | null;
+        vehicleId: number | null;
+        vehicleNo: string | null;
+        driverId: number | null;
+        driverName: string | null;
+        supervisorId: number | null;
+        supervisorName: string | null;
+        helpers: string[];
+        loaders: string[];
+        openingMeter: number | null;
+        advanceAmount: number | null;
+        startStepSubmitted: boolean;
+        startStepSubmittedAt: string | null;
+        sourceFarmId: number | null;
+        sourceFarm: string | null;
+        reachedTime: string | null;
+        destMeter: number | null;
+        pickupTolls: number;
+        farmAddress?: string | null;
+        avgBirdWeight?: number | null;
+        farmRemarks?: string | null;
+        farmBirdTypeId?: number | null;
+        farmBirdType?: string | null;
+        farmBirdCount?: number | null;
+        farmLoadWeight?: number | null;
+        farmRate?: number | null;
+        farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
+        farmStepSubmitted: boolean;
+        farmStepSubmittedAt: string | null;
+        dcWeight: number;
+        totalBirds: number;
+        boxes: number;
+        avgWeight: number;
+        pickupLoadTime: string | null;
+        boxDetails: BoxDetail[];
+        dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
+        pickupStepSubmitted: boolean;
+        pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
+        deliveries: ShopDelivery[];
+        deliveryStepSubmitted: boolean;
+        deliveriesStepSubmittedAt: string | null;
+        closingMeter: number | null;
+        endMeter?: number | null;
+        endTime: string | null;
+        deliveryTolls: number;
+        destinationTolls?: number;
+        meals?: number;
+        loading?: number;
+        mealsTiffin?: number;
+        vehicleMaintenance?: number;
+        othersRC?: number;
+        others1Amt?: number;
+        others2Amt?: number;
+        others3Amt?: number;
+        others4Amt?: number;
+        others5Amt?: number;
+        dieselEntries?: DieselEntry[];
+        fuel: number;
+        expense: number;
+        driverBata?: number;
+        helperBata?: number;
+        totalTripExpense?: number;
+        remarks: string;
+        submittedAt?: string | null;
+        endStepSubmitted: boolean;
+        expensesStepSubmitted: boolean;
+        expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
+        totalKm: number;
+        totalShops: number;
+        totalWeight: number;
+        totalDeliveredWeight: number;
+        totalBirdsDelivered: number;
+        totalMortality: number;
+        totalMortalityCount: number;
+        totalMortalityWeight: number;
+        weightLoss: number;
+        survivalRate: number;
+        lastShop: string | null;
+        rateCompleted: boolean;
+        deleted: boolean;
+        deletedReason?: string | null;
+        approvedBy?: string | null;
+        approvedAt?: string | null;
+        rejectedBy?: string | null;
+        rejectedAt?: string | null;
+        rejectedReason?: string | null;
+        createdAt?: string | null;
+        updatedAt?: string | null;
+        stepStatuses?: TripStepStatuses;
+        dcPhotoData?: string | null;
+        dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
+    }>;
+    updateDiesel(tripId: number, entryId: number, body: Record<string, unknown>): Promise<{
+        id: number;
+        tripNo: string;
+        tripDate: string;
+        status: TripStatus;
+        startTime: string | null;
+        vehicleId: number | null;
+        vehicleNo: string | null;
+        driverId: number | null;
+        driverName: string | null;
+        supervisorId: number | null;
+        supervisorName: string | null;
+        helpers: string[];
+        loaders: string[];
+        openingMeter: number | null;
+        advanceAmount: number | null;
+        startStepSubmitted: boolean;
+        startStepSubmittedAt: string | null;
+        sourceFarmId: number | null;
+        sourceFarm: string | null;
+        reachedTime: string | null;
+        destMeter: number | null;
+        pickupTolls: number;
+        farmAddress?: string | null;
+        avgBirdWeight?: number | null;
+        farmRemarks?: string | null;
+        farmBirdTypeId?: number | null;
+        farmBirdType?: string | null;
+        farmBirdCount?: number | null;
+        farmLoadWeight?: number | null;
+        farmRate?: number | null;
+        farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
+        farmStepSubmitted: boolean;
+        farmStepSubmittedAt: string | null;
+        dcWeight: number;
+        totalBirds: number;
+        boxes: number;
+        avgWeight: number;
+        pickupLoadTime: string | null;
+        boxDetails: BoxDetail[];
+        dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
+        pickupStepSubmitted: boolean;
+        pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
+        deliveries: ShopDelivery[];
+        deliveryStepSubmitted: boolean;
+        deliveriesStepSubmittedAt: string | null;
+        closingMeter: number | null;
+        endMeter?: number | null;
+        endTime: string | null;
+        deliveryTolls: number;
+        destinationTolls?: number;
+        meals?: number;
+        loading?: number;
+        mealsTiffin?: number;
+        vehicleMaintenance?: number;
+        othersRC?: number;
+        others1Amt?: number;
+        others2Amt?: number;
+        others3Amt?: number;
+        others4Amt?: number;
+        others5Amt?: number;
+        dieselEntries?: DieselEntry[];
+        fuel: number;
+        expense: number;
+        driverBata?: number;
+        helperBata?: number;
+        totalTripExpense?: number;
+        remarks: string;
+        submittedAt?: string | null;
+        endStepSubmitted: boolean;
+        expensesStepSubmitted: boolean;
+        expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
+        totalKm: number;
+        totalShops: number;
+        totalWeight: number;
+        totalDeliveredWeight: number;
+        totalBirdsDelivered: number;
+        totalMortality: number;
+        totalMortalityCount: number;
+        totalMortalityWeight: number;
+        weightLoss: number;
+        survivalRate: number;
+        lastShop: string | null;
+        rateCompleted: boolean;
+        deleted: boolean;
+        deletedReason?: string | null;
+        approvedBy?: string | null;
+        approvedAt?: string | null;
+        rejectedBy?: string | null;
+        rejectedAt?: string | null;
+        rejectedReason?: string | null;
+        createdAt?: string | null;
+        updatedAt?: string | null;
+        stepStatuses?: TripStepStatuses;
+        dcPhotoData?: string | null;
+        dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
+    }>;
+    deleteDiesel(tripId: number, entryId: number): Promise<{
+        id: number;
+        tripNo: string;
+        tripDate: string;
+        status: TripStatus;
+        startTime: string | null;
+        vehicleId: number | null;
+        vehicleNo: string | null;
+        driverId: number | null;
+        driverName: string | null;
+        supervisorId: number | null;
+        supervisorName: string | null;
+        helpers: string[];
+        loaders: string[];
+        openingMeter: number | null;
+        advanceAmount: number | null;
+        startStepSubmitted: boolean;
+        startStepSubmittedAt: string | null;
+        sourceFarmId: number | null;
+        sourceFarm: string | null;
+        reachedTime: string | null;
+        destMeter: number | null;
+        pickupTolls: number;
+        farmAddress?: string | null;
+        avgBirdWeight?: number | null;
+        farmRemarks?: string | null;
+        farmBirdTypeId?: number | null;
+        farmBirdType?: string | null;
+        farmBirdCount?: number | null;
+        farmLoadWeight?: number | null;
+        farmRate?: number | null;
+        farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
+        farmStepSubmitted: boolean;
+        farmStepSubmittedAt: string | null;
+        dcWeight: number;
+        totalBirds: number;
+        boxes: number;
+        avgWeight: number;
+        pickupLoadTime: string | null;
+        boxDetails: BoxDetail[];
+        dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
+        pickupStepSubmitted: boolean;
+        pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
+        deliveries: ShopDelivery[];
+        deliveryStepSubmitted: boolean;
+        deliveriesStepSubmittedAt: string | null;
+        closingMeter: number | null;
+        endMeter?: number | null;
+        endTime: string | null;
+        deliveryTolls: number;
+        destinationTolls?: number;
+        meals?: number;
+        loading?: number;
+        mealsTiffin?: number;
+        vehicleMaintenance?: number;
+        othersRC?: number;
+        others1Amt?: number;
+        others2Amt?: number;
+        others3Amt?: number;
+        others4Amt?: number;
+        others5Amt?: number;
+        dieselEntries?: DieselEntry[];
+        fuel: number;
+        expense: number;
+        driverBata?: number;
+        helperBata?: number;
+        totalTripExpense?: number;
+        remarks: string;
+        submittedAt?: string | null;
+        endStepSubmitted: boolean;
+        expensesStepSubmitted: boolean;
+        expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
+        totalKm: number;
+        totalShops: number;
+        totalWeight: number;
+        totalDeliveredWeight: number;
+        totalBirdsDelivered: number;
+        totalMortality: number;
+        totalMortalityCount: number;
+        totalMortalityWeight: number;
+        weightLoss: number;
+        survivalRate: number;
+        lastShop: string | null;
+        rateCompleted: boolean;
+        deleted: boolean;
+        deletedReason?: string | null;
+        approvedBy?: string | null;
+        approvedAt?: string | null;
+        rejectedBy?: string | null;
+        rejectedAt?: string | null;
+        rejectedReason?: string | null;
+        createdAt?: string | null;
+        updatedAt?: string | null;
+        stepStatuses?: TripStepStatuses;
+        dcPhotoData?: string | null;
+        dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
     }>;
     createDraft(body?: Partial<Trip>): Promise<{
         resumeStep: TripWizardStep;
@@ -252,7 +588,7 @@ export declare const tripsService: {
         helpers: string[];
         loaders: string[];
         openingMeter: number | null;
-        advanceAmount: number;
+        advanceAmount: number | null;
         startStepSubmitted: boolean;
         startStepSubmittedAt: string | null;
         sourceFarmId: number | null;
@@ -269,6 +605,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
         farmStepSubmitted: boolean;
         farmStepSubmittedAt: string | null;
         dcWeight: number;
@@ -278,8 +618,10 @@ export declare const tripsService: {
         pickupLoadTime: string | null;
         boxDetails: BoxDetail[];
         dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
         pickupStepSubmitted: boolean;
         pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
         deliveries: ShopDelivery[];
         deliveryStepSubmitted: boolean;
         deliveriesStepSubmittedAt: string | null;
@@ -309,6 +651,7 @@ export declare const tripsService: {
         endStepSubmitted: boolean;
         expensesStepSubmitted: boolean;
         expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
         totalKm: number;
         totalShops: number;
         totalWeight: number;
@@ -332,6 +675,8 @@ export declare const tripsService: {
         updatedAt?: string | null;
         dcPhotoData?: string | null;
         dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
     }>;
     /** Autosave engine â€” partial upsert with optimistic locking */
     save(id: number | null, body: Partial<Trip> & Record<string, unknown>): Promise<{
@@ -353,7 +698,7 @@ export declare const tripsService: {
         helpers: string[];
         loaders: string[];
         openingMeter: number | null;
-        advanceAmount: number;
+        advanceAmount: number | null;
         startStepSubmitted: boolean;
         startStepSubmittedAt: string | null;
         sourceFarmId: number | null;
@@ -370,6 +715,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
         farmStepSubmitted: boolean;
         farmStepSubmittedAt: string | null;
         dcWeight: number;
@@ -379,8 +728,10 @@ export declare const tripsService: {
         pickupLoadTime: string | null;
         boxDetails: BoxDetail[];
         dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
         pickupStepSubmitted: boolean;
         pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
         deliveries: ShopDelivery[];
         deliveryStepSubmitted: boolean;
         deliveriesStepSubmittedAt: string | null;
@@ -410,6 +761,7 @@ export declare const tripsService: {
         endStepSubmitted: boolean;
         expensesStepSubmitted: boolean;
         expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
         totalKm: number;
         totalShops: number;
         totalWeight: number;
@@ -433,6 +785,144 @@ export declare const tripsService: {
         updatedAt?: string | null;
         dcPhotoData?: string | null;
         dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
+    }>;
+    /**
+     * Step 4 per-shop persistence (PUT /trips/:id/deliveries).
+     *
+     * Save Progress / single-shop save ONLY — never submits Step 4, never
+     * captures the official Step 4 timestamp, and never runs final-submit
+     * validation. Final submit still goes through submitStep → saveDeliveries({ finalize: true }).
+     * (full-replace + strict completeness + server NOW() timestamp).
+     *
+     * Upserts the submitted deliveries idempotently:
+     *  - a row matching (trip_id, client_key) is UPDATED — a double-click,
+     *    network timeout, browser retry or repeated Save never creates a
+     *    duplicate (the partial unique index is the DB-level backstop);
+     *  - a row without a client_key is matched by its server id when present;
+     *  - anything else is INSERTed.
+     *
+     * Rows NOT present in the payload are left untouched — saving one shop
+     * never wipes shops already saved (per-shop persistence requirement).
+     *
+     * Runs inside one transaction with the trip row locked FOR UPDATE so
+     * concurrent saves for the same trip serialize, and every capacity /
+     * box-availability / active-shop check is re-run against the LIVE
+     * persisted rows — never trusted from the client.
+     */
+    saveDeliveries(tripId: number, body?: {
+        deliveries?: ShopDelivery[];
+    }, options?: {
+        finalize?: boolean;
+    }): Promise<{
+        resumeStep: TripWizardStep | null;
+        resumeStepLabel: string | null;
+        wizardProgress: import("../utils/tripResume.js").WizardProgress;
+        stepStatuses: TripStepStatuses;
+        id: number;
+        tripNo: string;
+        tripDate: string;
+        status: TripStatus;
+        startTime: string | null;
+        vehicleId: number | null;
+        vehicleNo: string | null;
+        driverId: number | null;
+        driverName: string | null;
+        supervisorId: number | null;
+        supervisorName: string | null;
+        helpers: string[];
+        loaders: string[];
+        openingMeter: number | null;
+        advanceAmount: number | null;
+        startStepSubmitted: boolean;
+        startStepSubmittedAt: string | null;
+        sourceFarmId: number | null;
+        sourceFarm: string | null;
+        reachedTime: string | null;
+        destMeter: number | null;
+        pickupTolls: number;
+        farmAddress?: string | null;
+        avgBirdWeight?: number | null;
+        farmRemarks?: string | null;
+        farmBirdTypeId?: number | null;
+        farmBirdType?: string | null;
+        farmBirdCount?: number | null;
+        farmLoadWeight?: number | null;
+        farmRate?: number | null;
+        farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
+        farmStepSubmitted: boolean;
+        farmStepSubmittedAt: string | null;
+        dcWeight: number;
+        totalBirds: number;
+        boxes: number;
+        avgWeight: number;
+        pickupLoadTime: string | null;
+        boxDetails: BoxDetail[];
+        dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
+        pickupStepSubmitted: boolean;
+        pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
+        deliveries: ShopDelivery[];
+        deliveryStepSubmitted: boolean;
+        deliveriesStepSubmittedAt: string | null;
+        closingMeter: number | null;
+        endMeter?: number | null;
+        endTime: string | null;
+        deliveryTolls: number;
+        destinationTolls?: number;
+        meals?: number;
+        loading?: number;
+        mealsTiffin?: number;
+        vehicleMaintenance?: number;
+        othersRC?: number;
+        others1Amt?: number;
+        others2Amt?: number;
+        others3Amt?: number;
+        others4Amt?: number;
+        others5Amt?: number;
+        dieselEntries?: DieselEntry[];
+        fuel: number;
+        expense: number;
+        driverBata?: number;
+        helperBata?: number;
+        totalTripExpense?: number;
+        remarks: string;
+        submittedAt?: string | null;
+        endStepSubmitted: boolean;
+        expensesStepSubmitted: boolean;
+        expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
+        totalKm: number;
+        totalShops: number;
+        totalWeight: number;
+        totalDeliveredWeight: number;
+        totalBirdsDelivered: number;
+        totalMortality: number;
+        totalMortalityCount: number;
+        totalMortalityWeight: number;
+        weightLoss: number;
+        survivalRate: number;
+        lastShop: string | null;
+        rateCompleted: boolean;
+        deleted: boolean;
+        deletedReason?: string | null;
+        approvedBy?: string | null;
+        approvedAt?: string | null;
+        rejectedBy?: string | null;
+        rejectedAt?: string | null;
+        rejectedReason?: string | null;
+        createdAt?: string | null;
+        updatedAt?: string | null;
+        dcPhotoData?: string | null;
+        dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
     }>;
     submitStep(id: number, step: TripWizardStep, body: Partial<Trip> & Record<string, unknown>): Promise<{
         resumeStep: TripWizardStep | null;
@@ -453,7 +943,7 @@ export declare const tripsService: {
         helpers: string[];
         loaders: string[];
         openingMeter: number | null;
-        advanceAmount: number;
+        advanceAmount: number | null;
         startStepSubmitted: boolean;
         startStepSubmittedAt: string | null;
         sourceFarmId: number | null;
@@ -470,6 +960,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
         farmStepSubmitted: boolean;
         farmStepSubmittedAt: string | null;
         dcWeight: number;
@@ -479,8 +973,10 @@ export declare const tripsService: {
         pickupLoadTime: string | null;
         boxDetails: BoxDetail[];
         dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
         pickupStepSubmitted: boolean;
         pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
         deliveries: ShopDelivery[];
         deliveryStepSubmitted: boolean;
         deliveriesStepSubmittedAt: string | null;
@@ -510,6 +1006,7 @@ export declare const tripsService: {
         endStepSubmitted: boolean;
         expensesStepSubmitted: boolean;
         expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
         totalKm: number;
         totalShops: number;
         totalWeight: number;
@@ -533,6 +1030,8 @@ export declare const tripsService: {
         updatedAt?: string | null;
         dcPhotoData?: string | null;
         dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
     }>;
     softDelete(id: number, reason?: string): Promise<{
         id: number;
@@ -559,7 +1058,7 @@ export declare const tripsService: {
         helpers: string[];
         loaders: string[];
         openingMeter: number | null;
-        advanceAmount: number;
+        advanceAmount: number | null;
         startStepSubmitted: boolean;
         startStepSubmittedAt: string | null;
         sourceFarmId: number | null;
@@ -576,6 +1075,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmGpsLat?: number | null;
+        farmGpsLon?: number | null;
+        farmGpsAccuracy?: number | null;
+        farmGpsTime?: string | null;
         farmStepSubmitted: boolean;
         farmStepSubmittedAt: string | null;
         dcWeight: number;
@@ -585,8 +1088,10 @@ export declare const tripsService: {
         pickupLoadTime: string | null;
         boxDetails: BoxDetail[];
         dcPhotoKey?: string | null;
+        dcPhotoKey2?: string | null;
         pickupStepSubmitted: boolean;
         pickupStepSubmittedAt: string | null;
+        vehicleBoxCapacity?: number;
         deliveries: ShopDelivery[];
         deliveryStepSubmitted: boolean;
         deliveriesStepSubmittedAt: string | null;
@@ -616,6 +1121,7 @@ export declare const tripsService: {
         endStepSubmitted: boolean;
         expensesStepSubmitted: boolean;
         expensesStepSubmittedAt: string | null;
+        mileageKmL?: number | null;
         totalKm: number;
         totalShops: number;
         totalWeight: number;
@@ -640,6 +1146,8 @@ export declare const tripsService: {
         stepStatuses?: TripStepStatuses;
         dcPhotoData?: string | null;
         dcPhotoMime?: string | null;
+        dcPhotoMime2?: string | null;
+        dcPhotoData2?: string | null;
     }>;
     /** Backs GET /trips/vehicle/:vehicleId/last-meter â€” the Trip Step 1 opening
      * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
@@ -652,4 +1160,36 @@ export declare const tripsService: {
         tripNo: string | null;
         tripDate: string;
     } | null>;
+    /**
+     * Available masters for Step 1 — the dropdown source of truth.
+     * Returns only resources NOT currently occupied by an active trip (status
+     * 'Draft' + start_step_submitted = TRUE, matching the resource lock rule).
+     * Pass tripId when editing so the trip's own resources stay selectable.
+     */
+    availableResources(tripId?: number | null): Promise<{
+        vehicles: {
+            id: number;
+            vehicleNumber: string;
+        }[];
+        drivers: {
+            id: number;
+            employeeName: string;
+            department: string;
+        }[];
+        supervisors: {
+            id: number;
+            employeeName: string;
+            department: string;
+        }[];
+        helpers: {
+            id: number;
+            employeeName: string;
+            department: string;
+        }[];
+        loaders: {
+            id: number;
+            employeeName: string;
+            department: string;
+        }[];
+    }>;
 };

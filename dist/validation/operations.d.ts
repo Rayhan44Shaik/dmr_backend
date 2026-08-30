@@ -12,16 +12,16 @@ export declare const statusPatchSchema: z.ZodObject<{
     reason: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     status: string;
+    reason?: string | undefined;
     approvedBy?: string | undefined;
     rejectedBy?: string | undefined;
     rejectedReason?: string | undefined;
-    reason?: string | undefined;
 }, {
     status: string;
+    reason?: string | undefined;
     approvedBy?: string | undefined;
     rejectedBy?: string | undefined;
     rejectedReason?: string | undefined;
-    reason?: string | undefined;
 }>;
 export declare const shopRateBodySchema: z.ZodObject<{
     shopId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
@@ -89,32 +89,32 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     shopName?: string | undefined;
     status?: "Draft" | "Deleted" | "Approved" | "Rejected" | "Pending Approval" | undefined;
     birdType?: string | undefined;
-    birds?: number | undefined;
     tripId?: number | null | undefined;
+    rate?: number | undefined;
+    amount?: number | undefined;
+    birds?: number | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
-    rate?: number | undefined;
     remarks?: string | undefined;
     createdBy?: string | undefined;
     saleNo?: string | undefined;
     saleDate?: string | undefined;
-    amount?: number | undefined;
     mortality?: number | undefined;
 }, {
     weight?: number | undefined;
     shopName?: string | undefined;
     status?: "Draft" | "Deleted" | "Approved" | "Rejected" | "Pending Approval" | undefined;
     birdType?: string | undefined;
-    birds?: number | undefined;
     tripId?: number | null | undefined;
+    rate?: number | undefined;
+    amount?: number | undefined;
+    birds?: number | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
-    rate?: number | undefined;
     remarks?: string | undefined;
     createdBy?: string | undefined;
     saleNo?: string | undefined;
     saleDate?: string | undefined;
-    amount?: number | undefined;
     mortality?: number | undefined;
 }>;
 /** One shop-wise rate line, applied to an existing trip_deliveries row. */
@@ -199,8 +199,8 @@ export declare const rateEntryUpdateSchema: z.ZodObject<{
         rate: number;
     }[] | undefined;
     birdType?: string | undefined;
-    birdTypeId?: number | null | undefined;
     rate?: number | undefined;
+    birdTypeId?: number | null | undefined;
     remarks?: string | null | undefined;
     updatedBy?: string | undefined;
 }, {
@@ -209,17 +209,10 @@ export declare const rateEntryUpdateSchema: z.ZodObject<{
         rate: number;
     }[] | undefined;
     birdType?: string | undefined;
-    birdTypeId?: number | null | undefined;
     rate?: number | undefined;
+    birdTypeId?: number | null | undefined;
     remarks?: string | null | undefined;
     updatedBy?: string | undefined;
-}>;
-export declare const rateEntryLockSchema: z.ZodObject<{
-    lockedBy: z.ZodOptional<z.ZodString>;
-}, "strip", z.ZodTypeAny, {
-    lockedBy?: string | undefined;
-}, {
-    lockedBy?: string | undefined;
 }>;
 /**
  * Rate Entry payload.
@@ -231,34 +224,72 @@ export declare const rateEntryItemSchema: z.ZodObject<{
     deliveryId: z.ZodNumber;
     rate: z.ZodNumber;
 }, "strip", z.ZodTypeAny, {
-    rate: number;
     deliveryId: number;
+    rate: number;
 }, {
-    rate: number;
     deliveryId: number;
+    rate: number;
 }>;
 export declare const rateEntrySaveSchema: z.ZodObject<{
-    /** Partial list — only deliveries included are updated. */
-    rates: z.ZodArray<z.ZodObject<{
+    /** Partial list — only deliveries included are updated. Empty is allowed. */
+    rates: z.ZodEffects<z.ZodDefault<z.ZodArray<z.ZodObject<{
         deliveryId: z.ZodNumber;
         rate: z.ZodNumber;
     }, "strip", z.ZodTypeAny, {
-        rate: number;
         deliveryId: number;
+        rate: number;
     }, {
-        rate: number;
         deliveryId: number;
-    }>, "many">;
+        rate: number;
+    }>, "many">>, {
+        deliveryId: number;
+        rate: number;
+    }[], {
+        deliveryId: number;
+        rate: number;
+    }[] | undefined>;
 }, "strip", z.ZodTypeAny, {
     rates: {
-        rate: number;
         deliveryId: number;
+        rate: number;
     }[];
 }, {
-    rates: {
-        rate: number;
+    rates?: {
         deliveryId: number;
-    }[];
+        rate: number;
+    }[] | undefined;
+}>;
+export declare const rateEntryLockSchema: z.ZodObject<{
+    lockedBy: z.ZodOptional<z.ZodString>;
+    /** Optional rates applied in the same lock transaction (atomic save+lock). */
+    rates: z.ZodEffects<z.ZodOptional<z.ZodArray<z.ZodObject<{
+        deliveryId: z.ZodNumber;
+        rate: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        deliveryId: number;
+        rate: number;
+    }, {
+        deliveryId: number;
+        rate: number;
+    }>, "many">>, {
+        deliveryId: number;
+        rate: number;
+    }[] | undefined, {
+        deliveryId: number;
+        rate: number;
+    }[] | undefined>;
+}, "strip", z.ZodTypeAny, {
+    rates?: {
+        deliveryId: number;
+        rate: number;
+    }[] | undefined;
+    lockedBy?: string | undefined;
+}, {
+    rates?: {
+        deliveryId: number;
+        rate: number;
+    }[] | undefined;
+    lockedBy?: string | undefined;
 }>;
 export declare const collectionBodySchema: z.ZodObject<{
     collectionNo: z.ZodOptional<z.ZodString>;
@@ -323,48 +354,60 @@ export declare const fuelExpenseBodySchema: z.ZodObject<{
     imageData: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     imageName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     imageMime: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    gpsLat: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    gpsLon: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    gpsAccuracy: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    gpsCapturedAt: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     createdBy: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     billDate: string;
     supervisorName?: string | null | undefined;
     vehicleNo?: string | null | undefined;
     tripId?: number | null | undefined;
+    amount?: number | undefined;
     vehicleId?: number | null | undefined;
     driverId?: number | null | undefined;
+    driverName?: string | null | undefined;
     supervisorId?: number | null | undefined;
+    gpsLat?: number | null | undefined;
+    gpsLon?: number | null | undefined;
+    gpsAccuracy?: number | null | undefined;
+    imageData?: string | null | undefined;
+    imageName?: string | null | undefined;
+    gpsCapturedAt?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    amount?: number | undefined;
     billNo?: string | undefined;
-    driverName?: string | null | undefined;
     currentMeter?: number | undefined;
     fuelRate?: number | undefined;
     liters?: number | undefined;
     pumpName?: string | undefined;
     bunkAddress?: string | null | undefined;
-    imageData?: string | null | undefined;
-    imageName?: string | null | undefined;
     imageMime?: string | null | undefined;
 }, {
     billDate: string;
     supervisorName?: string | null | undefined;
     vehicleNo?: string | null | undefined;
     tripId?: number | null | undefined;
+    amount?: number | undefined;
     vehicleId?: number | null | undefined;
     driverId?: number | null | undefined;
+    driverName?: string | null | undefined;
     supervisorId?: number | null | undefined;
+    gpsLat?: number | null | undefined;
+    gpsLon?: number | null | undefined;
+    gpsAccuracy?: number | null | undefined;
+    imageData?: string | null | undefined;
+    imageName?: string | null | undefined;
+    gpsCapturedAt?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
-    amount?: number | undefined;
     billNo?: string | undefined;
-    driverName?: string | null | undefined;
     currentMeter?: number | undefined;
     fuelRate?: number | undefined;
     liters?: number | undefined;
     pumpName?: string | undefined;
     bunkAddress?: string | null | undefined;
-    imageData?: string | null | undefined;
-    imageName?: string | null | undefined;
     imageMime?: string | null | undefined;
 }>;
 export declare const fuelRejectSchema: z.ZodObject<{

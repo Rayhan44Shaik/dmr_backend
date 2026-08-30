@@ -10,6 +10,11 @@ export interface TripResourceInput {
     loaders?: string[];
 }
 /**
+ * Serialize concurrent Step 1 submits that share a vehicle or employee so
+ * availability can be re-checked after the lock is held (same transaction).
+ */
+export declare function lockTripResourcesForWrite(input: TripResourceInput | null | undefined, client: Client): Promise<void>;
+/**
  * Throw an HTTP 409 with a clear message if any of the supplied resources is
  * already assigned to another active (Draft) trip. Returns normally otherwise.
  */

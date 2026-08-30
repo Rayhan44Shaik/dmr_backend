@@ -1,42 +1,88 @@
 import { z } from "zod";
 import { AppError } from "../middleware/errorHandler.js";
+/** Empty/blank → null. Numeric 0 is preserved (not coerced to null). */
+function emptyToNullNumber(v) {
+    if (v === undefined || v === null || v === "")
+        return null;
+    if (typeof v === "number") {
+        return Number.isFinite(v) ? v : null;
+    }
+    if (typeof v === "string") {
+        const trimmed = v.trim();
+        if (trimmed === "")
+            return null;
+        const n = Number(trimmed);
+        return Number.isFinite(n) ? n : v;
+    }
+    return v;
+}
 const boxDetailSchema = z.object({
-    boxNo: z.coerce.number().int().positive(),
-    birds: z.coerce.number().int().nonnegative().optional(),
-    weight: z.coerce.number().nonnegative().optional(),
+    boxNo: z.preprocess(emptyToNullNumber, z.number().int().positive()),
+    birds: z.preprocess(emptyToNullNumber, z.number().int().nonnegative().optional()),
+    weight: z.preprocess(emptyToNullNumber, z.number().nonnegative().optional()),
+    avgWeight: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
 });
 // Used for autosave (very permissive)
+const requiredPositiveId = (message) => z.preprocess(emptyToNullNumber, z
+    .number({ required_error: message, invalid_type_error: message })
+    .int()
+    .positive(message));
 const deliverySchema = z.object({
     id: z.coerce.number().int().optional(),
-    serialNo: z.coerce.number().int().nullable().optional(),
-    boxNo: z.coerce.number().int().nullable().optional(),
-    shopId: z.coerce.number().int().nullable().optional(),
+    serialNo: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
+    boxNo: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
+    shopId: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
     shopName: z.string().optional(),
-    birdTypeId: z.coerce.number().int().nullable().optional(),
+    birdTypeId: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
     birdType: z.string().optional(),
-    birds: z.coerce.number().int().nonnegative().optional(),
-    weight: z.coerce.number().nonnegative().optional(),
-    mortality: z.coerce.number().int().nonnegative().optional(),
-    mortKg: z.coerce.number().nonnegative().nullable().optional(),
-    rate: z.coerce.number().nonnegative().nullable().optional(),
-    amount: z.coerce.number().nonnegative().optional(),
+    birds: z.preprocess(emptyToNullNumber, z.number().int().nonnegative("Bird count cannot be negative").optional()),
+    weight: z.preprocess(emptyToNullNumber, z.number().nonnegative("Weight cannot be negative").optional()),
+    mortality: z.preprocess(emptyToNullNumber, z.number().int().nonnegative("Mortality cannot be negative").optional()),
+    mortKg: z.preprocess(emptyToNullNumber, z.number().nonnegative("Mortality weight cannot be negative").nullable().optional()),
+    rate: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
+    // Amount is computed server-side from weight × rate when omitted. Do not coerce
+    // missing/undefined with z.coerce.number() — that becomes NaN ("Expected number, received nan").
+    amount: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
     remarks: z.string().optional(),
     deliveryMode: z.enum(["box", "weight"]).optional(),
     selectedBoxIds: z.array(z.coerce.number().int()).optional(),
-    farmBirds: z.coerce.number().int().nullable().optional(),
-    farmWeight: z.coerce.number().nullable().optional(),
+    farmBirds: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
+    farmWeight: z.preprocess(emptyToNullNumber, z.number().nullable().optional()),
     perBoxData: z.array(boxDetailSchema).optional(),
     autoCaptureTime: z.string().nullable().optional(),
 });
+// Used by the Step 4 per-shop persistence endpoint (PUT /trips/:id/deliveries).
+// Permissive like the autosave deliverySchema (Save Progress must never run
+// final-submit validation) but still type/safety-checked: non-negative numbers,
+// valid delivery mode, and a bounded array so a malicious payload cannot send
+// thousands of rows. `clientKey` carries the frontend's stable idempotency key.
+const deliverySaveSchema = z
+    .object({
+    deliveries: z
+        .array(deliverySchema.extend({
+        clientKey: z.string().max(120).nullable().optional(),
+    }))
+        .max(200),
+})
+    .passthrough();
 const dieselEntrySchema = z.object({
+    id: z.coerce.number().int().optional(),
     rowIndex: z.coerce.number().int().nonnegative(),
     litres: z.coerce.number().nonnegative().nullable().optional(),
     rate: z.coerce.number().nonnegative().nullable().optional(),
+    amount: z.coerce.number().nonnegative().nullable().optional(),
     meter: z.coerce.number().nonnegative().nullable().optional(),
     bunkName: z.string().nullable().optional(),
     bunkGps: z.string().nullable().optional(),
+    gpsLat: z.coerce.number().nullable().optional(),
+    gpsLon: z.coerce.number().nullable().optional(),
+    gpsAccuracy: z.coerce.number().nonnegative().nullable().optional(),
+    gpsCapturedAt: z.string().nullable().optional(),
     imageData: z.string().nullable().optional(),
     imageName: z.string().nullable().optional(),
+    submitted: z.boolean().optional(),
+    submittedAt: z.string().nullable().optional(),
+    clientKey: z.string().max(120).nullable().optional(),
 });
 export const tripAutosaveSchema = z
     .object({
@@ -62,50 +108,89 @@ const stepValidators = {
     start: z
         .object({
         tripDate: z.string().min(1),
-        // FIXED: Moved required_error inside z.coerce.number() instead of .int()
-        vehicleId: z.coerce.number({ required_error: "Vehicle is required" }).int(),
-        driverId: z.coerce.number({ required_error: "Driver is required" }).int(),
-        supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int(),
-        openingMeter: z.coerce.number({ required_error: "Opening meter is required" }).nonnegative(),
-        advanceAmount: z.coerce.number().nonnegative().optional(),
+        vehicleId: z.coerce
+            .number({ required_error: "Vehicle is required", invalid_type_error: "Vehicle is required" })
+            .int()
+            .positive("Vehicle is required"),
+        driverId: z.coerce
+            .number({ required_error: "Driver is required", invalid_type_error: "Driver is required" })
+            .int()
+            .positive("Driver is required"),
+        supervisorId: z.coerce
+            .number({ required_error: "Supervisor is required", invalid_type_error: "Supervisor is required" })
+            .int()
+            .positive("Supervisor is required"),
+        helpers: z
+            .array(z.string().trim().min(1))
+            .min(1, "Please add at least one Helper."),
+        loaders: z
+            .array(z.string().trim().min(1))
+            .min(1, "Please add at least one Loader."),
+        // Empty/blank → NULL. Explicit 0 stays 0 (meter ledger decides if 0 is valid).
+        openingMeter: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
+        advanceAmount: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
         startTime: z.string().optional(),
     })
         .passthrough(),
     farm: z
         .object({
-        sourceFarmId: z.coerce.number().int(),
-        destMeter: z.coerce.number().nonnegative(),
-        reachedTime: z.string().optional(),
-        pickupTolls: z.coerce.number().nonnegative().optional(),
-        farmBirdTypeId: z.coerce.number().int().optional(),
-        farmBirdCount: z.coerce.number().int().positive().optional(),
-        farmLoadWeight: z.coerce.number().positive().optional(),
-        farmRate: z.coerce.number().nonnegative().optional(),
+        sourceFarmId: z.coerce.number().int().positive("Farm is required"),
+        destMeter: z.coerce.number().positive("Farm meter is required"),
+        farmAddress: z.string().trim().min(1, "Farm address is required."),
+        // reached_time is never sent by the frontend (backend captures it) — but
+        // tolerate a null in case a legacy client sends one.
+        reachedTime: z.string().nullable().optional(),
+        // Tolls may legitimately be 0. Negative values are normalized to 0.
+        pickupTolls: z.preprocess((v) => (v == null || v === "" ? 0 : Math.max(0, Number(v))), z.coerce.number().nonnegative()),
+        avgBirdWeight: z.coerce.number().positive("Average Bird Weight is required"),
+        farmGpsLat: z.coerce.number().nullable().optional(),
+        farmGpsLon: z.coerce.number().nullable().optional(),
+        farmGpsAccuracy: z.coerce.number().nonnegative().nullable().optional(),
+        farmGpsTime: z.string().nullable().optional(),
     })
-        .passthrough(),
+        .passthrough()
+        .refine((data) => {
+        if (data.farmGpsLat != null && (data.farmGpsLat < -90 || data.farmGpsLat > 90))
+            return false;
+        if (data.farmGpsLon != null && (data.farmGpsLon < -180 || data.farmGpsLon > 180))
+            return false;
+        return true;
+    }, { message: "Invalid GPS coordinates", path: ["farmGpsLat"] }),
     pickup: z
         .object({
-        dcWeight: z.coerce.number().positive(),
-        totalBirds: z.coerce.number().int().positive(),
-        boxes: z.coerce.number().int().positive(),
+        dcWeight: z.coerce.number().positive().optional(),
+        totalBirds: z.coerce.number().int().positive().optional(),
+        boxes: z.coerce.number().int().positive().optional(),
         boxDetails: z.array(boxDetailSchema).min(1),
-        dcPhotoKey: z.string().min(1, "DC Photo is required."),
+        dcPhotoKey: z.string().optional(),
+        dcPhotoKey2: z.string().optional(),
+        dcPhotoData: z.string().optional(),
+        dcPhotoData2: z.string().optional(),
     })
         .passthrough(),
     deliveries: z
         .object({
         deliveries: z.array(deliverySchema.extend({
-            // FIXED: Moved required_error inside z.coerce.number()
-            shopId: z.coerce.number({ required_error: "Shop is required for a delivery" }).int(),
-            amount: z.coerce.number({ required_error: "Amount is required" }).nonnegative(),
+            shopId: requiredPositiveId("Shop is required for a delivery"),
+            birdTypeId: requiredPositiveId("Bird Type is required."),
+            amount: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
         })).min(1, "At least one delivery is required"),
     })
-        .passthrough(),
+        .passthrough()
+        .refine((data) => Array.isArray(data.deliveries) &&
+        data.deliveries.every((d) => Number(d.birds) > 0 &&
+            Number(d.weight) > 0 &&
+            Number(d.mortality) >= 0), {
+        message: "Every shop delivery must have delivered birds and delivered weight greater than zero before submitting.",
+        path: ["deliveries"],
+    }),
     expenses: z
         .object({
         closingMeter: z.coerce.number().nonnegative().optional(),
         endMeter: z.coerce.number().nonnegative().optional(),
-        endTime: z.string({ required_error: "End time is required" }),
+        destinationTolls: z.coerce.number().nonnegative().optional(),
+        deliveryTolls: z.coerce.number().nonnegative().optional(),
+        endTime: z.string().optional(),
     })
         .passthrough()
         .refine((data) => data.closingMeter != null || data.endMeter != null, {
@@ -117,6 +202,15 @@ export function parseTripAutosave(body) {
     const result = tripAutosaveSchema.safeParse(body);
     if (!result.success) {
         throw new AppError(400, "Invalid trip payload", result.error.flatten());
+    }
+    return result.data;
+}
+export function parseDeliverySave(body) {
+    const result = deliverySaveSchema.safeParse(body);
+    if (!result.success) {
+        const flattened = result.error.flatten();
+        const firstMessage = firstValidationMessage(result, "deliveries");
+        throw new AppError(400, firstMessage ?? "Invalid delivery payload", flattened);
     }
     return result.data;
 }

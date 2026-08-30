@@ -5,7 +5,7 @@ import { dateOnly, isoOrNull, num, numOrNull, str } from "../utils/coerce.js";
 import { salaryCalculationService } from "./salaryCalculationService.js";
 import { dutyPlannerService } from "./dutyPlannerService.js";
 import { paymentsService } from "./paymentsService.js";
-import { parseBody, salaryCreateSchema, salaryPaySchema, salaryUpdateSchema } from "../validation/salary.js";
+import { parseBody, salaryBulkStatusSchema, salaryCreateSchema, salaryPaySchema, salaryUpdateSchema, } from "../validation/salary.js";
 function mapDuty(row) {
     return {
         id: str(row.id),
@@ -111,11 +111,16 @@ const SALARY_CORRECTION_DAYS = 7;
  *  Paid with an expired correction window. A closed month rejects all
  *  mutations, so an older finalized payroll month can never be edited
  *  accidentally (or bypassed) regardless of frontend state. */
-async function salaryMonthIsClosed(month) {
-    const res = await query(`SELECT COUNT(*)::int AS total,
-            COUNT(*) FILTER (WHERE status <> 'Paid') AS not_paid,
-            COUNT(*) FILTER (WHERE paid_at IS NULL OR paid_at + INTERVAL '7 days' <= NOW()) AS expired
-     FROM salary_records WHERE month = $1`, [month]);
+async function salaryMonthIsClosed(month, client) {
+    const res = client
+        ? await client.query(`SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status <> 'Paid') AS not_paid,
+                COUNT(*) FILTER (WHERE paid_at IS NULL OR paid_at + INTERVAL '7 days' <= NOW()) AS expired
+         FROM salary_records WHERE month = $1`, [month])
+        : await query(`SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status <> 'Paid') AS not_paid,
+                COUNT(*) FILTER (WHERE paid_at IS NULL OR paid_at + INTERVAL '7 days' <= NOW()) AS expired
+         FROM salary_records WHERE month = $1`, [month]);
     const row = res.rows[0];
     const total = num(row.total);
     if (!total)
@@ -657,56 +662,63 @@ export const staffService = {
      *  increment included — leaving the salary Pending. */
     async paySalary(id, body) {
         const data = parseBody(salaryPaySchema, body);
-        return withTransaction(async (client) => {
-            try {
-                // Row lock serializes concurrent pay requests — the second one blocks
-                // here until the first commits and then sees status = Paid → 409.
-                const locked = await client.query("SELECT * FROM salary_records WHERE id = $1 FOR UPDATE", [id]);
-                if (!locked.rowCount)
-                    throw new AppError(404, "Salary record not found");
-                const row = locked.rows[0];
-                if (await salaryMonthIsClosed(str(row.month))) {
-                    throw new AppError(409, "This payroll month is closed and cannot be modified");
-                }
-                if (row.status !== "Pending" && row.status !== "Submitted") {
-                    throw new AppError(409, "Salary is not Pending or Submitted — it cannot be paid again");
-                }
-                if (row.payment_ref != null) {
-                    throw new AppError(409, "Duplicate payment — this salary already has a payment reference");
-                }
-                if (num(row.net_salary) <= 0) {
-                    throw new AppError(422, "Cannot pay a salary with zero or negative net amount");
-                }
-                // Create the Accounts Payment on the SAME transaction/connection so the
-                // payment + its number-counter increment commit atomically with the
-                // salary transition (or roll back together).
-                const payment = await paymentsService.create({
-                    paymentDate: data.paymentDate,
-                    paymentType: "Salary Payment",
-                    paidTo: str(row.employee_name),
-                    amount: num(row.net_salary),
-                    paymentMode: data.paymentMode,
-                    category: "Salary",
-                    status: "Paid",
-                    createdBy: data.paidBy ?? "system",
-                }, client);
-                const updated = await client.query(`UPDATE salary_records SET
-             status = 'Paid', payment_ref = $2, payment_date = $3, paid_at = NOW()
-           WHERE id = $1 AND status IN ('Pending','Submitted') AND payment_ref IS NULL
-           RETURNING *`, [id, payment.paymentNo, data.paymentDate]);
-                if (!updated.rowCount) {
-                    // Concurrency safety net — the row changed under us despite the lock.
-                    throw new AppError(409, "Salary payment could not be applied");
-                }
-                const records = await this.enrichAttendance([mapSalary(updated.rows[0])], [str(row.month)]);
-                return records[0];
+        return withTransaction((client) => this.paySalaryInTx(client, id, {
+            paymentDate: typeof data.paymentDate === "string" ? data.paymentDate : new Date().toISOString().slice(0, 10),
+            paymentMode: typeof data.paymentMode === "string" ? data.paymentMode : "Cash",
+            paidBy: typeof data.paidBy === "string" ? data.paidBy : undefined,
+        }));
+    },
+    /** Transactional core of paySalary(), reused verbatim by the bulk endpoint so
+     *  both paths share the exact same lifecycle rules and Accounts payment. */
+    async paySalaryInTx(client, id, data) {
+        try {
+            // Row lock serializes concurrent pay requests — the second one blocks
+            // here until the first commits and then sees status = Paid → 409.
+            const locked = await client.query("SELECT * FROM salary_records WHERE id = $1 FOR UPDATE", [id]);
+            if (!locked.rowCount)
+                throw new AppError(404, "Salary record not found");
+            const row = locked.rows[0];
+            if (await salaryMonthIsClosed(str(row.month), client)) {
+                throw new AppError(409, "This payroll month is closed and cannot be modified");
             }
-            catch (err) {
-                // Roll back everything (payment + salary remain untouched).
-                rethrowIfAppError(err);
-                throw err;
+            if (row.status !== "Pending" && row.status !== "Submitted") {
+                throw new AppError(409, "Salary is not Pending or Submitted — it cannot be paid again");
             }
-        });
+            if (row.payment_ref != null) {
+                throw new AppError(409, "Duplicate payment — this salary already has a payment reference");
+            }
+            if (num(row.net_salary) <= 0) {
+                throw new AppError(422, "Cannot pay a salary with zero or negative net amount");
+            }
+            // Create the Accounts Payment on the SAME transaction/connection so the
+            // payment + its number-counter increment commit atomically with the
+            // salary transition (or roll back together).
+            const payment = await paymentsService.create({
+                paymentDate: data.paymentDate,
+                paymentType: "Salary Payment",
+                paidTo: str(row.employee_name),
+                amount: num(row.net_salary),
+                paymentMode: data.paymentMode,
+                category: "Salary",
+                status: "Paid",
+                createdBy: data.paidBy ?? "system",
+            }, client);
+            const updated = await client.query(`UPDATE salary_records SET
+           status = 'Paid', payment_ref = $2, payment_date = $3, paid_at = NOW()
+         WHERE id = $1 AND status IN ('Pending','Submitted') AND payment_ref IS NULL
+         RETURNING *`, [id, payment.paymentNo, data.paymentDate]);
+            if (!updated.rowCount) {
+                // Concurrency safety net — the row changed under us despite the lock.
+                throw new AppError(409, "Salary payment could not be applied");
+            }
+            const records = await this.enrichAttendance([mapSalary(updated.rows[0])], [str(row.month)]);
+            return records[0];
+        }
+        catch (err) {
+            // Roll back everything (payment + salary remain untouched).
+            rethrowIfAppError(err);
+            throw err;
+        }
     },
     /** PATCH /salaries/:id/status. Only target "Pending" is accepted by the route,
      *  but that single operation means different things depending on the current
@@ -720,12 +732,17 @@ export const staffService = {
      *  Pending → Paid remains reserved for paySalary(). A closed payroll month
      *  rejects every transition. */
     async updateSalaryStatus(id) {
-        const existing = await query("SELECT * FROM salary_records WHERE id = $1", [id]);
+        return withTransaction((client) => this.updateSalaryStatusInTx(client, id));
+    },
+    /** Transactional core of updateSalaryStatus(), reused verbatim by the bulk
+     *  endpoint so Mark-Unpaid / un-submit obey the exact same rules. */
+    async updateSalaryStatusInTx(client, id) {
+        const existing = await client.query("SELECT * FROM salary_records WHERE id = $1 FOR UPDATE", [id]);
         if (!existing.rowCount)
             throw new AppError(404, "Salary record not found");
         const row = existing.rows[0];
         const month = str(row.month);
-        if (await salaryMonthIsClosed(month)) {
+        if (await salaryMonthIsClosed(month, client)) {
             throw new AppError(409, "This payroll month is closed and cannot be modified");
         }
         if (row.status === "Pending") {
@@ -733,7 +750,7 @@ export const staffService = {
             return records[0];
         }
         if (row.status === "Submitted") {
-            const updated = await query(`UPDATE salary_records SET status = 'Pending', submitted_at = NULL, submitted_by = NULL
+            const updated = await client.query(`UPDATE salary_records SET status = 'Pending', submitted_at = NULL, submitted_by = NULL
          WHERE id = $1 AND status = 'Submitted'
          RETURNING *`, [id]);
             if (!updated.rowCount) {
@@ -747,7 +764,7 @@ export const staffService = {
             if (correctionWindowExpired(row.paid_at == null ? null : String(row.paid_at))) {
                 throw new AppError(409, "Correction window expired — paid salaries are permanently locked 7 calendar days after payment");
             }
-            const updated = await query(`UPDATE salary_records SET
+            const updated = await client.query(`UPDATE salary_records SET
            status = 'Pending', payment_ref = NULL, payment_date = NULL, paid_at = NULL
          WHERE id = $1 AND status = 'Paid' AND paid_at = $2::timestamptz
          RETURNING *`, [id, row.paid_at]);
@@ -758,6 +775,93 @@ export const staffService = {
             return records[0];
         }
         throw new AppError(409, "Salary record is not in a supported lifecycle state and cannot be modified");
+    },
+    /** Bulk lifecycle transition (POST /salaries/bulk-status). Applies the SAME
+     *  transition to many records inside ONE transaction, using the identical
+     *  per-record business rules as the single-record endpoints:
+     *    - "Paid"    → paySalaryInTx() per record (Pending/Submitted only,
+     *                  per-employee Accounts payment, no closed months).
+     *    - "Pending" → updateSalaryStatusInTx() per record (un-submit or
+     *                  Mark-Unpaid inside the 7-day correction window).
+     *  Every record is pre-validated before ANY write; the first violation
+     *  aborts the whole batch atomically. */
+    async bulkUpdateSalaryStatus(ids, body) {
+        const data = parseBody(salaryBulkStatusSchema, body);
+        if (ids.length === 0) {
+            throw new AppError(400, "At least one salary record id is required");
+        }
+        return withTransaction(async (client) => {
+            // Lock every requested row up-front so the batch is serialized against
+            // concurrent single-record payments and the checks below are stable.
+            const locked = await client.query("SELECT * FROM salary_records WHERE id::text = ANY($1) ORDER BY employee_name FOR UPDATE", [ids]);
+            const byId = new Map();
+            for (const row of locked.rows)
+                byId.set(str(row.id), row);
+            const missing = ids.filter((id) => !byId.has(id));
+            if (missing.length > 0) {
+                throw new AppError(404, `Salary records not found: ${missing.join(", ")}`);
+            }
+            const target = data.status;
+            // ---- Pre-validate every record (read-only pass, no writes yet). ----
+            const failures = [];
+            for (const id of ids) {
+                const row = byId.get(id);
+                const month = str(row.month);
+                if (await salaryMonthIsClosed(month, client)) {
+                    failures.push({ id, reason: `payroll month ${month} is closed` });
+                    continue;
+                }
+                if (target === "Paid") {
+                    if (row.status !== "Pending" && row.status !== "Submitted") {
+                        failures.push({ id, reason: "salary is already paid and cannot be paid again" });
+                        continue;
+                    }
+                    if (row.payment_ref != null) {
+                        failures.push({ id, reason: "salary already has a payment reference" });
+                        continue;
+                    }
+                    if (num(row.net_salary) <= 0) {
+                        failures.push({ id, reason: "net amount is zero or negative and cannot be paid" });
+                        continue;
+                    }
+                }
+                else {
+                    // target "Pending"
+                    if (row.status === "Paid") {
+                        if (correctionWindowExpired(row.paid_at == null ? null : String(row.paid_at))) {
+                            failures.push({
+                                id,
+                                reason: "correction window expired — paid salaries are permanently locked 7 calendar days after payment",
+                            });
+                        }
+                    }
+                }
+            }
+            if (failures.length > 0) {
+                const first = failures[0];
+                const names = locked.rows
+                    .filter((r) => failures.some((f) => f.id === str(r.id)))
+                    .map((r) => str(r.employee_name));
+                throw new AppError(409, `Cannot update ${names.length} of the selected salaries (${names.slice(0, 3).join(", ")}${names.length > 3 ? "…" : ""}): ${first.reason}`);
+            }
+            // ---- Apply the shared per-record rules in the same transaction. ----
+            const updated = [];
+            for (const id of ids) {
+                if (target === "Paid") {
+                    updated.push(await this.paySalaryInTx(client, id, {
+                        paymentDate: typeof data.paymentDate === "string"
+                            ? data.paymentDate
+                            : new Date().toISOString().slice(0, 10),
+                        paymentMode: typeof data.paymentMode === "string" ? data.paymentMode : "Cash",
+                        paidBy: typeof data.paidBy === "string" ? data.paidBy : undefined,
+                    }));
+                }
+                else {
+                    updated.push(await this.updateSalaryStatusInTx(client, id));
+                }
+            }
+            return { updated, skipped: [] };
+        });
     },
     async deleteSalary(id) {
         const existing = await query("SELECT status, month FROM salary_records WHERE id = $1", [id]);

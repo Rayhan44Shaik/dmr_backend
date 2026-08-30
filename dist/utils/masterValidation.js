@@ -64,6 +64,12 @@ export function validateShopFields(raw) {
         errors.push({ field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
     if (isMissing(village))
         errors.push({ field: "village", message: "Village is required." });
+    const email = str(raw.email).trim();
+    if (isMissing(email))
+        errors.push({ field: "email", message: "Email ID is required." });
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        errors.push({ field: "email", message: "Please enter a valid email address." });
+    }
     if (!isMissing(raw.openingBalance) && !Number.isFinite(Number(raw.openingBalance))) {
         errors.push({ field: "openingBalance", message: "Opening Balance must be a valid number." });
     }

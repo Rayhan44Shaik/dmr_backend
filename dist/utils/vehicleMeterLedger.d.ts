@@ -61,6 +61,14 @@ export declare function validateVehicleMeter(client: Client, opts: {
     exclude?: ExcludeSpec;
     context: string;
 }): Promise<void>;
+/**
+ * Latest accepted meter event for EVERY vehicle in one query (DISTINCT ON the
+ * same authoritative ordering as getLatestVehicleMeter). Backs the Upcoming
+ * Service calculation so the frontend receives one batch from the database
+ * instead of N per-vehicle calls — there is exactly ONE meter history and it
+ * lives here. Read-only; reuses the vehicle_meter_events view.
+ */
+export declare function listLatestVehicleMeters(): Promise<MeterEvent[]>;
 /** Full ordered timeline for a vehicle — backs the Vehicle History UI. */
 export declare function listVehicleMeterHistory(vehicleId: number): Promise<Array<MeterEvent & {
     diffFromPrevious: number | null;

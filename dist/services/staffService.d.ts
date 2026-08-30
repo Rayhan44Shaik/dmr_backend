@@ -1,3 +1,4 @@
+import pg from "pg";
 import type { AdvanceLoan, AttendanceRecord, DutyAssignment, LeaveRequest, SalaryRecord } from "../types/models.js";
 export declare const staffService: {
     listDuties(fromDate?: string, toDate?: string, department?: string): Promise<DutyAssignment[]>;
@@ -108,6 +109,13 @@ export declare const staffService: {
      *  payment linkage. Any failure rolls everything back — payment and counter
      *  increment included — leaving the salary Pending. */
     paySalary(id: string, body: unknown): Promise<SalaryRecord>;
+    /** Transactional core of paySalary(), reused verbatim by the bulk endpoint so
+     *  both paths share the exact same lifecycle rules and Accounts payment. */
+    paySalaryInTx(client: pg.PoolClient, id: string, data: {
+        paymentDate: string;
+        paymentMode: string;
+        paidBy?: string;
+    }): Promise<SalaryRecord>;
     /** PATCH /salaries/:id/status. Only target "Pending" is accepted by the route,
      *  but that single operation means different things depending on the current
      *  record state:
@@ -120,6 +128,25 @@ export declare const staffService: {
      *  Pending → Paid remains reserved for paySalary(). A closed payroll month
      *  rejects every transition. */
     updateSalaryStatus(id: string): Promise<SalaryRecord>;
+    /** Transactional core of updateSalaryStatus(), reused verbatim by the bulk
+     *  endpoint so Mark-Unpaid / un-submit obey the exact same rules. */
+    updateSalaryStatusInTx(client: pg.PoolClient, id: string): Promise<SalaryRecord>;
+    /** Bulk lifecycle transition (POST /salaries/bulk-status). Applies the SAME
+     *  transition to many records inside ONE transaction, using the identical
+     *  per-record business rules as the single-record endpoints:
+     *    - "Paid"    → paySalaryInTx() per record (Pending/Submitted only,
+     *                  per-employee Accounts payment, no closed months).
+     *    - "Pending" → updateSalaryStatusInTx() per record (un-submit or
+     *                  Mark-Unpaid inside the 7-day correction window).
+     *  Every record is pre-validated before ANY write; the first violation
+     *  aborts the whole batch atomically. */
+    bulkUpdateSalaryStatus(ids: string[], body: unknown): Promise<{
+        updated: SalaryRecord[];
+        skipped: {
+            id: string;
+            reason: string;
+        }[];
+    }>;
     deleteSalary(id: string): Promise<{
         id: string;
         deleted: boolean;
