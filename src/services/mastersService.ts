@@ -84,12 +84,18 @@ export function mapShop(row: Record<string, unknown>): Shop {
   return {
     id: num(row.id),
     shopNo: num(row.shop_no),
+    shopNumber: str(row.shop_number),
     shopName: str(row.shop_name),
     ownerName: str(row.owner_name),
     phoneNumber: str(row.phone_number),
+    secondaryPhoneNumber: row.secondary_phone_number == null || str(row.secondary_phone_number).trim() === "" ? null : str(row.secondary_phone_number).trim(),
     email: row.email == null || str(row.email).trim() === "" ? null : str(row.email).trim(),
-    village: str(row.village),
+    city: str(row.city),
     address: row.address == null ? null : str(row.address),
+    latitude: row.latitude == null ? null : num(row.latitude),
+    longitude: row.longitude == null ? null : num(row.longitude),
+    paperRate: num(row.paper_rate ?? 0),
+    associationType: str(row.association_type ?? ""),
     status: str(row.status) as Shop["status"],
     openingBalance: num(row.opening_balance),
     currentBalance: num(row.current_balance),
@@ -128,6 +134,7 @@ const UNIQUE_CHECK: Record<
   vehicle: { table: "vehicles", column: "vehicle_number", label: "Vehicle number" },
   farm: { table: "farms", column: "farm_name", label: "Farm" },
   shop: { table: "shops", column: "shop_name", label: "Shop" },
+  shopNumber: { table: "shops", column: "shop_number", label: "Shop Number" },
   bank: { table: "banks", column: "bank_name", label: "Bank" },
   birdType: { table: "bird_types", column: "bird_type", label: "Bird type" },
 };
@@ -505,22 +512,30 @@ export const mastersService = {
       await assertUnique("shop", body.shopName, body.id);
       const result = await query(
         `UPDATE shops SET
-          shop_no=$2, shop_name=$3, owner_name=$4, phone_number=$5,
-          village=$6, address=$7, status=$8, opening_balance=$9, email=$10,
-          current_balance = $9 + COALESCE(
+          shop_no=$2, shop_number=$3, shop_name=$4, owner_name=$5, phone_number=$6,
+          secondary_phone_number=$7, email=$8, city=$9, address=$10, latitude=$11,
+          longitude=$12, paper_rate=$13, association_type=$14, status=$15,
+          opening_balance=$16,
+          current_balance = $16 + COALESCE(
             (SELECT SUM(debit) - SUM(credit) FROM shop_ledger WHERE shop_id = $1), 0)
          WHERE id=$1 RETURNING *`,
         [
           body.id,
           body.shopNo,
+          body.shopNumber,
           body.shopName,
           body.ownerName ?? "",
           body.phoneNumber ?? "",
-          body.village ?? "",
+          body.secondaryPhoneNumber ?? null,
+          str(body.email ?? "").trim(),
+          body.city ?? "",
           body.address ?? null,
+          body.latitude ?? null,
+          body.longitude ?? null,
+          body.paperRate ?? 0,
+          body.associationType ?? "",
           body.status ?? "Active",
           body.openingBalance ?? 0,
-          str(body.email ?? "").trim(),
         ]
       );
       return mapShop(result.rows[0]);
@@ -532,19 +547,27 @@ export const mastersService = {
     await assertUnique("shop", body.shopName);
     const result = await query(
       `INSERT INTO shops (
-         shop_no, shop_name, owner_name, phone_number, village, address, status,
-         opening_balance, current_balance, email
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9) RETURNING *`,
+         shop_no, shop_number, shop_name, owner_name, phone_number,
+         secondary_phone_number, email, city, address, latitude, longitude,
+         paper_rate, association_type, status,
+         opening_balance, current_balance
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`,
       [
         body.shopNo ?? nextNo.rows[0].n,
+        body.shopNumber,
         body.shopName,
         body.ownerName ?? "",
         body.phoneNumber ?? "",
-        body.village ?? "",
+        body.secondaryPhoneNumber ?? null,
+        str(body.email ?? "").trim(),
+        body.city ?? "",
         body.address ?? null,
+        body.latitude ?? null,
+        body.longitude ?? null,
+        body.paperRate ?? 0,
+        body.associationType ?? "",
         body.status ?? "Active",
         body.openingBalance ?? 0,
-        str(body.email ?? "").trim(),
       ]
     );
     return mapShop(result.rows[0]);
@@ -601,19 +624,27 @@ export const mastersService = {
         );
         const result = await client.query(
           `INSERT INTO shops (
-             shop_no, shop_name, owner_name, phone_number, village, address,
-             status, opening_balance, current_balance, email
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9) RETURNING *`,
+             shop_no, shop_number, shop_name, owner_name, phone_number,
+             secondary_phone_number, email, city, address, latitude, longitude,
+             paper_rate, association_type, status,
+             opening_balance, current_balance
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`,
           [
             input.shopNo ?? no.rows[0].n,
+            input.shopNumber ?? `SHOP-${String(no.rows[0].n).padStart(6, "0")}`,
             shopName,
             str(input.ownerName).trim(),
             str(input.phoneNumber).trim(),
-            str(input.village).trim(),
+            str(input.secondaryPhoneNumber ?? "").trim() || null,
+            str(input.email ?? "").trim(),
+            str(input.city ?? "").trim(),
             input.address ? str(input.address).trim() : null,
+            input.latitude ?? null,
+            input.longitude ?? null,
+            num(input.paperRate ?? 0),
+            str(input.associationType ?? "").trim(),
             input.status ?? "Active",
             num(input.openingBalance ?? 0),
-            str(input.email ?? "").trim(),
           ]
         );
         created.push(mapShop(result.rows[0]));

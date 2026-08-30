@@ -61,12 +61,18 @@ export interface Farm {
 export interface Shop {
   id: number;
   shopNo: number;
+  shopNumber: string;
   shopName: string;
   ownerName: string;
   phoneNumber: string;
+  secondaryPhoneNumber?: string | null;
   email?: string | null;
-  village: string;
+  city: string;
   address?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  paperRate: number;
+  associationType: string;
   status: ActiveStatus;
   openingBalance: number;
   currentBalance: number;

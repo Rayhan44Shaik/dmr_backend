@@ -58,7 +58,7 @@ export function validateShopFields(raw: Record<string, unknown>): FieldError[] {
   const shopName = str(raw.shopName ?? raw.shop_name).trim();
   const ownerName = str(raw.ownerName ?? raw.owner_name).trim();
   const phoneNumber = str(raw.phoneNumber ?? raw.phone ?? raw.phone_number).trim();
-  const village = str(raw.village).trim();
+  const city = str(raw.city).trim();
 
   if (isMissing(shopName)) errors.push({ field: "shopName", message: "Shop Name is required." });
   else if (shopName.length < 3) errors.push({ field: "shopName", message: "Shop Name must contain at least 3 characters." });
@@ -66,12 +66,42 @@ export function validateShopFields(raw: Record<string, unknown>): FieldError[] {
   else if (ownerName.length < 3) errors.push({ field: "ownerName", message: "Owner Name must contain at least 3 characters." });
   if (isMissing(phoneNumber)) errors.push({ field: "phoneNumber", message: "Mobile Number is required." });
   else if (!/^[0-9]{10}$/.test(phoneNumber)) errors.push({ field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
-  if (isMissing(village)) errors.push({ field: "village", message: "Village is required." });
+  if (isMissing(city)) errors.push({ field: "city", message: "City is required." });
+  
   const email = str(raw.email).trim();
-  if (isMissing(email)) errors.push({ field: "email", message: "Email ID is required." });
-  else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (!isMissing(email) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     errors.push({ field: "email", message: "Please enter a valid email address." });
   }
+  
+  const secondaryPhone = str(raw.secondaryPhoneNumber ?? raw.secondary_phone_number).trim();
+  if (!isMissing(secondaryPhone) && !/^[0-9]{10}$/.test(secondaryPhone)) {
+    errors.push({ field: "secondaryPhoneNumber", message: "Secondary Mobile Number must be exactly 10 digits." });
+  }
+
+  const latitude = raw.latitude;
+  if (!isMissing(latitude)) {
+    const lat = Number(latitude);
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+      errors.push({ field: "latitude", message: "Latitude must be between -90 and 90." });
+    }
+  }
+
+  const longitude = raw.longitude;
+  if (!isMissing(longitude)) {
+    const lon = Number(longitude);
+    if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
+      errors.push({ field: "longitude", message: "Longitude must be between -180 and 180." });
+    }
+  }
+
+  const paperRate = raw.paperRate;
+  if (!isMissing(paperRate)) {
+    const rate = Number(paperRate);
+    if (!Number.isInteger(rate) || rate < 1 || rate > 30) {
+      errors.push({ field: "paperRate", message: "Paper Rate must be an integer between 1 and 30." });
+    }
+  }
+
   if (!isMissing(raw.openingBalance) && !Number.isFinite(Number(raw.openingBalance))) {
     errors.push({ field: "openingBalance", message: "Opening Balance must be a valid number." });
   }

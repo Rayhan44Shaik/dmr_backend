@@ -34,7 +34,7 @@ export const deliveryWhatsAppService = {
               e.failure_reason, e.created_at, e.updated_at,
               e.send_count, e.attempt_count,
               d.shop_id, d.shop_name, d.sale_no,
-              s.whatsapp_number AS shop_whatsapp
+              s.phone_number AS shop_whatsapp
          FROM trip_deliveries d
          LEFT JOIN public.trip_delivery_whatsapp e
            ON e.delivery_id = d.id AND e.trip_id = d.trip_id
@@ -116,14 +116,14 @@ export const deliveryWhatsAppService = {
     }
 
     const shopRes = await query(
-      `SELECT id, shop_name, whatsapp_number FROM shops WHERE id = $1`,
+      `SELECT id, shop_name, phone_number FROM shops WHERE id = $1`,
       [delivery.shop_id]
     );
     if (!shopRes.rowCount) {
       throw new AppError(422, "Shop is missing for this delivery.");
     }
     const shop = shopRes.rows[0];
-    const recipient = String(shop.whatsapp_number ?? "").trim();
+    const recipient = String(shop.phone_number ?? "").trim();
     if (!recipient) {
       throw new AppError(422, "Shop WhatsApp number is missing.");
     }

@@ -14,6 +14,8 @@ import { shopRatesService } from "../services/shopRatesService.js";
 import { shopSalesService } from "../services/shopSalesService.js";
 import { shopLedgerService } from "../services/shopLedgerService.js";
 import { tripsService } from "../services/tripsService.js";
+import { mortalityAnalysisService } from "../services/mortalityAnalysisService.js";
+import { parseMortalityAnalysisQuery } from "../validation/mortality.js";
 import { parsePagination } from "../utils/pagination.js";
 
 export const operationsRouter = Router();
@@ -198,6 +200,40 @@ operationsRouter.get(
   "/trip-list/:id",
   asyncHandler(async (req, res) => {
     res.json(await tripsService.getCompletedById(Number(req.params.id)));
+  })
+);
+
+// ── Mortality & Weight Loss Analysis (read-only, completed trips only) ──
+// One round trip returns rows + KPIs + dropdown options. Filtering, sorting and
+// pagination are all server-side. Eligibility (status='Completed' AND
+// deleted=FALSE) is enforced in the service, never in the client, so Draft /
+// Pending / deleted trips can never leak into loss analysis.
+operationsRouter.get(
+  "/mortality-analysis",
+  asyncHandler(async (req, res) => {
+    // Rejects unknown/invalid params with 400 — a typo must never look like
+    // an empty result set.
+    const filters = parseMortalityAnalysisQuery(req.query);
+    res.json(
+      await mortalityAnalysisService.list(filters, {
+        page: filters.page,
+        limit: filters.limit,
+        offset: (filters.page - 1) * filters.limit,
+      })
+    );
+  })
+);
+
+// Shop-level detail for a single expanded row. Called lazily on expand only —
+// the table itself needs just the shop COUNT, which is already on `trips`.
+operationsRouter.get(
+  "/mortality-analysis/:tripId/deliveries",
+  asyncHandler(async (req, res) => {
+    const tripId = Number(req.params.tripId);
+    if (!Number.isInteger(tripId) || tripId <= 0) {
+      throw new AppError(400, "Invalid trip id");
+    }
+    res.json(await mortalityAnalysisService.deliveriesForTrip(tripId));
   })
 );
 
