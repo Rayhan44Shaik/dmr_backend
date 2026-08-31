@@ -26,7 +26,12 @@ END $$;
 -- Create unique index on shop_name (case-insensitive)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_shops_shop_name_unique ON shops(LOWER(shop_name));
 
--- Add check constraint for association_type (must be one of the 4 allowed values)
+-- Add check constraint for association_type (must be one of the 4 allowed values,
+-- or blank/NULL for legacy shop records created before the redesign).
 ALTER TABLE shops
   ADD CONSTRAINT chk_shops_association_type
-  CHECK (association_type IN ('Vencob Vij', 'Vencob Gun', 'Ass Vij', 'Ass Gun'));
+  CHECK (
+    association_type IS NULL
+    OR association_type = ''
+    OR association_type IN ('Vencob Vij', 'Vencob Gun', 'Ass Vij', 'Ass Gun')
+  );

@@ -113,20 +113,60 @@ const suites: SuiteOptions[] = [
       shopName: `Shop ${n}`,
       ownerName: `Owner ${n}`,
       phoneNumber: `9000000${String(n).padStart(3, "0")}`,
-      village: "Village",
+      city: "Bhimavaram",
       address: "Address",
       email: `shop${n}@example.com`,
+      paperRate: 5,
+      associationType: "Vencob Vij",
       status: "Active",
     }),
-    invalidTypeRow: { shopName: "Type Test", village: { not: "a string" }, email: "type@example.com" },
-    invalidStatusRow: { shopName: "Status Test", status: "Bogus", email: "status@example.com" },
-    invalidPhoneRow: { shopName: "Phone Test", phoneNumber: "not-a-phone", email: "phone@example.com" },
+    invalidTypeRow: {
+      shopName: "Type Test",
+      ownerName: "Type Owner",
+      phoneNumber: "9000009999",
+      city: { not: "a string" },
+      associationType: "Vencob Vij",
+      email: "type@example.com",
+    },
+    invalidStatusRow: {
+      shopName: "Status Test",
+      ownerName: "Status Owner",
+      phoneNumber: "9000008888",
+      city: "Bhimavaram",
+      associationType: "Vencob Vij",
+      status: "Bogus",
+      email: "status@example.com",
+    },
+    invalidPhoneRow: {
+      shopName: "Phone Test",
+      ownerName: "Phone Owner",
+      phoneNumber: "not-a-phone",
+      city: "Bhimavaram",
+      associationType: "Vencob Vij",
+      email: "phone@example.com",
+    },
     invalidDateRow: null,
-    dbViolationRow: { shopName: "X".repeat(300), email: "long@example.com" }, // VARCHAR(200) → 22001
+    dbViolationRow: {
+      shopName: "X".repeat(300),
+      ownerName: "Overflow Owner",
+      phoneNumber: "9000007777",
+      city: "Bhimavaram",
+      associationType: "Vencob Vij",
+      email: "long@example.com",
+    }, // VARCHAR(20/200) → 22001
     // openingBalance is a real, persisted shop column (masterValidation.ts) —
     // use a field that is genuinely never persisted to test the "ignores
     // unknown fields" contract.
-    legacyRow: { shopName: "Legacy Shop", email: "legacy@example.com", closingBalance: 8888, oldSpreadsheetRef: "XYZ-1" },
+    legacyRow: {
+      shopName: "Legacy Shop",
+      ownerName: "Legacy Owner",
+      phoneNumber: "9000006666",
+      city: "Bhimavaram",
+      associationType: "Vencob Vij",
+      email: "legacy@example.com",
+      closingBalance: 8888,
+      oldSpreadsheetRef: "XYZ-1",
+    },
     numericStringRow: null,
     numericStringExpect: () => {},
   },
@@ -450,8 +490,11 @@ for (const s of suites) {
     it("17. ignores unknown/obsolete fields instead of persisting them", async () => {
       const body = await bulkOk([s.legacyRow], s.endpoint);
       const row = body.created[0];
+      // Any key on the legacy row that is NOT a legitimate input field is
+      // obsolete junk and must never be persisted.
+      const validKeys = new Set(Object.keys(s.makeValid(1)));
       const legacyKeys = Object.keys(s.legacyRow).filter(
-        (k) => k !== s.requiredField && k !== "email"
+        (k) => k !== s.requiredField && k !== "email" && !validKeys.has(k)
       );
       for (const key of legacyKeys) {
         assert.ok(!(key in row), `obsolete field ${key} must not be persisted`);

@@ -47,6 +47,6 @@ BEGIN
   ) THEN
     CREATE TRIGGER trg_trip_delivery_whatsapp_updated_at
     BEFORE UPDATE ON public.trip_delivery_whatsapp
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
   END IF;
 END $$;

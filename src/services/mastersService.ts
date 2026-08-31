@@ -509,13 +509,16 @@ export const mastersService = {
     assertValid(validateShopFields(body));
 
     if (body.id) {
+      // shop_number is immutable and NOT NULL — when the caller omits it (e.g.
+      // a partial edit), keep whatever is already persisted via COALESCE.
+      const shopNumberUpdate = str(body.shopNumber ?? "").trim() || null;
       await assertUnique("shop", body.shopName, body.id);
-      if (body.shopNumber) {
-        await assertUnique("shopNumber", body.shopNumber, body.id);
+      if (shopNumberUpdate) {
+        await assertUnique("shopNumber", shopNumberUpdate, body.id);
       }
       const result = await query(
         `UPDATE shops SET
-          shop_no=$2, shop_number=$3, shop_name=$4, owner_name=$5, phone_number=$6,
+          shop_no=$2, shop_number=COALESCE($3, shop_number), shop_name=$4, owner_name=$5, phone_number=$6,
           secondary_phone_number=$7, email=$8, city=$9, address=$10, latitude=$11,
           longitude=$12, paper_rate=$13, association_type=$14, status=$15,
           opening_balance=$16,
@@ -525,7 +528,7 @@ export const mastersService = {
         [
           body.id,
           body.shopNo,
-          body.shopNumber,
+          shopNumberUpdate,
           body.shopName,
           body.ownerName ?? "",
           body.phoneNumber ?? "",
@@ -547,10 +550,14 @@ export const mastersService = {
     const nextNo = await query<{ n: number }>(
       `SELECT COALESCE(MAX(shop_no), 0) + 1 AS n FROM shops`
     );
+    const shopNo = body.shopNo ?? nextNo.rows[0].n;
+    // shop_number is NOT NULL and auto-generated when the caller (e.g. the Shop
+    // form, which shows it as read-only) does not supply one.
+    const shopNumber =
+      str(body.shopNumber ?? "").trim() ||
+      `SHOP-${String(shopNo).padStart(6, "0")}`;
     await assertUnique("shop", body.shopName);
-    if (body.shopNumber) {
-      await assertUnique("shopNumber", body.shopNumber);
-    }
+    await assertUnique("shopNumber", shopNumber);
     const result = await query(
       `INSERT INTO shops (
          shop_no, shop_number, shop_name, owner_name, phone_number,
@@ -559,8 +566,8 @@ export const mastersService = {
          opening_balance, current_balance
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`,
       [
-        body.shopNo ?? nextNo.rows[0].n,
-        body.shopNumber,
+        shopNo,
+        shopNumber,
         body.shopName,
         body.ownerName ?? "",
         body.phoneNumber ?? "",

@@ -75,7 +75,9 @@ const SHOP_CONFIG: KindConfig<NormalizedShopRow, Shop> = {
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`,
       [
         no,
-        row.shopNumber,
+        // shop_number is NOT NULL — auto-generate when the imported row omits it,
+        // mirroring the singular create endpoint.
+        row.shopNumber.trim() || `SHOP-${String(no).padStart(6, "0")}`,
         row.shopName,
         row.ownerName,
         row.phoneNumber,
