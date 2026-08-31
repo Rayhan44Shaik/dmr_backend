@@ -136,7 +136,7 @@ export const mobileTripsService = {
         id: s.id,
         shopNo: s.shopNo,
         shopName: s.shopName,
-        village: s.village,
+        city: s.city,
         status: s.status,
       })),
       birdTypes: birdTypes.map((b) => ({

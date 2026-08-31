@@ -68,9 +68,28 @@ const SHOP_CONFIG: KindConfig<NormalizedShopRow, Shop> = {
   insert: (client, row, no) =>
     client.query(
       `INSERT INTO shops (
-         shop_no, shop_name, owner_name, phone_number, village, address, status, email
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [no, row.shopName, row.ownerName, row.phoneNumber, row.village, row.address, row.status, row.email]
+         shop_no, shop_number, shop_name, owner_name, phone_number,
+         secondary_phone_number, email, city, address, latitude, longitude,
+         paper_rate, association_type, status,
+         opening_balance, current_balance
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`,
+      [
+        no,
+        row.shopNumber,
+        row.shopName,
+        row.ownerName,
+        row.phoneNumber,
+        row.secondaryPhoneNumber,
+        row.email,
+        row.city,
+        row.address,
+        row.latitude,
+        row.longitude,
+        row.paperRate,
+        row.associationType,
+        row.status,
+        row.openingBalance,
+      ]
     ),
   map: mapShop,
 };

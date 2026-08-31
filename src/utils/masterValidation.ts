@@ -21,8 +21,10 @@ export const EMPLOYEE_DEPARTMENTS = [
   "Supervisor",
 ];
 
-export const ACTIVE_STATUSES = ["Active", "Inactive"];
-export const EMPLOYEE_STATUSES = ["Active", "Inactive", "Suspended"];
+export const ACTIVE_STATUSES = ["Active", "Inactive"] as const;
+export const EMPLOYEE_STATUSES = ["Active", "Inactive", "Suspended"] as const;
+
+export const ASSOCIATION_TYPES = ["Vencob Vij", "Vencob Gun", "Ass Vij", "Ass Gun"] as const;
 
 export type FieldError = { field: string; message: string };
 
@@ -102,10 +104,17 @@ export function validateShopFields(raw: Record<string, unknown>): FieldError[] {
     }
   }
 
+  const associationType = str(raw.associationType ?? raw.association_type).trim();
+  if (isMissing(associationType)) {
+    errors.push({ field: "associationType", message: "Association Type is required." });
+  } else if (!ASSOCIATION_TYPES.includes(associationType as typeof ASSOCIATION_TYPES[number])) {
+    errors.push({ field: "associationType", message: `Association Type must be one of: ${ASSOCIATION_TYPES.join(", ")}` });
+  }
+
   if (!isMissing(raw.openingBalance) && !Number.isFinite(Number(raw.openingBalance))) {
     errors.push({ field: "openingBalance", message: "Opening Balance must be a valid number." });
   }
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;
@@ -128,7 +137,7 @@ export function validateFarmFields(raw: Record<string, unknown>): FieldError[] {
   else if (!/^[0-9]{10}$/.test(phoneNumber)) errors.push({ field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
   if (isMissing(village)) errors.push({ field: "village", message: "Village is required." });
   if (!isPositiveNumber(capacity)) errors.push({ field: "capacity", message: "Bird Capacity must be a positive number." });
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;
@@ -179,7 +188,7 @@ export function validateVehicleFields(raw: Record<string, unknown>): FieldError[
   for (const field of VEHICLE_DATE_FIELDS) {
     if (!isValidDateInput(raw[field])) errors.push({ field, message: `${field} must be a valid date (YYYY-MM-DD).` });
   }
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;
@@ -223,7 +232,7 @@ export function validateEmployeeFields(raw: Record<string, unknown>): FieldError
   if (!isValidDateInput(raw.joiningDate)) {
     errors.push({ field: "joiningDate", message: "Joining Date must be a valid date (YYYY-MM-DD)." });
   }
-  if (!isMissing(raw.status) && !EMPLOYEE_STATUSES.includes(String(raw.status).trim())) {
+  if (!isMissing(raw.status) && !EMPLOYEE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive" | "Suspended")) {
     errors.push({ field: "status", message: "Status must be Active, Inactive or Suspended." });
   }
   return errors;
@@ -238,7 +247,7 @@ export function validateBirdTypeFields(raw: Record<string, unknown>): FieldError
   if (!isPositiveNumber(averageWeight)) {
     errors.push({ field: "averageWeight", message: "Average Weight must be a positive number." });
   }
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;
@@ -249,7 +258,7 @@ export function validateRouteFields(raw: Record<string, unknown>): FieldError[] 
   const routeName = str(raw.routeName ?? raw.route_name).trim();
 
   if (isMissing(routeName)) errors.push({ field: "routeName", message: "Route name is required." });
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;

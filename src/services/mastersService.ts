@@ -510,6 +510,9 @@ export const mastersService = {
 
     if (body.id) {
       await assertUnique("shop", body.shopName, body.id);
+      if (body.shopNumber) {
+        await assertUnique("shopNumber", body.shopNumber, body.id);
+      }
       const result = await query(
         `UPDATE shops SET
           shop_no=$2, shop_number=$3, shop_name=$4, owner_name=$5, phone_number=$6,
@@ -545,6 +548,9 @@ export const mastersService = {
       `SELECT COALESCE(MAX(shop_no), 0) + 1 AS n FROM shops`
     );
     await assertUnique("shop", body.shopName);
+    if (body.shopNumber) {
+      await assertUnique("shopNumber", body.shopNumber);
+    }
     const result = await query(
       `INSERT INTO shops (
          shop_no, shop_number, shop_name, owner_name, phone_number,
@@ -598,26 +604,79 @@ export const mastersService = {
     }
 
     const errors: BulkRowError[] = [];
+    const seenShopNumbers = new Set<string>();
+    const seenShopNames = new Set<string>();
+    
     inputs.forEach((raw, index) => {
       const row = index + 1;
       validateShopFields(raw).forEach(({ field, message }) =>
         errors.push({ row, field, message })
       );
+      
+      // Check for duplicate shopNumber within the batch
+      const shopNumber = str(raw.shopNumber ?? "").trim();
+      if (shopNumber) {
+        const key = shopNumber.toLowerCase();
+        if (seenShopNumbers.has(key)) {
+          errors.push({ row, field: "shopNumber", message: `Duplicate Shop Number "${shopNumber}" within the uploaded batch.` });
+        } else {
+          seenShopNumbers.add(key);
+        }
+      }
+      
+      // Check for duplicate shopName within the batch
+      const shopName = str(raw.shopName).trim();
+      const nameKey = shopName.toLowerCase();
+      if (seenShopNames.has(nameKey)) {
+        errors.push({ row, field: "shopName", message: `Duplicate Shop Name "${shopName}" within the uploaded batch.` });
+      } else {
+        seenShopNames.add(nameKey);
+      }
     });
     if (errors.length) bulkValidationFailed(errors);
 
     return withTransaction(async (client) => {
       const created: Shop[] = [];
+      
+      // Check for conflicts with existing database records
+      const shopNumbersToCheck = Array.from(seenShopNumbers);
+      if (shopNumbersToCheck.length > 0) {
+        const existing = await client.query(
+          `SELECT shop_number FROM shops WHERE LOWER(shop_number) = ANY($1::text[])`,
+          [shopNumbersToCheck]
+        );
+        if (existing.rowCount) {
+          const existingNumbers = new Set(existing.rows.map(r => r.shop_number.toLowerCase()));
+          inputs.forEach((raw, index) => {
+            const row = index + 1;
+            const shopNumber = str(raw.shopNumber ?? "").trim();
+            if (shopNumber && existingNumbers.has(shopNumber.toLowerCase())) {
+              throw new AppError(409, `Shop Number "${shopNumber}" already exists.`);
+            }
+          });
+        }
+      }
+      
+      const shopNamesToCheck = Array.from(seenShopNames);
+      if (shopNamesToCheck.length > 0) {
+        const existing = await client.query(
+          `SELECT shop_name FROM shops WHERE LOWER(shop_name) = ANY($1::text[])`,
+          [shopNamesToCheck]
+        );
+        if (existing.rowCount) {
+          const existingNames = new Set(existing.rows.map(r => r.shop_name.toLowerCase()));
+          inputs.forEach((raw, index) => {
+            const row = index + 1;
+            const shopName = str(raw.shopName).trim();
+            if (existingNames.has(shopName.toLowerCase())) {
+              throw new AppError(409, `Shop "${shopName}" already exists.`);
+            }
+          });
+        }
+      }
+      
       for (const input of inputs) {
         const shopName = str(input.shopName).trim();
-
-        const dup = await client.query(
-          `SELECT 1 FROM shops WHERE LOWER(shop_name) = LOWER($1) LIMIT 1`,
-          [shopName]
-        );
-        if (dup.rowCount) {
-          throw new AppError(409, `Shop "${shopName}" already exists.`);
-        }
 
         const no = await client.query<{ n: number }>(
           `SELECT COALESCE(MAX(shop_no), 0) + 1 AS n FROM shops`

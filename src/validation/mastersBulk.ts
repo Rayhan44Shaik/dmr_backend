@@ -30,13 +30,20 @@ export interface BulkRowError {
 
 export interface NormalizedShopRow {
   shopNo: number | null;
+  shopNumber: string;
   shopName: string;
   ownerName: string;
   phoneNumber: string;
-  village: string;
-  address: string | null;
+  secondaryPhoneNumber: string;
   email: string;
+  city: string;
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  paperRate: number;
+  associationType: string;
   status: "Active" | "Inactive";
+  openingBalance: number;
 }
 
 export interface NormalizedVehicleRow {
@@ -335,22 +342,44 @@ class RowContext {
 // Per-kind normalizers
 // ---------------------------------------------------------------------------
 
+const ASSOCIATION_TYPES = ["Vencob Vij", "Vencob Gun", "Ass Vij", "Ass Gun"] as const;
+
 function normalizeShop(ctx: RowContext): NormalizedShopRow {
-  const email = ctx.str("email");
-  if (!email) {
-    ctx.fail("email", "Email ID is required.");
-  } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    ctx.fail("email", "Please enter a valid email address.");
+  const email = ctx.nullableStr("email");
+  const latitude = ctx.nullableNum("latitude", { min: -90 });
+  if (latitude !== null && (latitude < -90 || latitude > 90)) {
+    ctx.fail("latitude", "Latitude must be between -90 and 90.");
   }
+  const longitude = ctx.nullableNum("longitude", { min: -180 });
+  if (longitude !== null && (longitude < -180 || longitude > 180)) {
+    ctx.fail("longitude", "Longitude must be between -180 and 180.");
+  }
+  const paperRate = ctx.num("paperRate", { fallback: 1, min: 1, integer: true });
+  if (paperRate < 1 || paperRate > 30) {
+    ctx.fail("paperRate", "Paper Rate must be an integer between 1 and 30.");
+  }
+  const associationType = ctx.str("associationType");
+  if (!associationType || !ASSOCIATION_TYPES.includes(associationType as typeof ASSOCIATION_TYPES[number])) {
+    ctx.fail("associationType", `Association Type must be one of: ${ASSOCIATION_TYPES.join(", ")}`);
+  }
+  const openingBalance = ctx.num("openingBalance", { fallback: 0 });
+  
   return {
     shopNo: ctx.optionalNo("shopNo"),
+    shopNumber: ctx.str("shopNumber"),
     shopName: ctx.requiredStr("shopName"),
     ownerName: ctx.str("ownerName"),
     phoneNumber: ctx.phone("phoneNumber"),
-    village: ctx.str("village"),
+    secondaryPhoneNumber: ctx.nullableStr("secondaryPhoneNumber") ?? "",
+    email: email ?? "",
+    city: ctx.requiredStr("city"),
     address: ctx.nullableStr("address"),
-    email,
+    latitude,
+    longitude,
+    paperRate,
+    associationType: associationType ?? "",
     status: ctx.status("status", ACTIVE_STATUSES) as NormalizedShopRow["status"],
+    openingBalance,
   };
 }
 
@@ -435,6 +464,7 @@ interface DuplicateKeyConfig {
   noField: string;
   naturalField: string;
   naturalKey: (row: NormalizedBulkRow) => string;
+  shopNumberField?: string;
 }
 
 const duplicateConfigs: Record<BulkEntityKind, DuplicateKeyConfig> = {
@@ -442,6 +472,7 @@ const duplicateConfigs: Record<BulkEntityKind, DuplicateKeyConfig> = {
     noField: "shopNo",
     naturalField: "shopName",
     naturalKey: (row) => (row as NormalizedShopRow).shopName.toLowerCase(),
+    shopNumberField: "shopNumber",
   },
   vehicles: {
     noField: "vehicleNo",
@@ -485,6 +516,18 @@ function detectBatchDuplicates(
       config.naturalField,
       `${config.naturalField} "${String(raw[config.naturalField])}"`,
     ]);
+
+    // Check for duplicate shopNumber within the batch for shops
+    if (kind === "shops") {
+      const shopNumber = raw["shopNumber"] as string | undefined;
+      if (shopNumber && shopNumber.trim() !== "") {
+        entries.push([
+          `shopNumber:${shopNumber.trim().toLowerCase()}`,
+          "shopNumber",
+          `Shop Number "${shopNumber.trim()}"`,
+        ]);
+      }
+    }
 
     for (const [key, field, label] of entries) {
       const first = seen.get(key);
