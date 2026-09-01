@@ -54,7 +54,7 @@ async function storeAck(
   return response;
 }
 
-async function withVersion(trip: Record<string, unknown>) {
+async function withVersion(trip: Record<string, unknown>): Promise<Record<string, unknown>> {
   const id = Number(trip.id);
   const row = await query<{ version: number }>(`SELECT version FROM trips WHERE id = $1`, [id]);
   return { ...trip, version: Number(row.rows[0]?.version ?? 1) };
@@ -174,7 +174,7 @@ export const mobileTripsService = {
     const payload = {
       ...(op.payload ?? {}),
       mode: op.mode,
-      status: "Draft",
+      status: "Draft" as const,
       startStepSubmitted: true,
       supervisorId: auth.employeeId,
       supervisorName: auth.profile.employeeName,

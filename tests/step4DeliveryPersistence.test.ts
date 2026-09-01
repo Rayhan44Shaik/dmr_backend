@@ -76,6 +76,7 @@ async function seedMasters() {
     status: "Active",
   });
   const shopA = await mastersService.upsertShop({
+    associationType: "Ass Vij",
     shopName: `Shop Alpha ${vehicleSeq}`,
     ownerName: "Owner A",
     phoneNumber: `90000000${String(vehicleSeq).padStart(2, "0")}`,
@@ -84,6 +85,7 @@ async function seedMasters() {
     email: `shop-a-${vehicleSeq}@example.com`,
   });
   const shopB = await mastersService.upsertShop({
+    associationType: "Ass Vij",
     shopName: `Shop Beta ${vehicleSeq}`,
     ownerName: "Owner B",
     phoneNumber: `91000000${String(vehicleSeq).padStart(2, "0")}`,

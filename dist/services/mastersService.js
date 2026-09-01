@@ -63,12 +63,18 @@ export function mapShop(row) {
     return {
         id: num(row.id),
         shopNo: num(row.shop_no),
+        shopNumber: str(row.shop_number),
         shopName: str(row.shop_name),
         ownerName: str(row.owner_name),
         phoneNumber: str(row.phone_number),
+        secondaryPhoneNumber: row.secondary_phone_number == null || str(row.secondary_phone_number).trim() === "" ? null : str(row.secondary_phone_number).trim(),
         email: row.email == null || str(row.email).trim() === "" ? null : str(row.email).trim(),
-        village: str(row.village),
+        city: str(row.city),
         address: row.address == null ? null : str(row.address),
+        latitude: row.latitude == null ? null : num(row.latitude),
+        longitude: row.longitude == null ? null : num(row.longitude),
+        paperRate: num(row.paper_rate ?? 0),
+        associationType: str(row.association_type ?? ""),
         status: str(row.status),
         openingBalance: num(row.opening_balance),
         currentBalance: num(row.current_balance),
@@ -101,6 +107,7 @@ const UNIQUE_CHECK = {
     vehicle: { table: "vehicles", column: "vehicle_number", label: "Vehicle number" },
     farm: { table: "farms", column: "farm_name", label: "Farm" },
     shop: { table: "shops", column: "shop_name", label: "Shop" },
+    shopNumber: { table: "shops", column: "shop_number", label: "Shop Number" },
     bank: { table: "banks", column: "bank_name", label: "Bank" },
     birdType: { table: "bird_types", column: "bird_type", label: "Bird type" },
 };
@@ -374,43 +381,80 @@ export const mastersService = {
         return result.rows.map(mapShop);
     },
     async upsertShop(body) {
+        // Shop master redesign renamed `village` -> `city` (migration 045). Accept
+        // the legacy `village` key as a fallback so older callers / imports keep
+        // working; `city` is the canonical column.
+        if ((body.city == null || String(body.city).trim() === "")) {
+            const legacyVillage = body.village;
+            if (legacyVillage != null && String(legacyVillage).trim() !== "") {
+                body = { ...body, city: String(legacyVillage) };
+            }
+        }
         assertValid(validateShopFields(body));
         if (body.id) {
+            // shop_number is immutable and NOT NULL — when the caller omits it (e.g.
+            // a partial edit), keep whatever is already persisted via COALESCE.
+            const shopNumberUpdate = str(body.shopNumber ?? "").trim() || null;
             await assertUnique("shop", body.shopName, body.id);
+            if (shopNumberUpdate) {
+                await assertUnique("shopNumber", shopNumberUpdate, body.id);
+            }
             const result = await query(`UPDATE shops SET
-          shop_no=$2, shop_name=$3, owner_name=$4, phone_number=$5,
-          village=$6, address=$7, status=$8, opening_balance=$9, email=$10,
-          current_balance = $9 + COALESCE(
+          shop_no=$2, shop_number=COALESCE($3, shop_number), shop_name=$4, owner_name=$5, phone_number=$6,
+          secondary_phone_number=$7, email=$8, city=$9, address=$10, latitude=$11,
+          longitude=$12, paper_rate=$13, association_type=$14, status=$15,
+          opening_balance=$16,
+          current_balance = $16 + COALESCE(
             (SELECT SUM(debit) - SUM(credit) FROM shop_ledger WHERE shop_id = $1), 0)
          WHERE id=$1 RETURNING *`, [
                 body.id,
                 body.shopNo,
+                shopNumberUpdate,
                 body.shopName,
                 body.ownerName ?? "",
                 body.phoneNumber ?? "",
-                body.village ?? "",
+                body.secondaryPhoneNumber ?? null,
+                str(body.email ?? "").trim(),
+                body.city ?? "",
                 body.address ?? null,
+                body.latitude ?? null,
+                body.longitude ?? null,
+                body.paperRate ?? 0,
+                body.associationType ?? "",
                 body.status ?? "Active",
                 body.openingBalance ?? 0,
-                str(body.email ?? "").trim(),
             ]);
             return mapShop(result.rows[0]);
         }
         const nextNo = await query(`SELECT COALESCE(MAX(shop_no), 0) + 1 AS n FROM shops`);
+        const shopNo = body.shopNo ?? nextNo.rows[0].n;
+        // shop_number is NOT NULL and auto-generated when the caller (e.g. the Shop
+        // form, which shows it as read-only) does not supply one.
+        const shopNumber = str(body.shopNumber ?? "").trim() ||
+            `SHOP-${String(shopNo).padStart(6, "0")}`;
         await assertUnique("shop", body.shopName);
+        await assertUnique("shopNumber", shopNumber);
         const result = await query(`INSERT INTO shops (
-         shop_no, shop_name, owner_name, phone_number, village, address, status,
-         opening_balance, current_balance, email
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9) RETURNING *`, [
-            body.shopNo ?? nextNo.rows[0].n,
+         shop_no, shop_number, shop_name, owner_name, phone_number,
+         secondary_phone_number, email, city, address, latitude, longitude,
+         paper_rate, association_type, status,
+         opening_balance, current_balance
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`, [
+            shopNo,
+            shopNumber,
             body.shopName,
             body.ownerName ?? "",
             body.phoneNumber ?? "",
-            body.village ?? "",
+            body.secondaryPhoneNumber ?? null,
+            str(body.email ?? "").trim(),
+            body.city ?? "",
             body.address ?? null,
+            body.latitude ?? null,
+            body.longitude ?? null,
+            body.paperRate ?? 0,
+            body.associationType ?? "",
             body.status ?? "Active",
             body.openingBalance ?? 0,
-            str(body.email ?? "").trim(),
         ]);
         return mapShop(result.rows[0]);
     },
@@ -432,34 +476,89 @@ export const mastersService = {
             throw new AppError(400, "No shop rows provided.");
         }
         const errors = [];
+        const seenShopNumbers = new Set();
+        const seenShopNames = new Set();
         inputs.forEach((raw, index) => {
             const row = index + 1;
             validateShopFields(raw).forEach(({ field, message }) => errors.push({ row, field, message }));
+            // Check for duplicate shopNumber within the batch
+            const shopNumber = str(raw.shopNumber ?? "").trim();
+            if (shopNumber) {
+                const key = shopNumber.toLowerCase();
+                if (seenShopNumbers.has(key)) {
+                    errors.push({ row, field: "shopNumber", message: `Duplicate Shop Number "${shopNumber}" within the uploaded batch.` });
+                }
+                else {
+                    seenShopNumbers.add(key);
+                }
+            }
+            // Check for duplicate shopName within the batch
+            const shopName = str(raw.shopName).trim();
+            const nameKey = shopName.toLowerCase();
+            if (seenShopNames.has(nameKey)) {
+                errors.push({ row, field: "shopName", message: `Duplicate Shop Name "${shopName}" within the uploaded batch.` });
+            }
+            else {
+                seenShopNames.add(nameKey);
+            }
         });
         if (errors.length)
             bulkValidationFailed(errors);
         return withTransaction(async (client) => {
             const created = [];
+            // Check for conflicts with existing database records
+            const shopNumbersToCheck = Array.from(seenShopNumbers);
+            if (shopNumbersToCheck.length > 0) {
+                const existing = await client.query(`SELECT shop_number FROM shops WHERE LOWER(shop_number) = ANY($1::text[])`, [shopNumbersToCheck]);
+                if (existing.rowCount) {
+                    const existingNumbers = new Set(existing.rows.map(r => r.shop_number.toLowerCase()));
+                    inputs.forEach((raw, index) => {
+                        const row = index + 1;
+                        const shopNumber = str(raw.shopNumber ?? "").trim();
+                        if (shopNumber && existingNumbers.has(shopNumber.toLowerCase())) {
+                            throw new AppError(409, `Shop Number "${shopNumber}" already exists.`);
+                        }
+                    });
+                }
+            }
+            const shopNamesToCheck = Array.from(seenShopNames);
+            if (shopNamesToCheck.length > 0) {
+                const existing = await client.query(`SELECT shop_name FROM shops WHERE LOWER(shop_name) = ANY($1::text[])`, [shopNamesToCheck]);
+                if (existing.rowCount) {
+                    const existingNames = new Set(existing.rows.map(r => r.shop_name.toLowerCase()));
+                    inputs.forEach((raw, index) => {
+                        const row = index + 1;
+                        const shopName = str(raw.shopName).trim();
+                        if (existingNames.has(shopName.toLowerCase())) {
+                            throw new AppError(409, `Shop "${shopName}" already exists.`);
+                        }
+                    });
+                }
+            }
             for (const input of inputs) {
                 const shopName = str(input.shopName).trim();
-                const dup = await client.query(`SELECT 1 FROM shops WHERE LOWER(shop_name) = LOWER($1) LIMIT 1`, [shopName]);
-                if (dup.rowCount) {
-                    throw new AppError(409, `Shop "${shopName}" already exists.`);
-                }
                 const no = await client.query(`SELECT COALESCE(MAX(shop_no), 0) + 1 AS n FROM shops`);
                 const result = await client.query(`INSERT INTO shops (
-             shop_no, shop_name, owner_name, phone_number, village, address,
-             status, opening_balance, current_balance, email
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9) RETURNING *`, [
+             shop_no, shop_number, shop_name, owner_name, phone_number,
+             secondary_phone_number, email, city, address, latitude, longitude,
+             paper_rate, association_type, status,
+             opening_balance, current_balance
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`, [
                     input.shopNo ?? no.rows[0].n,
+                    input.shopNumber ?? `SHOP-${String(no.rows[0].n).padStart(6, "0")}`,
                     shopName,
                     str(input.ownerName).trim(),
                     str(input.phoneNumber).trim(),
-                    str(input.village).trim(),
+                    str(input.secondaryPhoneNumber ?? "").trim() || null,
+                    str(input.email ?? "").trim(),
+                    str(input.city ?? "").trim(),
                     input.address ? str(input.address).trim() : null,
+                    input.latitude ?? null,
+                    input.longitude ?? null,
+                    num(input.paperRate ?? 0),
+                    str(input.associationType ?? "").trim(),
                     input.status ?? "Active",
                     num(input.openingBalance ?? 0),
-                    str(input.email ?? "").trim(),
                 ]);
                 created.push(mapShop(result.rows[0]));
             }

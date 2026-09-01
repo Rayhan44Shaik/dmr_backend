@@ -345,7 +345,13 @@ class RowContext {
 const ASSOCIATION_TYPES = ["Vencob Vij", "Vencob Gun", "Ass Vij", "Ass Gun"] as const;
 
 function normalizeShop(ctx: RowContext): NormalizedShopRow {
+  // Shop master redesign (migration 040): Email ID is REQUIRED on bulk import.
   const email = ctx.nullableStr("email");
+  if (!email || email.trim() === "") {
+    ctx.fail("email", "Email ID is required.");
+  } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    ctx.fail("email", "Please enter a valid email address.");
+  }
   const latitude = ctx.nullableNum("latitude", { min: -90 });
   if (latitude !== null && (latitude < -90 || latitude > 90)) {
     ctx.fail("latitude", "Latitude must be between -90 and 90.");
@@ -372,7 +378,9 @@ function normalizeShop(ctx: RowContext): NormalizedShopRow {
     phoneNumber: ctx.phone("phoneNumber"),
     secondaryPhoneNumber: ctx.nullableStr("secondaryPhoneNumber") ?? "",
     email: email ?? "",
-    city: ctx.requiredStr("city"),
+    // `city` replaced the legacy `village` field (shop master redesign);
+    // accept either key so older import sheets keep working.
+    city: ctx.str("city") || ctx.requiredStr("village"),
     address: ctx.nullableStr("address"),
     latitude,
     longitude,

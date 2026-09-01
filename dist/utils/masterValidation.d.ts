@@ -1,6 +1,7 @@
 export declare const EMPLOYEE_DEPARTMENTS: string[];
-export declare const ACTIVE_STATUSES: string[];
-export declare const EMPLOYEE_STATUSES: string[];
+export declare const ACTIVE_STATUSES: readonly ["Active", "Inactive"];
+export declare const EMPLOYEE_STATUSES: readonly ["Active", "Inactive", "Suspended"];
+export declare const ASSOCIATION_TYPES: readonly ["Vencob Vij", "Vencob Gun", "Ass Vij", "Ass Gun"];
 export type FieldError = {
     field: string;
     message: string;

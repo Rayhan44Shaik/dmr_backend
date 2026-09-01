@@ -93,6 +93,8 @@ async function seedMasters() {
     status: "Active",
   });
   const shopA = await mastersService.upsertShop({
+    email: `fixture-shop-${Math.random().toString(36).slice(2,8)}@example.com`,
+    associationType: "Ass Vij",
     shopName: `RS Shop A ${vehicleSeq}`,
     ownerName: "Shop Owner A",
     phoneNumber: `97000000${String(vehicleSeq).padStart(2, "0")}`,
@@ -101,6 +103,8 @@ async function seedMasters() {
     status: "Active",
   });
   const shopB = await mastersService.upsertShop({
+    email: `fixture-shop-${Math.random().toString(36).slice(2,8)}@example.com`,
+    associationType: "Ass Vij",
     shopName: `RS Shop B ${vehicleSeq}`,
     ownerName: "Shop Owner B",
     phoneNumber: `98000000${String(vehicleSeq).padStart(2, "0")}`,
@@ -109,6 +113,8 @@ async function seedMasters() {
     status: "Active",
   });
   const shopInactive = await mastersService.upsertShop({
+    email: `fixture-shop-${Math.random().toString(36).slice(2,8)}@example.com`,
+    associationType: "Ass Vij",
     shopName: `RS Shop Inactive ${vehicleSeq}`,
     ownerName: "Shop Owner C",
     phoneNumber: `99000000${String(vehicleSeq).padStart(2, "0")}`,

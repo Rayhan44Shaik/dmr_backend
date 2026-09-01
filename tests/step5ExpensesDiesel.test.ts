@@ -72,6 +72,7 @@ async function seed() {
     status: "Active",
   });
   const shop = await mastersService.upsertShop({
+    associationType: "Ass Vij",
     shopName: `S5 Shop ${n}`,
     ownerName: "Owner",
     phoneNumber: `7600000${n}`,

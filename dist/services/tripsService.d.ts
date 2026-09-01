@@ -924,115 +924,27 @@ export declare const tripsService: {
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
     }>;
-    submitStep(id: number, step: TripWizardStep, body: Partial<Trip> & Record<string, unknown>): Promise<{
-        resumeStep: TripWizardStep | null;
-        resumeStepLabel: string | null;
-        wizardProgress: import("../utils/tripResume.js").WizardProgress;
-        stepStatuses: TripStepStatuses;
-        id: number;
-        tripNo: string;
-        tripDate: string;
-        status: TripStatus;
-        startTime: string | null;
-        vehicleId: number | null;
-        vehicleNo: string | null;
-        driverId: number | null;
-        driverName: string | null;
-        supervisorId: number | null;
-        supervisorName: string | null;
-        helpers: string[];
-        loaders: string[];
-        openingMeter: number | null;
-        advanceAmount: number | null;
-        startStepSubmitted: boolean;
-        startStepSubmittedAt: string | null;
-        sourceFarmId: number | null;
-        sourceFarm: string | null;
-        reachedTime: string | null;
-        destMeter: number | null;
-        pickupTolls: number;
-        farmAddress?: string | null;
-        avgBirdWeight?: number | null;
-        farmRemarks?: string | null;
-        farmBirdTypeId?: number | null;
-        farmBirdType?: string | null;
-        farmBirdCount?: number | null;
-        farmLoadWeight?: number | null;
-        farmRate?: number | null;
-        farmAmount?: number | null;
-        farmGpsLat?: number | null;
-        farmGpsLon?: number | null;
-        farmGpsAccuracy?: number | null;
-        farmGpsTime?: string | null;
-        farmStepSubmitted: boolean;
-        farmStepSubmittedAt: string | null;
-        dcWeight: number;
-        totalBirds: number;
-        boxes: number;
-        avgWeight: number;
-        pickupLoadTime: string | null;
-        boxDetails: BoxDetail[];
-        dcPhotoKey?: string | null;
-        dcPhotoKey2?: string | null;
-        pickupStepSubmitted: boolean;
-        pickupStepSubmittedAt: string | null;
-        vehicleBoxCapacity?: number;
-        deliveries: ShopDelivery[];
-        deliveryStepSubmitted: boolean;
-        deliveriesStepSubmittedAt: string | null;
-        closingMeter: number | null;
-        endMeter?: number | null;
-        endTime: string | null;
-        deliveryTolls: number;
-        destinationTolls?: number;
-        meals?: number;
-        loading?: number;
-        mealsTiffin?: number;
-        vehicleMaintenance?: number;
-        othersRC?: number;
-        others1Amt?: number;
-        others2Amt?: number;
-        others3Amt?: number;
-        others4Amt?: number;
-        others5Amt?: number;
-        dieselEntries?: DieselEntry[];
-        fuel: number;
-        expense: number;
-        driverBata?: number;
-        helperBata?: number;
-        totalTripExpense?: number;
-        remarks: string;
-        submittedAt?: string | null;
-        endStepSubmitted: boolean;
-        expensesStepSubmitted: boolean;
-        expensesStepSubmittedAt: string | null;
-        mileageKmL?: number | null;
-        totalKm: number;
-        totalShops: number;
-        totalWeight: number;
-        totalDeliveredWeight: number;
-        totalBirdsDelivered: number;
-        totalMortality: number;
-        totalMortalityCount: number;
-        totalMortalityWeight: number;
-        weightLoss: number;
-        survivalRate: number;
-        lastShop: string | null;
-        rateCompleted: boolean;
-        deleted: boolean;
-        deletedReason?: string | null;
-        approvedBy?: string | null;
-        approvedAt?: string | null;
-        rejectedBy?: string | null;
-        rejectedAt?: string | null;
-        rejectedReason?: string | null;
-        createdAt?: string | null;
-        updatedAt?: string | null;
-        dcPhotoData?: string | null;
-        dcPhotoMime?: string | null;
-        dcPhotoMime2?: string | null;
-        dcPhotoData2?: string | null;
-    }>;
+    /**
+     * Orders module — create or locate the day's Shop Order Collection
+     * container and upsert its collected-shop plan rows.
+     *
+     * The container is a vehicle-LESS `trips` row identified by an
+     * ORD-YYYYMMDD-NN trip number that Orders supplies (the backend never
+     * generates one here, and never assigns a `TR-` number). It only ever
+     * holds Orders plan rows in `trip_deliveries` (remarks start with
+     * `[ORDER]`). It is NOT a vehicle trip: no vehicle / crew / meter, and
+     * none of the Step 1→3 pickup / capacity gates run. It is idempotent by
+     * `trip_no`, so a repeated save or a network retry updates the same
+     * container instead of creating a second one, and `id = 0` on the wire is
+     * never turned into a real numbered DB trip.
+     *
+     *  - the collection stage is always a permissive "save" (partial
+     *    collections allowed, no final validation);
+     *  - `startStepSubmitted === true` is Finish Collection — it latches the
+     *    container's `start_step_submitted` flag (monotonic, never cleared).
+     */
+    saveCollectionContainer(body: Partial<Trip> & Record<string, unknown>): Promise<Trip>;
+    submitStep(id: number, step: TripWizardStep, body: Partial<Trip> & Record<string, unknown>): Promise<Trip>;
     softDelete(id: number, reason?: string): Promise<{
         id: number;
         deleted: boolean;
@@ -1153,7 +1065,7 @@ export declare const tripsService: {
      * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
      * maintenance), not just trip closing meters, while keeping the same
      * response shape the frontend already consumes. */
-    lastClosingMeter(vehicleId: number): Promise<{
+    lastClosingMeter(vehicleId: number, excludeTripId?: number | null): Promise<{
         closingMeter: number;
         source: import("../utils/vehicleMeterLedger.js").MeterSourceType;
         ref: string;

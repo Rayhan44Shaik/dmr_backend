@@ -165,4 +165,126 @@ mastersRouter.get("/market-rates", asyncHandler(async (req, res) => {
 mastersRouter.put("/market-rates/batch", asyncHandler(async (req, res) => {
     res.json(await marketRatesService.upsertMarketRates(req.body));
 }));
+// ---------------------------------------------------------------------------
+// Location resolver — resolve Google Maps URLs, share links, and addresses
+// to latitude / longitude / address.
+// ---------------------------------------------------------------------------
+function extractCoordsFromUrl(url) {
+    const patterns = [
+        /@(-?\d+\.?\d*),(-?\d+\.?\d*)/,
+        /\?q=(-?\d+\.?\d*)%2C(-?\d+\.?\d*)/,
+        /\?q=(-?\d+\.?\d*),(-?\d+\.?\d*)/,
+        /\/place\/[^/]+\/(-?\d+\.?\d*),(-?\d+\.?\d*)/,
+        /\/@(-?\d+\.?\d*),(-?\d+\.?\d*)/,
+        /!3d(-?\d+\.?\d*)!4d(-?\d+\.?\d*)/,
+        /ll=(-?\d+\.?\d*)[,](-?\d+\.?\d*)/,
+        /center=(-?\d+\.?\d*)[,](-?\d+\.?\d*)/,
+    ];
+    for (const p of patterns) {
+        const m = url.match(p);
+        if (m) {
+            const lat = parseFloat(m[1]);
+            const lng = parseFloat(m[2]);
+            if (Number.isFinite(lat) && lat >= -90 && lat <= 90 && Number.isFinite(lng) && lng >= -180 && lng <= 180) {
+                return { lat, lng };
+            }
+        }
+    }
+    return null;
+}
+async function resolveShareGoogleUrl(url) {
+    try {
+        const resp = await fetch(url, {
+            redirect: "follow",
+            headers: { "User-Agent": "Mozilla/5.0" },
+            signal: AbortSignal.timeout(10000),
+        });
+        return resp.url;
+    }
+    catch {
+        return null;
+    }
+}
+async function reverseGeocode(lat, lng) {
+    try {
+        const resp = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, { headers: { "User-Agent": "DMR-Poultries-ERP/1.0" }, signal: AbortSignal.timeout(8000) });
+        const data = await resp.json();
+        return data?.display_name || null;
+    }
+    catch {
+        return null;
+    }
+}
+async function forwardGeocode(address) {
+    try {
+        const encoded = encodeURIComponent(address);
+        const resp = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encoded}&limit=1&addressdetails=1`, { headers: { "User-Agent": "DMR-Poultries-ERP/1.0" }, signal: AbortSignal.timeout(8000) });
+        const data = await resp.json();
+        if (Array.isArray(data) && data.length > 0) {
+            return {
+                lat: parseFloat(data[0].lat),
+                lng: parseFloat(data[0].lon),
+                displayName: data[0].display_name || address,
+            };
+        }
+    }
+    catch { /* ignore */ }
+    return null;
+}
+mastersRouter.post("/resolve-location", asyncHandler(async (req, res) => {
+    const input = String(req.body?.input || "").trim();
+    if (!input) {
+        res.status(400).json({ error: "Input is required." });
+        return;
+    }
+    // 1) Try as coordinate pair
+    const coordMatch = input.match(/^(-?\d+\.?\d*)\s*[,;]\s*(-?\d+\.?\d*)$/);
+    if (coordMatch) {
+        const lat = parseFloat(coordMatch[1]);
+        const lng = parseFloat(coordMatch[2]);
+        if (Number.isFinite(lat) && lat >= -90 && lat <= 90 && Number.isFinite(lng) && lng >= -180 && lng <= 180) {
+            const address = await reverseGeocode(lat, lng);
+            res.json({ latitude: lat, longitude: lng, address: address || null });
+            return;
+        }
+    }
+    // 2) Try as URL — extract coordinates directly
+    if (input.startsWith("http://") || input.startsWith("https://")) {
+        const directCoords = extractCoordsFromUrl(input);
+        if (directCoords) {
+            const address = await reverseGeocode(directCoords.lat, directCoords.lng);
+            res.json({ latitude: directCoords.lat, longitude: directCoords.lng, address: address || null });
+            return;
+        }
+        // 3) share.google short URL — follow redirects then try again
+        if (input.includes("share.google") || input.includes("maps.app.goo.gl") || input.includes("goo.gl/maps")) {
+            const resolved = await resolveShareGoogleUrl(input);
+            if (resolved && resolved !== input) {
+                const resolvedCoords = extractCoordsFromUrl(resolved);
+                if (resolvedCoords) {
+                    const address = await reverseGeocode(resolvedCoords.lat, resolvedCoords.lng);
+                    res.json({ latitude: resolvedCoords.lat, longitude: resolvedCoords.lng, address: address || null });
+                    return;
+                }
+            }
+            res.status(422).json({
+                error: "Location link could not be resolved. Please try again or select the location on the map.",
+            });
+            return;
+        }
+        res.status(422).json({
+            error: "Could not extract coordinates from this URL. Please paste coordinates directly or select on the map.",
+        });
+        return;
+    }
+    // 4) Try as address — forward geocode via Nominatim
+    const geo = await forwardGeocode(input);
+    if (geo) {
+        res.json({ latitude: geo.lat, longitude: geo.lng, address: geo.displayName });
+        return;
+    }
+    res.status(422).json({
+        error: "Unable to determine this location. Please select it on the map or paste a Google Maps location.",
+    });
+}));
 //# sourceMappingURL=masters.js.map

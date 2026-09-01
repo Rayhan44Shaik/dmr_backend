@@ -326,3 +326,89 @@ describe("Step 1 start details", () => {
     assert.match(String(farm.body.error), /Step 1|Trip Header|before/i);
   });
 });
+
+describe("Part L — Step 1 opening meter never self-references the current trip", () => {
+  it("edit-mode last-meter hint excludes the current trip; no other event -> null", async () => {
+    const m = await seedCrew();
+    const a = await postJson(
+      baseUrl,
+      "/api/trips/steps/start",
+      startPayload(m, { openingMeter: 1000, tripDate: "2026-09-01" })
+    );
+    assert.equal(a.status, 201, JSON.stringify(a.body));
+
+    // Without the exclusion the hint is the trip's own TRIP_START (1000)...
+    const withSelf = await getJson(baseUrl, `/api/trips/vehicle/${m.vehicle.id}/last-meter`);
+    assert.equal(withSelf.body?.closingMeter, 1000);
+
+    // ...with it, the current trip drops out and nothing is invented.
+    const excluded = await getJson(
+      baseUrl,
+      `/api/trips/vehicle/${m.vehicle.id}/last-meter?excludeTripId=${a.body.id}`
+    );
+    assert.equal(excluded.body, null);
+  });
+
+  it("editing a trip without changing the opening meter re-submits cleanly (no self-reference error)", async () => {
+    const m = await seedCrew();
+    const a = await postJson(
+      baseUrl,
+      "/api/trips/steps/start",
+      startPayload(m, { openingMeter: 1000, tripDate: "2026-09-02" })
+    );
+    assert.equal(a.status, 201, JSON.stringify(a.body));
+
+    const reSubmit = await postJson(baseUrl, `/api/trips/${a.body.id}/steps/start`, {
+      ...startPayload(m, { openingMeter: 1000, tripDate: "2026-09-02" }),
+      startStepSubmitted: true,
+    });
+    assert.equal(reSubmit.status, 200, JSON.stringify(reSubmit.body));
+    assert.equal(reSubmit.body.openingMeter, 1000);
+    assert.equal(reSubmit.body.startStepSubmitted, true);
+  });
+
+  it("a valid higher opening meter on edit is accepted; a value below the ACTUAL previous reading is rejected", async () => {
+    const m = await seedCrew();
+    // An earlier, unsubmitted draft leaves a real previous reading of 1000 for
+    // this vehicle without occupying its crew.
+    const prior = await postJson(baseUrl, "/api/trips", {
+      tripDate: "2026-09-03",
+      vehicleId: m.vehicle.id,
+      vehicleNo: m.vehicle.vehicleNumber,
+      openingMeter: 1000,
+    });
+    assert.equal(prior.status, 201, JSON.stringify(prior.body));
+
+    // Trip B is the trip under edit; its first submit starts at 2000 (> 1000).
+    const b = await postJson(
+      baseUrl,
+      "/api/trips/steps/start",
+      startPayload(m, { openingMeter: 2000, tripDate: "2026-09-04" })
+    );
+    assert.equal(b.status, 201, JSON.stringify(b.body));
+
+    // The hint for B excludes B itself and points at the prior reading (1000),
+    // never B's own 2000.
+    const hint = await getJson(
+      baseUrl,
+      `/api/trips/vehicle/${m.vehicle.id}/last-meter?excludeTripId=${b.body.id}`
+    );
+    assert.equal(hint.body?.closingMeter, 1000);
+
+    // Edit B up to 1500 — still above the prior reading, accepted.
+    const up = await postJson(baseUrl, `/api/trips/${b.body.id}/steps/start`, {
+      ...startPayload(m, { openingMeter: 1500, tripDate: "2026-09-04" }),
+      startStepSubmitted: true,
+    });
+    assert.equal(up.status, 200, JSON.stringify(up.body));
+    assert.equal(up.body.openingMeter, 1500);
+
+    // Edit B below the prior 1000 — rejected against the real previous reading.
+    const down = await postJson(baseUrl, `/api/trips/${b.body.id}/steps/start`, {
+      ...startPayload(m, { openingMeter: 500, tripDate: "2026-09-04" }),
+      startStepSubmitted: true,
+    });
+    assert.equal(down.status, 422, JSON.stringify(down.body));
+    assert.match(String(down.body.error), /1000|latest recorded reading/i);
+  });
+});

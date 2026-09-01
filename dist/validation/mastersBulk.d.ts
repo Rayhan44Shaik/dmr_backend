@@ -11,13 +11,20 @@ export interface BulkRowError {
 }
 export interface NormalizedShopRow {
     shopNo: number | null;
+    shopNumber: string;
     shopName: string;
     ownerName: string;
     phoneNumber: string;
-    village: string;
-    address: string | null;
+    secondaryPhoneNumber: string;
     email: string;
+    city: string;
+    address: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    paperRate: number;
+    associationType: string;
     status: "Active" | "Inactive";
+    openingBalance: number;
 }
 export interface NormalizedVehicleRow {
     vehicleNo: number | null;

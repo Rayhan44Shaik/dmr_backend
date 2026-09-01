@@ -26,6 +26,15 @@ const { collectionEntryService } = await import("../src/services/collectionEntry
 const { shopSalesService } = await import("../src/services/shopSalesService.js");
 const { recalcTripDeliveryTotals } = await import("../src/utils/tripDeliverySync.js");
 
+/**
+ * A trip / collection date a few days before "now" so the 10-day Shop Sales
+ * correction window is always open while these tests run (the previous
+ * hard-coded 2026-08-18 expired once wall-clock time passed 2026-08-28).
+ */
+const WITHIN_CORRECTION_WINDOW = new Date(Date.now() - 3 * 86_400_000)
+  .toISOString()
+  .slice(0, 10);
+
 after(async () => {
   await shutdownTestEnv({ app, testDb, pool });
 });
@@ -35,6 +44,7 @@ let seq = 0;
 async function seedShop(opening: number): Promise<{ id: number; name: string }> {
   seq += 1;
   const shop = await mastersService.upsertShop({
+    associationType: "Ass Vij",
     shopName: `CE Shop ${seq}`,
     ownerName: "Owner",
     phoneNumber: `97300001${String(seq).padStart(2, "0")}`,
@@ -327,7 +337,7 @@ describe("Shop Sales debit and correction synchronization", () => {
     const shop = await seedShop(10000);
     const sup = await seedSupport();
     const trip = await makeCompletedTrip(sup, {
-      tripNo: `CE-DIFF-${seq}`, tripDate: "2026-08-18", totalBirds: 1000, dcWeight: 1800,
+      tripNo: `CE-DIFF-${seq}`, tripDate: WITHIN_CORRECTION_WINDOW, totalBirds: 1000, dcWeight: 1800,
     });
     const ins = await pool.query<{ id: number }>(
       `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, mortality, rate, amount)
@@ -579,7 +589,7 @@ describe("Collection weekly-summary (derived Monday–Sunday)", () => {
     const shop = await seedShop(0);
     const sup = await seedSupport();
     const trip = await makeCompletedTrip(sup, {
-      tripNo: `CE-CORR-${seq}`, tripDate: "2026-08-18", totalBirds: 1000, dcWeight: 1800,
+      tripNo: `CE-CORR-${seq}`, tripDate: WITHIN_CORRECTION_WINDOW, totalBirds: 1000, dcWeight: 1800,
     });
     const ins = await pool.query<{ id: number }>(
       `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, mortality, rate, amount)
@@ -590,26 +600,26 @@ describe("Collection weekly-summary (derived Monday–Sunday)", () => {
     await recalcTripDeliveryTotals(pool as never, trip.id);
     await rateEntryService.lock(trip.id, { lockedBy: "ce-test" });
 
-    let s = await collectionEntryService.getWeeklySummary(shop.id, "2026-08-18");
+    let s = await collectionEntryService.getWeeklySummary(shop.id, WITHIN_CORRECTION_WINDOW);
     assert.equal(s.weeklySales, 100000);
     assert.equal(s.currentOutstanding, 100000);
 
     await shopSalesService.update(saleId, { rate: 210 });
-    s = await collectionEntryService.getWeeklySummary(shop.id, "2026-08-18");
+    s = await collectionEntryService.getWeeklySummary(shop.id, WITHIN_CORRECTION_WINDOW);
     assert.equal(s.weeklySales, 105000);
     assert.equal(s.currentOutstanding, 105000);
 
     await shopSalesService.update(saleId, { rate: 196 });
-    s = await collectionEntryService.getWeeklySummary(shop.id, "2026-08-18");
+    s = await collectionEntryService.getWeeklySummary(shop.id, WITHIN_CORRECTION_WINDOW);
     assert.equal(s.weeklySales, 98000);
     assert.equal(s.currentOutstanding, 98000);
 
     const col = await collectionEntryService.create({
-      collectionDate: "2026-08-18", shopId: shop.id, amount: 10000,
+      collectionDate: WITHIN_CORRECTION_WINDOW, shopId: shop.id, amount: 10000,
     });
     await collectionEntryService.approve(col.id);
     await shopSalesService.update(saleId, { rate: 200 });
-    s = await collectionEntryService.getWeeklySummary(shop.id, "2026-08-18");
+    s = await collectionEntryService.getWeeklySummary(shop.id, WITHIN_CORRECTION_WINDOW);
     assert.equal(s.weeklySales, 100000);
     assert.equal(s.approvedCollections, 10000);
     assert.equal(s.currentOutstanding, 90000);

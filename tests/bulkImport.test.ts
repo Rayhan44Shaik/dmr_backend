@@ -263,6 +263,7 @@ const suites: SuiteOptions[] = [
       // silently produced an 11-digit number for any n >= 100 (test 12 uses
       // n=100), failing the exactly-10-digits validation.
       phoneNumber: `9777700${String(n).padStart(3, "0")}`,
+      associationType: "Ass Vij",
       village: "Village",
       address: "Address",
       capacity: 20000,
@@ -520,6 +521,7 @@ describe("shop bulk import email", () => {
           shopName: "Email Shop",
           ownerName: "Owner One",
           phoneNumber: "9000000001",
+          associationType: "Ass Vij",
           village: "Village",
           email: "shop@example.com",
         },
@@ -536,6 +538,7 @@ describe("shop bulk import email", () => {
           shopName: "Blank Email Shop",
           ownerName: "Owner Two",
           phoneNumber: "9000000002",
+          associationType: "Ass Vij",
           village: "Village",
           email: "",
         },
@@ -555,6 +558,7 @@ describe("shop bulk import email", () => {
           shopName: "Missing Email Shop",
           ownerName: "Owner Four",
           phoneNumber: "9000000004",
+          associationType: "Ass Vij",
           village: "Village",
         },
       ],
@@ -573,6 +577,7 @@ describe("shop bulk import email", () => {
           shopName: "Bad Email Shop",
           ownerName: "Owner Three",
           phoneNumber: "9000000003",
+          associationType: "Ass Vij",
           village: "Village",
           email: "not-an-email",
         },
@@ -591,6 +596,7 @@ describe("shop singular email", () => {
     shopName: "Required Email Shop",
     ownerName: "Owner Five",
     phoneNumber: "9000000005",
+    associationType: "Ass Vij",
     village: "Village",
     email: "required@example.com",
   };
@@ -608,6 +614,7 @@ describe("shop singular email", () => {
       shopName: "Missing Email Create",
       ownerName: "Owner Six",
       phoneNumber: "9000000006",
+      associationType: "Ass Vij",
       village: "Village",
     });
     assert.equal(missing.status, 400);

@@ -506,6 +506,15 @@ export const mastersService = {
   },
 
   async upsertShop(body: Partial<Shop> & { shopName: string }) {
+    // Shop master redesign renamed `village` -> `city` (migration 045). Accept
+    // the legacy `village` key as a fallback so older callers / imports keep
+    // working; `city` is the canonical column.
+    if ((body.city == null || String(body.city).trim() === "")) {
+      const legacyVillage = (body as { village?: unknown }).village;
+      if (legacyVillage != null && String(legacyVillage).trim() !== "") {
+        body = { ...body, city: String(legacyVillage) };
+      }
+    }
     assertValid(validateShopFields(body));
 
     if (body.id) {

@@ -21,6 +21,9 @@ const { collectionEntryService } = await import("../src/services/collectionEntry
 const { shopSalesService } = await import("../src/services/shopSalesService.js");
 const { recalcTripDeliveryTotals } = await import("../src/utils/tripDeliverySync.js");
 
+/** A date within the 10-day Shop Sales correction window (was a fixed 2026-08-18 that expired). */
+const WITHIN_CORRECTION_WINDOW = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+
 after(async () => {
   await shutdownTestEnv({ app, testDb, pool });
 });
@@ -30,6 +33,7 @@ let seq = 0;
 async function seedShop(opening: number, name?: string): Promise<{ id: number; name: string }> {
   seq += 1;
   const shop = await mastersService.upsertShop({
+    associationType: "Ass Vij",
     shopName: name ?? `PC Shop ${seq}`,
     ownerName: "Owner",
     phoneNumber: `97310001${String(seq).padStart(2, "0")}`,
@@ -294,11 +298,17 @@ describe("Pending Collection pending-summary", () => {
   });
 
   it("Shop Sales correction updates weekly sales and balance", async () => {
-    const { shop, saleId } = await seedShopWithDebit(0, 100000, "2026-08-18");
-    let res = await getJson(baseUrl, `/api/operations/collection-entry/pending-summary?date=2026-08-18`);
+    const { shop, saleId } = await seedShopWithDebit(0, 100000, WITHIN_CORRECTION_WINDOW);
+    let res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/pending-summary?date=${WITHIN_CORRECTION_WINDOW}`
+    );
     assert.equal(findShop(res.body, shop.id).weeklySales, 100000);
     await shopSalesService.update(saleId, { rate: 210 });
-    res = await getJson(baseUrl, `/api/operations/collection-entry/pending-summary?date=2026-08-18`);
+    res = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/pending-summary?date=${WITHIN_CORRECTION_WINDOW}`
+    );
     assert.equal(findShop(res.body, shop.id).weeklySales, 105000);
     assert.equal(findShop(res.body, shop.id).balance, 105000);
   });

@@ -70,7 +70,7 @@ async function seed() {
         shopName: "City Broiler",
         ownerName: "Raju",
         phoneNumber: "9885000001",
-        village: "Vijayawada",
+        city: "Vijayawada",
         status: "Active",
     });
     const birdType = await mastersService.upsertBirdType({

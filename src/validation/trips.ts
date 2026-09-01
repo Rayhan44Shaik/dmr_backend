@@ -277,10 +277,24 @@ function firstValidationMessage(
   return `Step "${step}" includes invalid data.`;
 }
 
+// The trip *status control* state machine — used by PATCH /trips/:id/status.
+//
+//   Draft    → Pending      (Step 5 must be submitted)
+//   Pending  → Completed    (every step must be submitted)
+//   Completed → (nothing; Completed stays Completed under ordinary editing)
+//   Deleted  → (terminal)
+//
+// `Pending → Draft` MUST NEVER EXIST.
+//
+// Deletion is NOT a status transition: `Deleted` is reached ONLY through the
+// dedicated delete action (DELETE /trips/:id → tripsService.softDelete, which
+// does not consult this map) plus its 10-second undo — never the status
+// dropdown. Kept identical to the frontend mirror in
+// frontend/dmr-poultries-web/src/shared/trip/workflow.ts.
 const TRIP_STATUS_TRANSITIONS: Record<string, string[]> = {
-  Draft: ["Pending", "Deleted"],
-  Pending: ["Completed", "Draft", "Deleted"],
-  Completed: ["Deleted"],
+  Draft: ["Pending"],
+  Pending: ["Completed"],
+  Completed: [],
   Deleted: [],
 };
 

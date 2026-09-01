@@ -35,7 +35,15 @@ tripsRouter.get(
 tripsRouter.get(
   "/vehicle/:vehicleId/last-meter",
   asyncHandler(async (req, res) => {
-    res.json(await tripsService.lastClosingMeter(Number(req.params.vehicleId)));
+    // Part L: ?excludeTripId= drops the trip being edited from the lookup so it
+    // cannot be its own previous meter.
+    const excludeTripId = req.query.excludeTripId ? Number(req.query.excludeTripId) : undefined;
+    res.json(
+      await tripsService.lastClosingMeter(
+        Number(req.params.vehicleId),
+        Number.isFinite(excludeTripId) ? excludeTripId : undefined
+      )
+    );
   })
 );
 

@@ -40,6 +40,8 @@ let seq = 0;
 async function seedShop(opening: number): Promise<{ id: number; name: string }> {
   seq += 1;
   const shop = await mastersService.upsertShop({
+    email: `fixture-shop-${Math.random().toString(36).slice(2,8)}@example.com`,
+    associationType: "Ass Vij",
     shopName: `LG Shop ${seq}`,
     ownerName: "Owner",
     phoneNumber: `974300${String(seq).padStart(4, "0")}`,

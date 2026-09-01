@@ -942,16 +942,22 @@ export const tripsService = {
                 const existingStatus = existing?.rowCount ? str(existing.rows[0].status) : "Draft";
                 const expensesAlready = Boolean(existing?.rows[0]?.expenses_step_submitted);
                 const submittingExpenses = body.expensesStepSubmitted === true;
-                if (submittingExpenses && existingStatus !== "Completed" && existingStatus !== "Deleted") {
+                if (existingStatus === "Completed" || existingStatus === "Deleted") {
+                    // Part Q: a Completed (or Deleted) trip stays Completed (or Deleted)
+                    // through ordinary wizard editing — including a Step 5 re-submit,
+                    // which carries status:"Pending" from the step flags. Never demote.
+                    if (body.status != null && body.status !== existingStatus)
+                        delete body.status;
+                }
+                else if (submittingExpenses) {
                     body.status = "Pending";
                 }
-                else if (!submittingExpenses && !expensesAlready) {
+                else if (!expensesAlready) {
                     if (body.status === "Pending" || existingStatus === "Pending") {
                         body.status = "Draft";
                     }
                 }
-                else if (!submittingExpenses &&
-                    (existingStatus === "Pending" || existingStatus === "Completed" || existingStatus === "Deleted") &&
+                else if (existingStatus === "Pending" &&
                     body.status != null &&
                     body.status !== existingStatus &&
                     body.status !== "Deleted") {
@@ -1113,7 +1119,12 @@ export const tripsService = {
             -- NULL) instead of COALESCE silently keeping the old/default value.
             opening_meter = CASE WHEN $67::boolean THEN $11 ELSE opening_meter END,
             advance_amount = CASE WHEN $68::boolean THEN $12 ELSE advance_amount END,
-            start_step_submitted = COALESCE($13, start_step_submitted),
+            -- Part D: step-submitted flags are monotonic latches. Once a step
+            -- has been submitted it can never become unsubmitted again, on ANY
+            -- path (Save Progress, wizard edit, generic PUT, mobile sync), no
+            -- matter what the client sends. First submission still works:
+            -- COALESCE(TRUE, FALSE) OR FALSE = TRUE.
+            start_step_submitted = COALESCE($13, start_step_submitted) OR start_step_submitted,
             source_farm_id = COALESCE($14, source_farm_id),
             source_farm = COALESCE($15, source_farm),
             reached_time = COALESCE($16, reached_time),
@@ -1122,15 +1133,15 @@ export const tripsService = {
             farm_address = COALESCE($19, farm_address),
             avg_bird_weight = COALESCE($20, avg_bird_weight),
             farm_remarks = COALESCE($21, farm_remarks),
-            farm_step_submitted = COALESCE($22, farm_step_submitted),
+            farm_step_submitted = COALESCE($22, farm_step_submitted) OR farm_step_submitted,
             dc_weight = COALESCE($23, dc_weight),
             total_birds = COALESCE($24, total_birds),
             boxes = COALESCE($25, boxes),
             avg_weight = COALESCE($26, avg_weight),
             pickup_load_time = COALESCE($27, pickup_load_time),
             dc_photo_key = COALESCE($28, dc_photo_key),
-            pickup_step_submitted = COALESCE($29, pickup_step_submitted),
-            delivery_step_submitted = COALESCE($30, delivery_step_submitted),
+            pickup_step_submitted = COALESCE($29, pickup_step_submitted) OR pickup_step_submitted,
+            delivery_step_submitted = COALESCE($30, delivery_step_submitted) OR delivery_step_submitted,
             closing_meter = COALESCE($31, closing_meter),
             end_meter = COALESCE($32, end_meter),
             end_time = COALESCE($33, end_time),
@@ -1156,8 +1167,8 @@ export const tripsService = {
             submitted_at = CASE
               WHEN COALESCE($51::boolean, FALSE) AND submitted_at IS NULL THEN COALESCE($49, NOW())
               ELSE submitted_at END,
-            end_step_submitted = COALESCE($50, end_step_submitted),
-            expenses_step_submitted = COALESCE($51, expenses_step_submitted),
+            end_step_submitted = COALESCE($50, end_step_submitted) OR end_step_submitted,
+            expenses_step_submitted = COALESCE($51, expenses_step_submitted) OR expenses_step_submitted,
             total_km = COALESCE($52, total_km),
             total_shops = COALESCE($53, total_shops),
             total_weight = COALESCE($54, total_weight),
@@ -1889,8 +1900,114 @@ export const tripsService = {
             };
         });
     },
+    /**
+     * Orders module — create or locate the day's Shop Order Collection
+     * container and upsert its collected-shop plan rows.
+     *
+     * The container is a vehicle-LESS `trips` row identified by an
+     * ORD-YYYYMMDD-NN trip number that Orders supplies (the backend never
+     * generates one here, and never assigns a `TR-` number). It only ever
+     * holds Orders plan rows in `trip_deliveries` (remarks start with
+     * `[ORDER]`). It is NOT a vehicle trip: no vehicle / crew / meter, and
+     * none of the Step 1→3 pickup / capacity gates run. It is idempotent by
+     * `trip_no`, so a repeated save or a network retry updates the same
+     * container instead of creating a second one, and `id = 0` on the wire is
+     * never turned into a real numbered DB trip.
+     *
+     *  - the collection stage is always a permissive "save" (partial
+     *    collections allowed, no final validation);
+     *  - `startStepSubmitted === true` is Finish Collection — it latches the
+     *    container's `start_step_submitted` flag (monotonic, never cleared).
+     */
+    async saveCollectionContainer(body) {
+        const tripNo = str(body.tripNo).trim();
+        if (!/^ORD-\d{8}-\d+$/.test(tripNo)) {
+            throw new AppError(422, "A valid collection number (ORD-YYYYMMDD-NN) is required.");
+        }
+        const finished = body.startStepSubmitted === true;
+        const planRows = Array.isArray(body.deliveries)
+            ? body.deliveries
+            : [];
+        const tripDate = dateOnly(body.tripDate) ??
+            `${tripNo.slice(4, 8)}-${tripNo.slice(8, 10)}-${tripNo.slice(10, 12)}`;
+        return withTransaction(async (client) => {
+            // One container per ORD trip number (idempotent create-or-locate).
+            await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`ord_container_${tripNo}`]);
+            let row = (await client.query(`SELECT * FROM trips WHERE trip_no = $1 LIMIT 1`, [tripNo])).rows[0];
+            if (row && num(row.vehicle_id) > 0) {
+                throw new AppError(409, `${tripNo} is a vehicle trip, not a collection container.`);
+            }
+            if (!row) {
+                row = (await client.query(`INSERT INTO trips (trip_no, trip_date, status, start_step_submitted)
+             VALUES ($1, $2::date, 'Draft', $3)
+             RETURNING *`, [tripNo, tripDate, finished])).rows[0];
+            }
+            else if (finished && !row.start_step_submitted) {
+                row = (await client.query(`UPDATE trips SET start_step_submitted = TRUE, updated_at = NOW()
+             WHERE id = $1 RETURNING *`, [num(row.id)])).rows[0];
+            }
+            else {
+                await client.query(`UPDATE trips SET updated_at = NOW() WHERE id = $1`, [num(row.id)]);
+            }
+            const containerId = num(row.id);
+            // A collection save is a full snapshot of the day's collected shops —
+            // replace the plan rows (the same delete + reinsert the Step 4 path
+            // uses). No capacity / pickup checks: there is no vehicle yet.
+            await client.query(`DELETE FROM trip_deliveries WHERE trip_id = $1`, [containerId]);
+            let serial = 0;
+            for (const d of planRows) {
+                const shopId = numOrNull(d.shopId ?? d.shop_id);
+                if (!shopId)
+                    continue;
+                serial += 1;
+                const saleNo = await generateSaleNo(client, containerId, tripNo);
+                const rawRemarks = str(d.remarks ?? "").trim();
+                const remarks = rawRemarks.startsWith("[ORDER]") ? rawRemarks : "[ORDER]";
+                await client.query(`INSERT INTO trip_deliveries
+             (trip_id, sale_no, serial_no, box_no, shop_id, shop_name,
+              bird_type_id, bird_type, birds, weight, mortality, mort_kg,
+              rate, amount, remarks, delivery_mode, client_key)
+           VALUES ($1,$2,$3,$4,$5,$6,NULL,'',$7,$8,0,0,NULL,0,$9,'box',$10)`, [
+                    containerId,
+                    saleNo,
+                    num(d.serialNo ?? d.serial_no ?? serial),
+                    num(d.boxNo ?? d.box_no ?? 0),
+                    shopId,
+                    str(d.shopName ?? d.shop_name ?? ""),
+                    num(d.birds ?? 0),
+                    num(d.weight ?? 0),
+                    remarks,
+                    d.clientKey == null ? null : str(d.clientKey),
+                ]);
+            }
+            return hydrateTrip(client, row, { includeDcPhoto: false });
+        });
+    },
     async submitStep(id, step, body) {
         const isSaveMode = body.mode === "save";
+        // ── Orders module: the day's Shop Order Collection container ────────────
+        // A vehicle-LESS `trips` row identified by an ORD-YYYYMMDD-NN number that
+        // only holds Orders plan rows. `POST /trips/0/steps/deliveries` (ORD
+        // number in `tripNo`) creates / locates it; a later save may address the
+        // same container by its real id. Either way it must NOT run the
+        // vehicle-trip Step 1→3 gates or the Step 3 capacity checks.
+        if (step === "deliveries") {
+            const ordNo = str(body.tripNo).trim();
+            let containerRow;
+            if (Number.isFinite(id) && id > 0) {
+                containerRow = (await query(`SELECT trip_no, vehicle_id FROM trips WHERE id = $1`, [id])).rows[0];
+            }
+            const isContainer = (/^ORD-\d{8}-\d+$/.test(ordNo) && (!Number.isFinite(id) || id <= 0)) ||
+                (containerRow != null &&
+                    containerRow.vehicle_id == null &&
+                    /^ORD-\d{8}-\d+$/.test(str(containerRow.trip_no)));
+            if (isContainer) {
+                return this.saveCollectionContainer({
+                    ...body,
+                    tripNo: ordNo || str(containerRow?.trip_no),
+                });
+            }
+        }
         if (step === "farm" || step === "pickup" || step === "deliveries" || step === "expenses") {
             const gate = await query(`SELECT start_step_submitted, farm_step_submitted, pickup_step_submitted, delivery_step_submitted FROM trips WHERE id = $1`, [id]);
             if (!gate.rowCount)
@@ -2163,9 +2280,11 @@ export const tripsService = {
      * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
      * maintenance), not just trip closing meters, while keeping the same
      * response shape the frontend already consumes. */
-    async lastClosingMeter(vehicleId) {
+    async lastClosingMeter(vehicleId, excludeTripId) {
         await validateTripForeignKeys({ vehicleId });
-        const latest = await getLatestVehicleMeter(null, vehicleId);
+        // Part L: on edit, exclude the trip being edited so its own start/end meter
+        // is never reported back as its "previous" reading.
+        const latest = await getLatestVehicleMeter(null, vehicleId, excludeTripId ?? null);
         if (!latest)
             return null;
         return {

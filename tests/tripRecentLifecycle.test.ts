@@ -62,6 +62,8 @@ async function seedThroughStep4() {
     status: "Active",
   });
   const shop = await mastersService.upsertShop({
+    email: `fixture-shop-${Math.random().toString(36).slice(2,8)}@example.com`,
+    associationType: "Ass Vij",
     shopName: `LC Shop ${n}`,
     ownerName: "Owner",
     phoneNumber: `6600000${n}`,
@@ -243,6 +245,72 @@ describe("Draft → Pending lifecycle", () => {
     assert.equal(loaded.body.status, "Completed");
     const again = await getJson(baseUrl, `/api/trips/${trip.id}`);
     assert.equal(again.body.status, "Completed");
+  });
+
+  it("Pending → Draft is rejected by the status control", async () => {
+    const { trip } = await seedThroughStep4();
+    await postJson(baseUrl, `/api/trips/${trip.id}/steps/expenses`, { endMeter: 50400, destinationTolls: 0 });
+    const denied = await patchJson(baseUrl, `/api/trips/${trip.id}/status`, { status: "Draft" });
+    assert.equal(denied.status, 422, "Pending → Draft must never be allowed");
+    const loaded = await getJson(baseUrl, `/api/trips/${trip.id}`);
+    assert.equal(loaded.body.status, "Pending");
+  });
+
+  it("deletion is NOT a status transition — PATCH status=Deleted is rejected from every state", async () => {
+    // Draft
+    const draft = await seedThroughStep4();
+    const d1 = await patchJson(baseUrl, `/api/trips/${draft.trip.id}/status`, { status: "Deleted" });
+    assert.equal(d1.status, 422, "Draft → Deleted via status must be rejected");
+    assert.equal((await getJson(baseUrl, `/api/trips/${draft.trip.id}`)).body.status, "Draft");
+
+    // Pending
+    const pending = await seedThroughStep4();
+    await postJson(baseUrl, `/api/trips/${pending.trip.id}/steps/expenses`, { endMeter: 50400, destinationTolls: 0 });
+    const d2 = await patchJson(baseUrl, `/api/trips/${pending.trip.id}/status`, { status: "Deleted" });
+    assert.equal(d2.status, 422, "Pending → Deleted via status must be rejected");
+
+    // Completed
+    const completed = await seedThroughStep4();
+    await postJson(baseUrl, `/api/trips/${completed.trip.id}/steps/expenses`, { endMeter: 50400, destinationTolls: 0 });
+    await patchJson(baseUrl, `/api/trips/${completed.trip.id}/status`, { status: "Completed", approvedBy: "Auditor" });
+    const d3 = await patchJson(baseUrl, `/api/trips/${completed.trip.id}/status`, { status: "Deleted" });
+    assert.equal(d3.status, 422, "Completed → Deleted via status must be rejected");
+    assert.equal((await getJson(baseUrl, `/api/trips/${completed.trip.id}`)).body.status, "Completed");
+  });
+
+  it("editing a Completed trip's Step 5 keeps it Completed (Part Q — no demote to Pending)", async () => {
+    const { trip } = await seedThroughStep4();
+    await postJson(baseUrl, `/api/trips/${trip.id}/steps/expenses`, { endMeter: 50400, destinationTolls: 0 });
+    await patchJson(baseUrl, `/api/trips/${trip.id}/status`, { status: "Completed", approvedBy: "Auditor" });
+    assert.equal((await getJson(baseUrl, `/api/trips/${trip.id}`)).body.status, "Completed");
+
+    // A Step 5 re-submit (edit) carries status:"Pending" from the step flags —
+    // it must NOT demote a Completed trip.
+    const edited = await postJson(baseUrl, `/api/trips/${trip.id}/steps/expenses`, {
+      endMeter: 50450,
+      destinationTolls: 0,
+      meals: 123,
+      expensesStepSubmitted: true,
+      endStepSubmitted: true,
+    });
+    assert.equal(edited.status, 200, JSON.stringify(edited.body));
+    const after = (await getJson(baseUrl, `/api/trips/${trip.id}`)).body;
+    assert.equal(after.status, "Completed", "Completed trip stays Completed after a Step 5 edit");
+    assert.equal(after.expensesStepSubmitted, true);
+    assert.equal(after.endStepSubmitted, true);
+    assert.equal(Number(after.meals), 123, "the edit persisted");
+  });
+
+  it("the dedicated delete action still deletes a Completed trip (and it stays deleted)", async () => {
+    const { trip } = await seedThroughStep4();
+    await postJson(baseUrl, `/api/trips/${trip.id}/steps/expenses`, { endMeter: 50400, destinationTolls: 0 });
+    await patchJson(baseUrl, `/api/trips/${trip.id}/status`, { status: "Completed", approvedBy: "Auditor" });
+    await tripsService.softDelete(trip.id, "audit-delete-completed");
+    const row = (
+      (await getJson(baseUrl, "/api/trips?includeDeleted=true")).body as Array<{ id: number; deleted?: boolean; status?: string }>
+    ).find((t) => t.id === trip.id);
+    assert.equal(row?.deleted, true);
+    assert.equal(row?.status, "Deleted");
   });
 });
 

@@ -60,7 +60,9 @@ export function validateShopFields(raw: Record<string, unknown>): FieldError[] {
   const shopName = str(raw.shopName ?? raw.shop_name).trim();
   const ownerName = str(raw.ownerName ?? raw.owner_name).trim();
   const phoneNumber = str(raw.phoneNumber ?? raw.phone ?? raw.phone_number).trim();
-  const city = str(raw.city).trim();
+  // `city` replaced the legacy `village` field (shop master redesign); accept
+  // either key, consistent with the other alias fallbacks above.
+  const city = str(raw.city ?? raw.village).trim();
 
   if (isMissing(shopName)) errors.push({ field: "shopName", message: "Shop Name is required." });
   else if (shopName.length < 3) errors.push({ field: "shopName", message: "Shop Name must contain at least 3 characters." });
@@ -70,8 +72,12 @@ export function validateShopFields(raw: Record<string, unknown>): FieldError[] {
   else if (!/^[0-9]{10}$/.test(phoneNumber)) errors.push({ field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
   if (isMissing(city)) errors.push({ field: "city", message: "City is required." });
   
+  // Shop master redesign (migration 040): Email ID is REQUIRED on create,
+  // update and bulk import.
   const email = str(raw.email).trim();
-  if (!isMissing(email) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (isMissing(email)) {
+    errors.push({ field: "email", message: "Email ID is required." });
+  } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     errors.push({ field: "email", message: "Please enter a valid email address." });
   }
   

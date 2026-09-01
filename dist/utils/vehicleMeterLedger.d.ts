@@ -32,7 +32,14 @@ export declare function lockVehicleForMeterWrite(client: Client, vehicleId: numb
  * across trips (start + end), fuel expenses, and fleet maintenance — ordered
  * by business date first (event_date), then the most precise available
  * "actually happened at" timestamp (event_instant) — never MAX(meter). */
-export declare function getLatestVehicleMeter(client: Queryable, vehicleId: number): Promise<MeterEvent | null>;
+export declare function getLatestVehicleMeter(client: Queryable, vehicleId: number, 
+/**
+ * Part L: when the Step 1 opening-meter hint is fetched while EDITING a trip,
+ * that trip's own TRIP_START / TRIP_END rows must be excluded so the current
+ * trip is never treated as its own previous meter. `vehicle_meter_events`
+ * stores the trip id in `record_id` for both trip sources.
+ */
+excludeTripId?: number | null): Promise<MeterEvent | null>;
 interface ExcludeSpec {
     sourceType: MeterSourceType | MeterSourceType[];
     recordId: string | number;
