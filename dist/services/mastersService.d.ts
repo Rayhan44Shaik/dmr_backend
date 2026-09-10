@@ -3,8 +3,10 @@ export declare function mapEmployee(row: Record<string, unknown>): Employee;
 export declare function mapVehicle(row: Record<string, unknown>): Vehicle;
 export declare function mapFarm(row: Record<string, unknown>): Farm;
 export declare function mapShop(row: Record<string, unknown>): Shop;
+export declare function mapBank(row: Record<string, unknown>): Bank;
 export declare function mapBirdType(row: Record<string, unknown>): BirdType;
 export declare const mastersService: {
+    getEmployee(id: number): Promise<Employee>;
     listEmployees(department?: string): Promise<Employee[]>;
     upsertEmployee(body: Partial<Employee> & {
         employeeName: string;
@@ -16,6 +18,7 @@ export declare const mastersService: {
         deactivated: boolean;
     }>;
     listVehicles(): Promise<Vehicle[]>;
+    getVehicle(id: number): Promise<Vehicle>;
     upsertVehicle(body: Partial<Vehicle> & {
         vehicleNumber: string;
     }): Promise<Vehicle>;
@@ -26,6 +29,7 @@ export declare const mastersService: {
         deactivated: boolean;
     }>;
     listFarms(): Promise<Farm[]>;
+    getFarm(id: number): Promise<Farm>;
     upsertFarm(body: Partial<Farm> & {
         farmName: string;
     }): Promise<Farm>;
@@ -36,6 +40,7 @@ export declare const mastersService: {
         deactivated: boolean;
     }>;
     listShops(): Promise<Shop[]>;
+    getShop(id: number): Promise<Shop>;
     upsertShop(body: Partial<Shop> & {
         shopName: string;
     }): Promise<Shop>;
@@ -70,6 +75,7 @@ export declare const mastersService: {
      */
     bulkCreateBirdTypes(inputs: Record<string, unknown>[]): Promise<BirdType[]>;
     listBanks(): Promise<Bank[]>;
+    getBank(id: number): Promise<Bank>;
     upsertBank(body: Partial<Bank> & {
         bankName: string;
     }): Promise<Bank>;
@@ -80,6 +86,7 @@ export declare const mastersService: {
         deactivated: boolean;
     }>;
     listBirdTypes(): Promise<BirdType[]>;
+    getBirdType(id: number): Promise<BirdType>;
     upsertBirdType(body: Partial<BirdType> & {
         birdType: string;
     }): Promise<BirdType>;

@@ -2,59 +2,32 @@ import { z } from "zod";
 import { AppError } from "../middleware/errorHandler.js";
 import type { TripWizardStep } from "../utils/tripResume.js";
 
-/** Empty/blank → null. Numeric 0 is preserved (not coerced to null). */
-function emptyToNullNumber(v: unknown): unknown {
-  if (v === undefined || v === null || v === "") return null;
-  if (typeof v === "number") {
-    return Number.isFinite(v) ? v : null;
-  }
-  if (typeof v === "string") {
-    const trimmed = v.trim();
-    if (trimmed === "") return null;
-    const n = Number(trimmed);
-    return Number.isFinite(n) ? n : v;
-  }
-  return v;
-}
-
 const boxDetailSchema = z.object({
-  boxNo: z.preprocess(emptyToNullNumber, z.number().int().positive()),
-  birds: z.preprocess(emptyToNullNumber, z.number().int().nonnegative().optional()),
-  weight: z.preprocess(emptyToNullNumber, z.number().nonnegative().optional()),
-  avgWeight: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
+  boxNo: z.coerce.number().int().positive(),
+  birds: z.coerce.number().int().nonnegative().optional(),
+  weight: z.coerce.number().nonnegative().optional(),
 });
 
 // Used for autosave (very permissive)
-const requiredPositiveId = (message: string) =>
-  z.preprocess(
-    emptyToNullNumber,
-    z
-      .number({ required_error: message, invalid_type_error: message })
-      .int()
-      .positive(message)
-  );
-
 const deliverySchema = z.object({
   id: z.coerce.number().int().optional(),
-  serialNo: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
-  boxNo: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
-  shopId: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
+  serialNo: z.coerce.number().int().nullable().optional(),
+  boxNo: z.coerce.number().int().nullable().optional(),
+  shopId: z.coerce.number().int().nullable().optional(),
   shopName: z.string().optional(),
-  birdTypeId: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
+  birdTypeId: z.coerce.number().int().nullable().optional(),
   birdType: z.string().optional(),
-  birds: z.preprocess(emptyToNullNumber, z.number().int().nonnegative("Bird count cannot be negative").optional()),
-  weight: z.preprocess(emptyToNullNumber, z.number().nonnegative("Weight cannot be negative").optional()),
-  mortality: z.preprocess(emptyToNullNumber, z.number().int().nonnegative("Mortality cannot be negative").optional()),
-  mortKg: z.preprocess(emptyToNullNumber, z.number().nonnegative("Mortality weight cannot be negative").nullable().optional()),
-  rate: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
-  // Amount is computed server-side from weight × rate when omitted. Do not coerce
-  // missing/undefined with z.coerce.number() — that becomes NaN ("Expected number, received nan").
-  amount: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
+  birds: z.coerce.number().int().nonnegative("Bird count cannot be negative").optional(),
+  weight: z.coerce.number().nonnegative("Weight cannot be negative").optional(),
+  mortality: z.coerce.number().int().nonnegative("Mortality cannot be negative").optional(),
+  mortKg: z.coerce.number().nonnegative("Mortality weight cannot be negative").nullable().optional(),
+  rate: z.coerce.number().nonnegative().nullable().optional(),
+  amount: z.coerce.number().nonnegative().optional(),
   remarks: z.string().optional(),
   deliveryMode: z.enum(["box", "weight"]).optional(),
   selectedBoxIds: z.array(z.coerce.number().int()).optional(),
-  farmBirds: z.preprocess(emptyToNullNumber, z.number().int().nullable().optional()),
-  farmWeight: z.preprocess(emptyToNullNumber, z.number().nullable().optional()),
+  farmBirds: z.coerce.number().int().nullable().optional(),
+  farmWeight: z.coerce.number().nullable().optional(),
   perBoxData: z.array(boxDetailSchema).optional(),
   autoCaptureTime: z.string().nullable().optional(),
 });
@@ -77,23 +50,14 @@ const deliverySaveSchema = z
   .passthrough();
 
 const dieselEntrySchema = z.object({
-  id: z.coerce.number().int().optional(),
   rowIndex: z.coerce.number().int().nonnegative(),
   litres: z.coerce.number().nonnegative().nullable().optional(),
   rate: z.coerce.number().nonnegative().nullable().optional(),
-  amount: z.coerce.number().nonnegative().nullable().optional(),
   meter: z.coerce.number().nonnegative().nullable().optional(),
   bunkName: z.string().nullable().optional(),
   bunkGps: z.string().nullable().optional(),
-  gpsLat: z.coerce.number().nullable().optional(),
-  gpsLon: z.coerce.number().nullable().optional(),
-  gpsAccuracy: z.coerce.number().nonnegative().nullable().optional(),
-  gpsCapturedAt: z.string().nullable().optional(),
   imageData: z.string().nullable().optional(),
   imageName: z.string().nullable().optional(),
-  submitted: z.boolean().optional(),
-  submittedAt: z.string().nullable().optional(),
-  clientKey: z.string().max(120).nullable().optional(),
 });
 
 export const tripAutosaveSchema = z
@@ -121,44 +85,42 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
   start: z
     .object({
       tripDate: z.string().min(1),
-      vehicleId: z.coerce
-        .number({ required_error: "Vehicle is required", invalid_type_error: "Vehicle is required" })
-        .int()
-        .positive("Vehicle is required"),
-      driverId: z.coerce
-        .number({ required_error: "Driver is required", invalid_type_error: "Driver is required" })
-        .int()
-        .positive("Driver is required"),
-      supervisorId: z.coerce
-        .number({ required_error: "Supervisor is required", invalid_type_error: "Supervisor is required" })
-        .int()
-        .positive("Supervisor is required"),
-      helpers: z
-        .array(z.string().trim().min(1))
-        .min(1, "Please add at least one Helper."),
-      loaders: z
-        .array(z.string().trim().min(1))
-        .min(1, "Please add at least one Loader."),
-      // Empty/blank → NULL. Explicit 0 stays 0 (meter ledger decides if 0 is valid).
-      openingMeter: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
-      advanceAmount: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
+      // FIXED: Moved required_error inside z.coerce.number() instead of .int()
+      vehicleId: z.coerce.number({ required_error: "Vehicle is required" }).int(),
+      driverId: z.coerce.number({ required_error: "Driver is required" }).int(),
+      supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int(),
+      // Starting Meter / Advance are OPTIONAL. Empty/blank/null must pass through
+      // as null so the backend meter validator is skipped (and the value is
+      // persisted as NULL). A non-null value is still checked as a number.
+      openingMeter: z.preprocess(
+        (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+        z.number().nonnegative().nullable().optional()
+      ),
+      advanceAmount: z.preprocess(
+        (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+        z.number().nonnegative().nullable().optional()
+      ),
       startTime: z.string().optional(),
     })
     .passthrough(),
   farm: z
     .object({
-      sourceFarmId: z.coerce.number().int().positive("Farm is required"),
-      destMeter: z.coerce.number().positive("Farm meter is required"),
-      farmAddress: z.string().trim().min(1, "Farm address is required."),
+      sourceFarmId: z.coerce.number().int(),
+      destMeter: z.coerce.number().nonnegative(),
       // reached_time is never sent by the frontend (backend captures it) — but
       // tolerate a null in case a legacy client sends one.
       reachedTime: z.string().nullable().optional(),
       // Tolls may legitimately be 0. Negative values are normalized to 0.
       pickupTolls: z.preprocess(
-        (v) => (v == null || v === "" ? 0 : Math.max(0, Number(v))),
-        z.coerce.number().nonnegative()
+        (v) => (v == null || v === "" ? undefined : Math.max(0, Number(v))),
+        z.coerce.number().nonnegative().optional()
       ),
-      avgBirdWeight: z.coerce.number().positive("Average Bird Weight is required"),
+      // Avg Bird Weight is a Step 2 mandatory submit field (matches the UI).
+      avgBirdWeight: z.coerce.number().positive(),
+      farmBirdTypeId: z.coerce.number().int().optional(),
+      farmBirdCount: z.coerce.number().int().nonnegative().nullable().optional(),
+      farmLoadWeight: z.coerce.number().nonnegative().nullable().optional(),
+      // GPS — optional capture; ranges validated below when supplied.
       farmGpsLat: z.coerce.number().nullable().optional(),
       farmGpsLon: z.coerce.number().nullable().optional(),
       farmGpsAccuracy: z.coerce.number().nonnegative().nullable().optional(),
@@ -175,23 +137,33 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
     ),
   pickup: z
     .object({
+      // Totals are OPTIONAL from the client — the backend derives and persists
+      // them from the submitted box rows (authoritative).
       dcWeight: z.coerce.number().positive().optional(),
       totalBirds: z.coerce.number().int().positive().optional(),
       boxes: z.coerce.number().int().positive().optional(),
       boxDetails: z.array(boxDetailSchema).min(1),
-      dcPhotoKey: z.string().optional(),
+      dcPhotoKey: z.string().min(1, "DC Photo is required."),
       dcPhotoKey2: z.string().optional(),
-      dcPhotoData: z.string().optional(),
-      dcPhotoData2: z.string().optional(),
     })
-    .passthrough(),
+    .passthrough()
+    .refine(
+      (data) => {
+        const photoCount = (data.dcPhotoKey ? 1 : 0) + (data.dcPhotoKey2 ? 1 : 0);
+        return photoCount >= 1 && photoCount <= 2;
+      },
+      {
+        message: "Step 3 requires between 1 and 2 photos.",
+        path: ["dcPhotoKey"],
+      }
+    ),
   deliveries: z
     .object({
       deliveries: z.array(
         deliverySchema.extend({
-          shopId: requiredPositiveId("Shop is required for a delivery"),
-          birdTypeId: requiredPositiveId("Bird Type is required."),
-          amount: z.preprocess(emptyToNullNumber, z.number().nonnegative().nullable().optional()),
+          // FIXED: Moved required_error inside z.coerce.number()
+          shopId: z.coerce.number({ required_error: "Shop is required for a delivery" }).int(),
+          amount: z.coerce.number({ required_error: "Amount is required" }).nonnegative(),
         })
       ).min(1, "At least one delivery is required"),
     })
@@ -215,9 +187,7 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
     .object({
       closingMeter: z.coerce.number().nonnegative().optional(),
       endMeter: z.coerce.number().nonnegative().optional(),
-      destinationTolls: z.coerce.number().nonnegative().optional(),
-      deliveryTolls: z.coerce.number().nonnegative().optional(),
-      endTime: z.string().optional(),
+      endTime: z.string({ required_error: "End time is required" }), 
     })
     .passthrough()
     .refine((data) => data.closingMeter != null || data.endMeter != null, {
@@ -277,24 +247,10 @@ function firstValidationMessage(
   return `Step "${step}" includes invalid data.`;
 }
 
-// The trip *status control* state machine — used by PATCH /trips/:id/status.
-//
-//   Draft    → Pending      (Step 5 must be submitted)
-//   Pending  → Completed    (every step must be submitted)
-//   Completed → (nothing; Completed stays Completed under ordinary editing)
-//   Deleted  → (terminal)
-//
-// `Pending → Draft` MUST NEVER EXIST.
-//
-// Deletion is NOT a status transition: `Deleted` is reached ONLY through the
-// dedicated delete action (DELETE /trips/:id → tripsService.softDelete, which
-// does not consult this map) plus its 10-second undo — never the status
-// dropdown. Kept identical to the frontend mirror in
-// frontend/dmr-poultries-web/src/shared/trip/workflow.ts.
 const TRIP_STATUS_TRANSITIONS: Record<string, string[]> = {
-  Draft: ["Pending"],
-  Pending: ["Completed"],
-  Completed: [],
+  Draft: ["Pending", "Deleted"],
+  Pending: ["Completed", "Draft", "Deleted"],
+  Completed: ["Deleted"],
   Deleted: [],
 };
 

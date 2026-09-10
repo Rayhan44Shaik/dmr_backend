@@ -1,16 +1,6 @@
 import { z } from "zod";
 import { AppError } from "../middleware/errorHandler.js";
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-/** True when the value is a real calendar date (rejects 2026-02-30 etc.). */
-function isValidDate(value) {
-    if (!DATE_RE.test(value))
-        return false;
-    const [year, month, day] = value.split("-").map(Number);
-    const dt = new Date(Date.UTC(year, month - 1, day));
-    return (dt.getUTCFullYear() === year &&
-        dt.getUTCMonth() === month - 1 &&
-        dt.getUTCDate() === day);
-}
+import { isValidDateOnly } from "../utils/dateValidation.js";
 export const analyticsQuerySchema = z.object({
     fromDate: z.string().optional(),
     toDate: z.string().optional(),
@@ -26,14 +16,6 @@ export const analyticsQuerySchema = z.object({
  * so an omitted range never silently drifts to a different window than the
  * frontend uses.
  */
-/**
- * Analytics-level safe maximum for a report window. Prevents an uncontrolled
- * weekly series (and unbounded aggregation) from a pathological range.
- * 50 years ≈ 2600 Sunday buckets — well within the memory/CPU budget while
- * covering every realistic fleet report. Exceeding it is rejected with a clear
- * 400 (global validation is left untouched).
- */
-export const MAX_ANALYTICS_RANGE_DAYS = 50 * 366;
 export function parseAnalyticsQuery(query) {
     const parsed = analyticsQuerySchema.safeParse(query);
     if (!parsed.success) {
@@ -49,20 +31,14 @@ export function parseAnalyticsQuery(query) {
     const fromDate = parsed.data.fromDate ?? defaultFrom;
     const toDate = parsed.data.toDate ?? defaultTo;
     const vehicleId = parsed.data.vehicleId ?? null;
-    if (!isValidDate(fromDate)) {
+    if (!isValidDateOnly(fromDate)) {
         throw new AppError(400, `Invalid fromDate "${fromDate}". Expected a YYYY-MM-DD date.`);
     }
-    if (!isValidDate(toDate)) {
+    if (!isValidDateOnly(toDate)) {
         throw new AppError(400, `Invalid toDate "${toDate}". Expected a YYYY-MM-DD date.`);
     }
     if (fromDate > toDate) {
         throw new AppError(400, "fromDate cannot be after toDate.");
-    }
-    const rangeDays = Math.round((new Date(`${toDate}T00:00:00Z`).getTime() -
-        new Date(`${fromDate}T00:00:00Z`).getTime()) /
-        86_400_000) + 1;
-    if (rangeDays > MAX_ANALYTICS_RANGE_DAYS) {
-        throw new AppError(400, `Analytics date range is too large (${rangeDays} days). Maximum is ${MAX_ANALYTICS_RANGE_DAYS} days (~50 years).`);
     }
     return { fromDate, toDate, vehicleId };
 }

@@ -6,7 +6,6 @@ import { shopSalesService } from "../services/shopSalesService.js";
 import { collectionsService } from "../services/collectionsService.js";
 import { fuelExpensesService } from "../services/fuelExpensesService.js";
 import { pool } from "../config/db.js";
-import { mobileAuthService, MOBILE_DEV_USERNAME, MOBILE_DEV_PASSWORD } from "../services/mobileAuthService.js";
 // Uses shared pool → DATABASE_URL (dmr_poultries @ localhost:5432 / user dmr)
 async function seed() {
     console.log("Seeding sample masters...");
@@ -70,7 +69,7 @@ async function seed() {
         shopName: "City Broiler",
         ownerName: "Raju",
         phoneNumber: "9885000001",
-        city: "Vijayawada",
+        village: "Vijayawada",
         status: "Active",
     });
     const birdType = await mastersService.upsertBirdType({
@@ -272,7 +271,6 @@ async function seed() {
         createdBy: "seed",
     });
     await fuelExpensesService.approve(fuel.id, { approvedBy: "Seed Admin" });
-    await mobileAuthService.ensureDevAccount();
     console.log("Seed complete.");
     console.log({
         tripId: trip.id,
@@ -282,7 +280,6 @@ async function seed() {
         shopRateId: rate.id,
         saleId: sale.id,
         fuelExpenseId: fuel.id,
-        mobileLogin: { username: MOBILE_DEV_USERNAME, password: MOBILE_DEV_PASSWORD },
     });
 }
 seed()

@@ -54,28 +54,21 @@ export async function lockVehicleForMeterWrite(client, vehicleId) {
  * across trips (start + end), fuel expenses, and fleet maintenance — ordered
  * by business date first (event_date), then the most precise available
  * "actually happened at" timestamp (event_instant) — never MAX(meter). */
-export async function getLatestVehicleMeter(client, vehicleId, 
-/**
- * Part L: when the Step 1 opening-meter hint is fetched while EDITING a trip,
- * that trip's own TRIP_START / TRIP_END rows must be excluded so the current
- * trip is never treated as its own previous meter. `vehicle_meter_events`
- * stores the trip id in `record_id` for both trip sources.
- */
-excludeTripId) {
-    const exclude = excludeTripId && excludeTripId > 0
-        ? `AND NOT (source_type IN ('TRIP_START', 'TRIP_END') AND record_id = $2)`
-        : "";
-    const params = [vehicleId];
-    if (exclude)
-        params.push(String(excludeTripId));
+export async function getLatestVehicleMeter(client, vehicleId) {
     const result = await run(client, `SELECT * FROM vehicle_meter_events
      WHERE vehicle_id = $1
-     ${exclude}
      ORDER BY event_date DESC, event_instant DESC, created_at DESC, record_id DESC
-     LIMIT 1`, params);
+     LIMIT 1`, [vehicleId]);
     if (!result.rowCount)
         return null;
     return mapEvent(result.rows[0]);
+}
+/** Latest accepted reading for every vehicle that has meter history. */
+export async function listLatestVehicleMeters() {
+    const result = await query(`SELECT DISTINCT ON (vehicle_id) vehicle_id, meter
+     FROM vehicle_meter_events
+     ORDER BY vehicle_id, event_date DESC, event_instant DESC, created_at DESC, record_id DESC`);
+    return result.rows.map((row) => ({ vehicleId: num(row.vehicle_id), meter: num(row.meter) }));
 }
 function excludeClause(exclude, paramOffset) {
     if (!exclude)
@@ -125,22 +118,6 @@ export async function validateVehicleMeter(client, opts) {
     if (next && opts.newMeter > next.meter) {
         throw new AppError(422, `${opts.context} of ${opts.newMeter} KM exceeds a later recorded reading of ${next.meter} KM (${SOURCE_LABELS[next.sourceType]} ${next.ref}) and would break the vehicle's chronological meter history.`, { nextMeter: next.meter, nextSource: next.sourceType, nextRef: next.ref });
     }
-}
-/**
- * Latest accepted meter event for EVERY vehicle in one query (DISTINCT ON the
- * same authoritative ordering as getLatestVehicleMeter). Backs the Upcoming
- * Service calculation so the frontend receives one batch from the database
- * instead of N per-vehicle calls — there is exactly ONE meter history and it
- * lives here. Read-only; reuses the vehicle_meter_events view.
- */
-export async function listLatestVehicleMeters() {
-    const result = await query(`SELECT * FROM (
-       SELECT DISTINCT ON (vehicle_id) *
-       FROM vehicle_meter_events
-       ORDER BY vehicle_id, event_date DESC, event_instant DESC, created_at DESC, record_id DESC
-     ) latest
-     ORDER BY vehicle_id ASC`);
-    return result.rows.map(mapEvent);
 }
 /** Full ordered timeline for a vehicle — backs the Vehicle History UI. */
 export async function listVehicleMeterHistory(vehicleId) {

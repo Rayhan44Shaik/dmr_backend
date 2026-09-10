@@ -30,22 +30,22 @@ export interface PaymentBody {
 }
 export declare const paymentBodySchema: z.ZodObject<{
     paymentDate: z.ZodEffects<z.ZodEffects<z.ZodString, string, string>, string, unknown>;
-    paymentType: z.ZodEffects<z.ZodEnum<["Farmer Payment", "Fuel Payment", "Vehicle Maintenance", "Salary Payment", "EMI Payment", "FASTag Recharge", "Office Expense", "Tax Payment", "Other Expense"]>, "Vehicle Maintenance" | "Farmer Payment" | "Fuel Payment" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense", unknown>;
+    paymentType: z.ZodEffects<z.ZodEnum<["Farmer Payment", "Fuel Payment", "Vehicle Maintenance", "Salary Payment", "EMI Payment", "FASTag Recharge", "Office Expense", "Tax Payment", "Other Expense"]>, "Farmer Payment" | "Fuel Payment" | "Vehicle Maintenance" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense", unknown>;
     paidTo: z.ZodEffects<z.ZodString, string, unknown>;
     amount: z.ZodNumber;
     paymentMode: z.ZodEffects<z.ZodEnum<["Cash", "Bank Transfer", "UPI", "NEFT", "RTGS", "IMPS", "Cheque"]>, "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque", unknown>;
     referenceNo: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
     remarks: z.ZodEffects<z.ZodOptional<z.ZodNullable<z.ZodString>>, string | null | undefined, unknown>;
     category: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
-    status: z.ZodOptional<z.ZodEffects<z.ZodEnum<["Draft", "Approved", "Paid", "Cancelled"]>, "Draft" | "Approved" | "Paid" | "Cancelled", unknown>>;
+    status: z.ZodOptional<z.ZodEffects<z.ZodEnum<["Draft", "Approved", "Paid", "Cancelled"]>, "Draft" | "Approved" | "Cancelled" | "Paid", unknown>>;
     createdBy: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
 }, "strip", z.ZodTypeAny, {
     amount: number;
     paymentMode: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque";
     paymentDate: string;
-    paymentType: "Vehicle Maintenance" | "Farmer Payment" | "Fuel Payment" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense";
+    paymentType: "Farmer Payment" | "Fuel Payment" | "Vehicle Maintenance" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense";
     paidTo: string;
-    status?: "Draft" | "Approved" | "Paid" | "Cancelled" | undefined;
+    status?: "Draft" | "Approved" | "Cancelled" | "Paid" | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
     referenceNo?: string | undefined;
@@ -71,31 +71,31 @@ export declare const paymentBodySchema: z.ZodObject<{
  */
 export declare const paymentUpdateSchema: z.ZodObject<{
     paymentDate: z.ZodOptional<z.ZodEffects<z.ZodEffects<z.ZodString, string, string>, string, unknown>>;
-    paymentType: z.ZodOptional<z.ZodEffects<z.ZodEnum<["Farmer Payment", "Fuel Payment", "Vehicle Maintenance", "Salary Payment", "EMI Payment", "FASTag Recharge", "Office Expense", "Tax Payment", "Other Expense"]>, "Vehicle Maintenance" | "Farmer Payment" | "Fuel Payment" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense", unknown>>;
+    paymentType: z.ZodOptional<z.ZodEffects<z.ZodEnum<["Farmer Payment", "Fuel Payment", "Vehicle Maintenance", "Salary Payment", "EMI Payment", "FASTag Recharge", "Office Expense", "Tax Payment", "Other Expense"]>, "Farmer Payment" | "Fuel Payment" | "Vehicle Maintenance" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense", unknown>>;
     paidTo: z.ZodOptional<z.ZodEffects<z.ZodString, string, unknown>>;
     amount: z.ZodOptional<z.ZodNumber>;
     paymentMode: z.ZodOptional<z.ZodEffects<z.ZodEnum<["Cash", "Bank Transfer", "UPI", "NEFT", "RTGS", "IMPS", "Cheque"]>, "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque", unknown>>;
     referenceNo: z.ZodOptional<z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>>;
     remarks: z.ZodOptional<z.ZodEffects<z.ZodOptional<z.ZodNullable<z.ZodString>>, string | null | undefined, unknown>>;
     category: z.ZodOptional<z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>>;
-    status: z.ZodOptional<z.ZodOptional<z.ZodEffects<z.ZodEnum<["Draft", "Approved", "Paid", "Cancelled"]>, "Draft" | "Approved" | "Paid" | "Cancelled", unknown>>>;
+    status: z.ZodOptional<z.ZodOptional<z.ZodEffects<z.ZodEnum<["Draft", "Approved", "Paid", "Cancelled"]>, "Draft" | "Approved" | "Cancelled" | "Paid", unknown>>>;
     createdBy: z.ZodOptional<z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>>;
 }, "strip", z.ZodTypeAny, {
-    status?: "Draft" | "Approved" | "Paid" | "Cancelled" | undefined;
-    amount?: number | undefined;
+    status?: "Draft" | "Approved" | "Cancelled" | "Paid" | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
+    amount?: number | undefined;
     paymentMode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
     referenceNo?: string | undefined;
     paymentDate?: string | undefined;
-    paymentType?: "Vehicle Maintenance" | "Farmer Payment" | "Fuel Payment" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense" | undefined;
+    paymentType?: "Farmer Payment" | "Fuel Payment" | "Vehicle Maintenance" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense" | undefined;
     paidTo?: string | undefined;
     category?: string | undefined;
 }, {
     status?: unknown;
-    amount?: number | undefined;
     remarks?: unknown;
     createdBy?: unknown;
+    amount?: number | undefined;
     paymentMode?: unknown;
     referenceNo?: unknown;
     paymentDate?: unknown;
@@ -117,31 +117,31 @@ export interface PaymentListQuery {
 export declare const paymentListQuerySchema: z.ZodObject<{
     fromDate: z.ZodEffects<z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>, string | undefined, unknown>;
     toDate: z.ZodEffects<z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>, string | undefined, unknown>;
-    paymentType: z.ZodEffects<z.ZodOptional<z.ZodEnum<["Farmer Payment", "Fuel Payment", "Vehicle Maintenance", "Salary Payment", "EMI Payment", "FASTag Recharge", "Office Expense", "Tax Payment", "Other Expense"]>>, "Vehicle Maintenance" | "Farmer Payment" | "Fuel Payment" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense" | undefined, unknown>;
+    paymentType: z.ZodEffects<z.ZodOptional<z.ZodEnum<["Farmer Payment", "Fuel Payment", "Vehicle Maintenance", "Salary Payment", "EMI Payment", "FASTag Recharge", "Office Expense", "Tax Payment", "Other Expense"]>>, "Farmer Payment" | "Fuel Payment" | "Vehicle Maintenance" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense" | undefined, unknown>;
     mode: z.ZodEffects<z.ZodOptional<z.ZodEnum<["Cash", "Bank Transfer", "UPI", "NEFT", "RTGS", "IMPS", "Cheque"]>>, "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined, unknown>;
-    status: z.ZodEffects<z.ZodOptional<z.ZodEnum<["Draft", "Approved", "Paid", "Cancelled"]>>, "Draft" | "Approved" | "Paid" | "Cancelled" | undefined, unknown>;
+    status: z.ZodEffects<z.ZodOptional<z.ZodEnum<["Draft", "Approved", "Paid", "Cancelled"]>>, "Draft" | "Approved" | "Cancelled" | "Paid" | undefined, unknown>;
     search: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
     page: z.ZodEffects<z.ZodOptional<z.ZodNumber>, number | undefined, unknown>;
     limit: z.ZodEffects<z.ZodOptional<z.ZodNumber>, number | undefined, unknown>;
     includeDeleted: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
 }, "strip", z.ZodTypeAny, {
-    status?: "Draft" | "Approved" | "Paid" | "Cancelled" | undefined;
+    status?: "Draft" | "Approved" | "Cancelled" | "Paid" | undefined;
     fromDate?: string | undefined;
     toDate?: string | undefined;
     page?: number | undefined;
+    search?: string | undefined;
     limit?: number | undefined;
     mode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
-    search?: string | undefined;
     includeDeleted?: string | undefined;
-    paymentType?: "Vehicle Maintenance" | "Farmer Payment" | "Fuel Payment" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense" | undefined;
+    paymentType?: "Farmer Payment" | "Fuel Payment" | "Vehicle Maintenance" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense" | undefined;
 }, {
     status?: unknown;
     fromDate?: unknown;
     toDate?: unknown;
     page?: unknown;
+    search?: unknown;
     limit?: unknown;
     mode?: unknown;
-    search?: unknown;
     includeDeleted?: unknown;
     paymentType?: unknown;
 }>;

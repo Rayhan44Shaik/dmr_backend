@@ -54,6 +54,7 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     totalCost: z.ZodOptional<z.ZodNumber>;
     remarks: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     createdBy: z.ZodOptional<z.ZodString>;
+    idempotencyKey: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     date: string;
     vehicleId: number;
@@ -62,9 +63,9 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     serviceType: string;
     vehicleNo?: string | null | undefined;
     driverId?: number | null | undefined;
-    driverName?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
+    driverName?: string | null | undefined;
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
@@ -76,6 +77,7 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
         specification?: string | undefined;
     }[] | undefined;
     totalCost?: number | undefined;
+    idempotencyKey?: string | undefined;
 }, {
     date: string;
     vehicleId: number;
@@ -84,9 +86,9 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     serviceType: string;
     vehicleNo?: string | null | undefined;
     driverId?: number | null | undefined;
-    driverName?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
+    driverName?: string | null | undefined;
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
@@ -98,6 +100,7 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
         quantity?: number | undefined;
     }[] | undefined;
     totalCost?: number | undefined;
+    idempotencyKey?: string | undefined;
 }>;
 /** Update body — everything optional; removeDocumentIds lets the caller
  * explicitly remove existing documents during an update (never silently). */
@@ -135,16 +138,17 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     totalCost: z.ZodOptional<z.ZodOptional<z.ZodNumber>>;
     remarks: z.ZodOptional<z.ZodOptional<z.ZodNullable<z.ZodString>>>;
     createdBy: z.ZodOptional<z.ZodOptional<z.ZodString>>;
+    idempotencyKey: z.ZodOptional<z.ZodOptional<z.ZodString>>;
 } & {
     removeDocumentIds: z.ZodOptional<z.ZodArray<z.ZodNumber, "many">>;
 }, "strip", z.ZodTypeAny, {
-    vehicleNo?: string | null | undefined;
     date?: string | undefined;
+    vehicleNo?: string | null | undefined;
     vehicleId?: number | undefined;
     driverId?: number | null | undefined;
-    driverName?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
+    driverName?: string | null | undefined;
     currentKM?: number | undefined;
     nextServiceKM?: number | null | undefined;
     maintenanceType?: string | string[] | undefined;
@@ -159,15 +163,16 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
         specification?: string | undefined;
     }[] | undefined;
     totalCost?: number | undefined;
+    idempotencyKey?: string | undefined;
     removeDocumentIds?: number[] | undefined;
 }, {
-    vehicleNo?: string | null | undefined;
     date?: string | undefined;
+    vehicleNo?: string | null | undefined;
     vehicleId?: number | undefined;
     driverId?: number | null | undefined;
-    driverName?: string | null | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
+    driverName?: string | null | undefined;
     currentKM?: number | undefined;
     nextServiceKM?: number | null | undefined;
     maintenanceType?: string | string[] | undefined;
@@ -182,6 +187,7 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
         quantity?: number | undefined;
     }[] | undefined;
     totalCost?: number | undefined;
+    idempotencyKey?: string | undefined;
     removeDocumentIds?: number[] | undefined;
 }>;
 export declare const fleetMaintenanceApproveSchema: z.ZodObject<{

@@ -59,7 +59,12 @@ const multipart = async (method, path, fields, files) => {
 };
 
 const stamp = Date.now().toString().slice(-6);
-const TEST_DATE = "2026-08-13";
+const TEST_DATE = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Kolkata",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+}).format(new Date());
 const createdMaintIds = [];
 let vehId = null, drvId = null;
 
@@ -68,8 +73,8 @@ try {
   const vMax = (await db(`SELECT COALESCE(MAX(vehicle_no),0)::int m FROM vehicles`)).rows[0].m;
   const eMax = (await db(`SELECT COALESCE(MAX(employee_no),0)::int m FROM employees`)).rows[0].m;
   const veh = await db(
-    `INSERT INTO vehicles (vehicle_no, vehicle_number, vehicle_type, status)
-     VALUES ($1,$2,'Truck','Active') RETURNING id, vehicle_number`,
+    `INSERT INTO vehicles (vehicle_no, vehicle_number, vehicle_type, status, no_of_boxes, bird_capacity, capacity_kg)
+     VALUES ($1,$2,'Truck','Active',85,1000,5000) RETURNING id, vehicle_number`,
     [vMax + 1, `DOCFIX-${stamp}`]
   );
   vehId = veh.rows[0].id;
@@ -222,13 +227,13 @@ try {
   // ============ TEST 11: edit maintenance → existing docs remain ============
   console.log("\n=== TEST 11: Update maintenance keeps existing documents ===");
   const t11 = await jsonApi("PUT", `/fleet/maintenance/${t2.data?.id}`, {
-    currentKM: 46210,
+    currentKM: 45230,
     serviceType: "Oil Change + Brake Service",
     parts: [{ name: "Brake Pads", specification: "Front", quantity: 1, rate: 1800 }],
     remarks: "updated",
   });
   check("T11 200 updated", t11.status === 200, `got ${t11.status} ${JSON.stringify(t11.data?.error ?? t11.data)}`);
-  check("T11 currentKM applied", t11.data?.currentKM === 46210);
+  check("T11 currentKM applied", t11.data?.currentKM === 45230);
   check("T11 existing docs remain", Array.isArray(t11.data?.documents) && t11.data.documents.length === 1 && t11.data.documents[0].id === t2Doc?.id, JSON.stringify(t11.data?.documents));
   check("T11 doc row still in DB", (await countDocs(t2.data?.id)) === 1);
 

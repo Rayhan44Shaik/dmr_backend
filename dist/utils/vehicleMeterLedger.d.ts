@@ -32,14 +32,12 @@ export declare function lockVehicleForMeterWrite(client: Client, vehicleId: numb
  * across trips (start + end), fuel expenses, and fleet maintenance — ordered
  * by business date first (event_date), then the most precise available
  * "actually happened at" timestamp (event_instant) — never MAX(meter). */
-export declare function getLatestVehicleMeter(client: Queryable, vehicleId: number, 
-/**
- * Part L: when the Step 1 opening-meter hint is fetched while EDITING a trip,
- * that trip's own TRIP_START / TRIP_END rows must be excluded so the current
- * trip is never treated as its own previous meter. `vehicle_meter_events`
- * stores the trip id in `record_id` for both trip sources.
- */
-excludeTripId?: number | null): Promise<MeterEvent | null>;
+export declare function getLatestVehicleMeter(client: Queryable, vehicleId: number): Promise<MeterEvent | null>;
+/** Latest accepted reading for every vehicle that has meter history. */
+export declare function listLatestVehicleMeters(): Promise<Array<{
+    vehicleId: number;
+    meter: number;
+}>>;
 interface ExcludeSpec {
     sourceType: MeterSourceType | MeterSourceType[];
     recordId: string | number;
@@ -68,14 +66,6 @@ export declare function validateVehicleMeter(client: Client, opts: {
     exclude?: ExcludeSpec;
     context: string;
 }): Promise<void>;
-/**
- * Latest accepted meter event for EVERY vehicle in one query (DISTINCT ON the
- * same authoritative ordering as getLatestVehicleMeter). Backs the Upcoming
- * Service calculation so the frontend receives one batch from the database
- * instead of N per-vehicle calls — there is exactly ONE meter history and it
- * lives here. Read-only; reuses the vehicle_meter_events view.
- */
-export declare function listLatestVehicleMeters(): Promise<MeterEvent[]>;
 /** Full ordered timeline for a vehicle — backs the Vehicle History UI. */
 export declare function listVehicleMeterHistory(vehicleId: number): Promise<Array<MeterEvent & {
     diffFromPrevious: number | null;

@@ -1,8 +1,8 @@
 import type pg from "pg";
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
-import type { EmiOverview, VehicleEMI, VehicleEMIInstallment, EMIStatus } from "../types/fleet.js";
-import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
+import type { VehicleEMI, VehicleEMIInstallment, EMIStatus } from "../types/fleet.js";
+import { dateOnly, num, str } from "../utils/coerce.js";
 import { assertVehicleExists } from "../utils/fkValidation.js";
 import {
   emiCreateSchema,
@@ -74,86 +74,6 @@ function isoDate(y: number, m: number, d: number): string {
   return `${y}-${pad2(m + 1)}-${pad2(d)}`;
 }
 
-function lastDayOfMonthUTC(y: number, m: number): number {
-  return new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
-}
-
-/** Next occurrence of `day` on or after `after` (UTC), clamped to month length.
- * Month-end is handled safely: a 31st never produces an invalid date in a
- * 30-day month or February. */
-function nextOccurrenceOnOrAfter(day: number, after: Date): string {
-  const y0 = after.getUTCFullYear();
-  const m0 = after.getUTCMonth();
-  for (let i = 0; i < 2; i++) {
-    const y = m0 + i >= 12 ? y0 + 1 : y0;
-    const m = (m0 + i) % 12;
-    const clamped = Math.min(day, lastDayOfMonthUTC(y, m));
-    const candidate = new Date(Date.UTC(y, m, clamped));
-    if (candidate.getTime() >= after.getTime()) return isoDate(y, m, clamped);
-  }
-  const y = m0 + 1 >= 12 ? y0 + 1 : y0;
-  const m = (m0 + 1) % 12;
-  return isoDate(y, m, Math.min(day, lastDayOfMonthUTC(y, m)));
-}
-
-/** Map one EMI-overview row (Vehicle Master LEFT JOIN payment schedule) onto the
- * read-only EmiOverview DTO. Vehicle facts are authoritative from `vehicles`;
- * only the completed/payment state comes from the EMI schedule. */
-function mapOverviewRow(row: Record<string, unknown>): EmiOverview {
-  // Total EMI — Vehicle Master is authoritative; fall back to the EMI record's
-  // tenure only for legacy vehicles that predate the master total_emis column.
-  const masterTotal = numOrNull(row.master_total_emis);
-  const emiTotal = numOrNull(row.emi_total_emis);
-  const totalEMIs = Math.max(0, masterTotal ?? emiTotal ?? 0);
-
-  // Purchase amount — Vehicle Master is authoritative; fall back to the EMI
-  // record's loan amount for legacy vehicles with no master purchase amount.
-  const purchaseAmount = numOrNull(row.purchase_amount) ?? numOrNull(row.loan_amount) ?? 0;
-
-  const masterDate = dateOnly(row.purchase_date);
-  const emiStartDate = dateOnly(row.emi_start_date);
-  const masterEmiStartDate = dateOnly(row.master_emi_start_date);
-  const purchaseDate = masterDate ?? emiStartDate;
-
-  const completedRaw = Math.max(0, num(row.paid_emis));
-  const completedEMIs = Math.min(completedRaw, totalEMIs);
-  const pendingEMIs = Math.max(0, totalEMIs - completedEMIs);
-  const completed = totalEMIs > 0 ? completedEMIs >= totalEMIs : true;
-
-  const monthlyEmi =
-    numOrNull(row.emi_amount) ??
-    (totalEMIs > 0 ? Math.round(purchaseAmount / totalEMIs) : 0);
-
-  const emiRecordId = numOrNull(row.emi_id);
-  let emiDate: string | null;
-  if (completed) {
-    emiDate = null;
-  } else if (emiRecordId != null && row.next_emi_date != null) {
-    emiDate = dateOnly(row.next_emi_date);
-  } else {
-    const day = numOrNull(row.emi_day);
-    emiDate = day && day >= 1 ? nextOccurrenceOnOrAfter(day, new Date()) : null;
-  }
-
-  return {
-    vehicleId: num(row.vehicle_id),
-    vehicleNo: str(row.vehicle_number),
-    financeCompany: str(row.finance_company),
-    purchaseAmount,
-    purchaseDate,
-    emiDay: numOrNull(row.emi_day),
-    totalEMIs,
-    completedEMIs,
-    pendingEMIs,
-    emiDate,
-    status: completed ? "completed" : "pending",
-    monthlyEmi,
-    emiRecordId,
-    startDate: emiStartDate ?? masterEmiStartDate,
-    endDate: dateOnly(row.emi_end_date),
-  };
-}
-
 /**
  * Monthly due dates for the schedule — the "next occurrence of emiDay" rule the
  * existing EMI table uses (setDate(purchaseDate, emiDay), then advance by
@@ -194,11 +114,14 @@ function monthlyDueDates(
  * zero-value schedule row.
  */
 function installmentAmounts(loanAmount: number, totalEMIs: number): { emiAmount: number; amounts: number[] } {
-  const raw = Math.round(loanAmount / totalEMIs);
-  const emiAmount = raw > 0 ? raw : 1;
-  const amounts: number[] = Array(totalEMIs).fill(emiAmount);
-  const total = amounts.reduce((sum, a) => sum + a, 0);
-  amounts[totalEMIs - 1] = emiAmount + (loanAmount - total);
+  const totalCents = Math.round(loanAmount * 100);
+  const baseCents = Math.floor(totalCents / totalEMIs);
+  const remainder = totalCents % totalEMIs;
+  const emiAmount = Math.round(totalCents / totalEMIs) / 100;
+  const amounts = Array.from(
+    { length: totalEMIs },
+    (_, index) => (baseCents + (index < remainder ? 1 : 0)) / 100
+  );
   return { emiAmount, amounts };
 }
 
@@ -309,54 +232,6 @@ export const vehicleEmiService = {
     return result.rows.map(mapEmi);
   },
 
-  /**
-   * EMI Management overview — read-only, derived from the Vehicle Master.
-   *
-   * Every ACTIVE vehicle from `vehicles` is returned (whether or not it has an
-   * EMI payment record yet). The authoritative vehicle facts — vehicle number,
-   * purchase amount, purchase date, total EMI, EMI day — are read from the
-   * Vehicle Master; the completed/payment state is LEFT JOINed from the
-   * existing EMI payment schedule (vehicle_emis + vehicle_emi_installments)
-   * when one exists. Status is restricted to pending | completed.
-   *
-   * The EMI page consumes ONLY this endpoint for its table and dashboard
-   * cards. It never creates a separate vehicle or an EMI-specific copy of the
-   * master data, and it never persists vehicle-master facts here.
-   */
-  async overview(): Promise<EmiOverview[]> {
-    const result = await query(`
-      SELECT
-        v.id                    AS vehicle_id,
-        v.vehicle_number        AS vehicle_number,
-        v.purchase_date         AS purchase_date,
-        v.purchase_amount       AS purchase_amount,
-        v.emi_day               AS emi_day,
-        v.emi_start_date        AS master_emi_start_date,
-        v.total_emis            AS master_total_emis,
-        e.id                    AS emi_id,
-        e.finance_company       AS finance_company,
-        e.loan_amount           AS loan_amount,
-        e.emi_amount            AS emi_amount,
-        e.start_date            AS emi_start_date,
-        e.end_date              AS emi_end_date,
-        e.total_emis            AS emi_total_emis,
-        e.paid_emis             AS paid_emis,
-        e.next_emi_date         AS next_emi_date
-      FROM vehicles v
-      LEFT JOIN vehicle_emis e ON e.vehicle_id = v.id
-      WHERE v.status = 'Active'
-    `);
-    // Deterministic default order for the EMI page: PENDING first, then
-    // COMPLETED; within each group vehicle number A → Z.
-    const rows = result.rows.map(mapOverviewRow);
-    const statusRank: Record<EmiOverview["status"], number> = { pending: 0, completed: 1 };
-    return rows.sort((a, b) => {
-      const rankDiff = statusRank[a.status] - statusRank[b.status];
-      if (rankDiff !== 0) return rankDiff;
-      return a.vehicleNo.localeCompare(b.vehicleNo);
-    });
-  },
-
   async getById(id: number): Promise<VehicleEMI> {
     const result = await query(`${EMI_SELECT} WHERE e.id = $1`, [id]);
     if (!result.rowCount) throw new AppError(404, "EMI record not found");
@@ -418,7 +293,7 @@ export const vehicleEmiService = {
       const loanAmount = num(data.loanAmount);
       const { emiAmount, amounts } = installmentAmounts(loanAmount, totalEMIs);
       const startDate = dateOnly(data.startDate) ?? "";
-      const endDate = data.endDate ? dateOnly(data.endDate) : monthsAfter(startDate, totalEMIs);
+      const endDate = monthsAfter(startDate, totalEMIs);
 
       const dueDates = monthlyDueDates(startDate, emiDay, totalEMIs);
       const nextEmiDate = dueDates[0] ?? null;
@@ -479,23 +354,15 @@ export const vehicleEmiService = {
         data.loanAmount !== undefined ||
         data.totalEMIs !== undefined ||
         data.startDate !== undefined ||
-        data.endDate !== undefined ||
-        data.emiAmount !== undefined;
+        false;
 
       if (scheduleAffected) {
         const { emiDay } = await resolveVehicle(client, vehicleId);
         const totalEMIs = num(data.totalEMIs ?? row.total_emis);
         const loanAmount = num(data.loanAmount ?? row.loan_amount);
-        const { emiAmount, amounts } =
-          data.emiAmount !== undefined
-            ? { emiAmount: num(data.emiAmount), amounts: null }
-            : installmentAmounts(loanAmount, totalEMIs);
-        const resolvedEmiAmount =
-          data.emiAmount !== undefined ? num(data.emiAmount) : emiAmount;
+        const { emiAmount: resolvedEmiAmount, amounts } = installmentAmounts(loanAmount, totalEMIs);
         const startDate = dateOnly(data.startDate ?? row.start_date) ?? "";
-        const endDate = data.endDate
-          ? dateOnly(data.endDate)
-          : monthsAfter(startDate, totalEMIs);
+        const endDate = monthsAfter(startDate, totalEMIs);
 
         // Preserve paid count + paid history. A shrunken tenure can never keep
         // more paid installments than total installments.
@@ -505,8 +372,7 @@ export const vehicleEmiService = {
         await client.query(`DELETE FROM vehicle_emi_installments WHERE vehicle_emi_id = $1`, [id]);
 
         const dueDates = monthlyDueDates(startDate, emiDay, totalEMIs);
-        const scheduleAmounts = amounts ?? Array(totalEMIs).fill(resolvedEmiAmount);
-        await insertSchedule(client, id, scheduleAmounts, dueDates, paidCount, stamps);
+        await insertSchedule(client, id, amounts, dueDates, paidCount, stamps);
 
         await client.query(
           `UPDATE vehicle_emis SET
@@ -537,14 +403,9 @@ export const vehicleEmiService = {
    * aggregates (paidEMIs, nextEMIDate, status) in the same transaction so the
    * payment, the pending count, the next due date and the overall status can
    * never drift out of sync. Fully-paid EMIs reject further payments (409).
-   *
-   * When `idempotencyKey` is present, a retry of the same logical payment
-   * returns the already-applied result and does not pay another installment.
-   * The EMI row is locked so concurrent requests cannot double-apply.
    */
   async pay(id: number, body: unknown): Promise<VehicleEMI> {
     const data = parseBody(emiPaySchema, body);
-    const idempotencyKey = data.idempotencyKey?.trim() || null;
 
     return withTransaction(async (client) => {
       const existing = await client.query(
@@ -553,56 +414,44 @@ export const vehicleEmiService = {
       );
       if (!existing.rowCount) throw new AppError(404, "EMI record not found");
 
-      if (idempotencyKey) {
-        const claimed = await client.query<{ installment_id: number }>(
-          `INSERT INTO vehicle_emi_payment_keys (vehicle_emi_id, idempotency_key, installment_id)
-           SELECT $1, $2, i.id
-             FROM vehicle_emi_installments i
-            WHERE i.vehicle_emi_id = $1 AND i.status = 'pending'
-            ORDER BY i.installment_no
-            LIMIT 1
-           ON CONFLICT (vehicle_emi_id, idempotency_key) DO NOTHING
-           RETURNING installment_id`,
-          [id, idempotencyKey]
+      const request = await client.query(
+        `INSERT INTO vehicle_emi_payment_requests (request_id, vehicle_emi_id)
+         VALUES ($1::uuid, $2)
+         ON CONFLICT (request_id) DO NOTHING
+         RETURNING request_id`,
+        [data.idempotencyKey, id]
+      );
+      if (!request.rowCount) {
+        const replay = await client.query(
+          `SELECT vehicle_emi_id FROM vehicle_emi_payment_requests WHERE request_id = $1::uuid`,
+          [data.idempotencyKey]
         );
-
-        if (!claimed.rowCount) {
-          const prior = await client.query(
-            `SELECT installment_id FROM vehicle_emi_payment_keys
-             WHERE vehicle_emi_id = $1 AND idempotency_key = $2`,
-            [id, idempotencyKey]
-          );
-          if (prior.rowCount) {
-            return fetchEmi(client, id);
-          }
-          throw new AppError(409, "EMI is already fully paid");
+        if (num(replay.rows[0]?.vehicle_emi_id) !== id) {
+          throw new AppError(409, "Idempotency key was already used for another EMI record");
         }
-
-        await client.query(
-          `UPDATE vehicle_emi_installments SET status = 'paid', paid_at = NOW()
-           WHERE id = $1 AND status = 'pending'`,
-          [num(claimed.rows[0].installment_id)]
-        );
-      } else {
-        const next = await client.query(
-          `SELECT id FROM vehicle_emi_installments
-           WHERE vehicle_emi_id = $1 AND status = 'pending'
-           ORDER BY installment_no
-           LIMIT 1
-           FOR UPDATE`,
-          [id]
-        );
-        if (!next.rowCount) {
-          throw new AppError(409, "EMI is already fully paid");
-        }
-
-        await client.query(
-          `UPDATE vehicle_emi_installments SET status = 'paid', paid_at = NOW()
-           WHERE id = $1`,
-          [num(next.rows[0].id)]
-        );
+        return fetchEmi(client, id);
       }
 
+      const next = await client.query(
+        `SELECT id FROM vehicle_emi_installments
+         WHERE vehicle_emi_id = $1 AND status = 'pending'
+         ORDER BY installment_no
+         LIMIT 1`,
+        [id]
+      );
+      if (!next.rowCount) {
+        await client.query(
+          `DELETE FROM vehicle_emi_payment_requests WHERE request_id = $1::uuid`,
+          [data.idempotencyKey]
+        );
+        throw new AppError(409, "EMI is already fully paid");
+      }
+
+      await client.query(
+        `UPDATE vehicle_emi_installments SET status = 'paid', paid_at = NOW()
+         WHERE id = $1`,
+        [num(next.rows[0].id)]
+      );
       await recomputeAggregates(client, id);
       return fetchEmi(client, id);
     });

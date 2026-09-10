@@ -21,10 +21,8 @@ export const EMPLOYEE_DEPARTMENTS = [
   "Supervisor",
 ];
 
-export const ACTIVE_STATUSES = ["Active", "Inactive"] as const;
-export const EMPLOYEE_STATUSES = ["Active", "Inactive", "Suspended"] as const;
-
-export const ASSOCIATION_TYPES = ["Vencob Vij", "Vencob Gun", "Ass Vij", "Ass Gun"] as const;
+export const ACTIVE_STATUSES = ["Active", "Inactive"];
+export const EMPLOYEE_STATUSES = ["Active", "Inactive", "Suspended"];
 
 export type FieldError = { field: string; message: string };
 
@@ -60,9 +58,7 @@ export function validateShopFields(raw: Record<string, unknown>): FieldError[] {
   const shopName = str(raw.shopName ?? raw.shop_name).trim();
   const ownerName = str(raw.ownerName ?? raw.owner_name).trim();
   const phoneNumber = str(raw.phoneNumber ?? raw.phone ?? raw.phone_number).trim();
-  // `city` replaced the legacy `village` field (shop master redesign); accept
-  // either key, consistent with the other alias fallbacks above.
-  const city = str(raw.city ?? raw.village).trim();
+  const village = str(raw.city ?? raw.village).trim();
 
   if (isMissing(shopName)) errors.push({ field: "shopName", message: "Shop Name is required." });
   else if (shopName.length < 3) errors.push({ field: "shopName", message: "Shop Name must contain at least 3 characters." });
@@ -70,57 +66,11 @@ export function validateShopFields(raw: Record<string, unknown>): FieldError[] {
   else if (ownerName.length < 3) errors.push({ field: "ownerName", message: "Owner Name must contain at least 3 characters." });
   if (isMissing(phoneNumber)) errors.push({ field: "phoneNumber", message: "Mobile Number is required." });
   else if (!/^[0-9]{10}$/.test(phoneNumber)) errors.push({ field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
-  if (isMissing(city)) errors.push({ field: "city", message: "City is required." });
-  
-  // Shop master redesign (migration 040): Email ID is REQUIRED on create,
-  // update and bulk import.
-  const email = str(raw.email).trim();
-  if (isMissing(email)) {
-    errors.push({ field: "email", message: "Email ID is required." });
-  } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    errors.push({ field: "email", message: "Please enter a valid email address." });
-  }
-  
-  const secondaryPhone = str(raw.secondaryPhoneNumber ?? raw.secondary_phone_number).trim();
-  if (!isMissing(secondaryPhone) && !/^[0-9]{10}$/.test(secondaryPhone)) {
-    errors.push({ field: "secondaryPhoneNumber", message: "Secondary Mobile Number must be exactly 10 digits." });
-  }
-
-  const latitude = raw.latitude;
-  if (!isMissing(latitude)) {
-    const lat = Number(latitude);
-    if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
-      errors.push({ field: "latitude", message: "Latitude must be between -90 and 90." });
-    }
-  }
-
-  const longitude = raw.longitude;
-  if (!isMissing(longitude)) {
-    const lon = Number(longitude);
-    if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
-      errors.push({ field: "longitude", message: "Longitude must be between -180 and 180." });
-    }
-  }
-
-  const paperRate = raw.paperRate;
-  if (!isMissing(paperRate)) {
-    const rate = Number(paperRate);
-    if (!Number.isInteger(rate) || rate < 1 || rate > 30) {
-      errors.push({ field: "paperRate", message: "Paper Rate must be an integer between 1 and 30." });
-    }
-  }
-
-  const associationType = str(raw.associationType ?? raw.association_type).trim();
-  if (isMissing(associationType)) {
-    errors.push({ field: "associationType", message: "Association Type is required." });
-  } else if (!ASSOCIATION_TYPES.includes(associationType as typeof ASSOCIATION_TYPES[number])) {
-    errors.push({ field: "associationType", message: `Association Type must be one of: ${ASSOCIATION_TYPES.join(", ")}` });
-  }
-
+  if (isMissing(village)) errors.push({ field: "city", message: "City is required." });
   if (!isMissing(raw.openingBalance) && !Number.isFinite(Number(raw.openingBalance))) {
     errors.push({ field: "openingBalance", message: "Opening Balance must be a valid number." });
   }
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;
@@ -143,7 +93,7 @@ export function validateFarmFields(raw: Record<string, unknown>): FieldError[] {
   else if (!/^[0-9]{10}$/.test(phoneNumber)) errors.push({ field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
   if (isMissing(village)) errors.push({ field: "village", message: "Village is required." });
   if (!isPositiveNumber(capacity)) errors.push({ field: "capacity", message: "Bird Capacity must be a positive number." });
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;
@@ -194,7 +144,7 @@ export function validateVehicleFields(raw: Record<string, unknown>): FieldError[
   for (const field of VEHICLE_DATE_FIELDS) {
     if (!isValidDateInput(raw[field])) errors.push({ field, message: `${field} must be a valid date (YYYY-MM-DD).` });
   }
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;
@@ -238,7 +188,7 @@ export function validateEmployeeFields(raw: Record<string, unknown>): FieldError
   if (!isValidDateInput(raw.joiningDate)) {
     errors.push({ field: "joiningDate", message: "Joining Date must be a valid date (YYYY-MM-DD)." });
   }
-  if (!isMissing(raw.status) && !EMPLOYEE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive" | "Suspended")) {
+  if (!isMissing(raw.status) && !EMPLOYEE_STATUSES.includes(String(raw.status).trim())) {
     errors.push({ field: "status", message: "Status must be Active, Inactive or Suspended." });
   }
   return errors;
@@ -253,7 +203,7 @@ export function validateBirdTypeFields(raw: Record<string, unknown>): FieldError
   if (!isPositiveNumber(averageWeight)) {
     errors.push({ field: "averageWeight", message: "Average Weight must be a positive number." });
   }
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;
@@ -264,7 +214,7 @@ export function validateRouteFields(raw: Record<string, unknown>): FieldError[] 
   const routeName = str(raw.routeName ?? raw.route_name).trim();
 
   if (isMissing(routeName)) errors.push({ field: "routeName", message: "Route name is required." });
-  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim() as "Active" | "Inactive")) {
+  if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });
   }
   return errors;

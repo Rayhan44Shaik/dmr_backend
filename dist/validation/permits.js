@@ -2,27 +2,35 @@
 import { z } from "zod";
 import { PERMIT_DOC_TYPES } from "../types/fleet.js";
 import { parseBody } from "./operations.js";
-const isDateString = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(new Date(`${v}T00:00:00Z`).getTime());
+import { isValidDateOnly } from "../utils/dateValidation.js";
 export const permitDocTypeSchema = z.enum(PERMIT_DOC_TYPES);
 /** Upsert body for a single (vehicle, doc_type) permit record. expiryDate is
  * mandatory — the Permits matrix is driven by expiry dates. The document scan
  * itself is optional and travels as a multipart file, never in this body. */
 export const permitBodySchema = z.object({
-    vehicleId: z.number().int().optional(),
+    vehicleId: z.number().int().positive().optional(),
     documentNumber: z.string().max(100).optional(),
     validFrom: z
         .string()
-        .refine(isDateString, "Valid-from date must be a valid YYYY-MM-DD value")
+        .refine(isValidDateOnly, "Valid-from date must be a valid YYYY-MM-DD value")
         .nullable()
         .optional(),
     expiryDate: z
         .string()
         .min(1, "Expiry date is required")
-        .refine(isDateString, "Expiry date must be a valid YYYY-MM-DD value"),
+        .refine(isValidDateOnly, "Expiry date must be a valid YYYY-MM-DD value"),
     remarks: z.string().nullable().optional(),
     createdBy: z.string().optional(),
     /** Explicitly remove the attached scan without replacing it. */
     removeDocument: z.boolean().optional(),
+}).superRefine((value, ctx) => {
+    if (value.validFrom && value.expiryDate && value.validFrom > value.expiryDate) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["expiryDate"],
+            message: "Expiry date cannot be before valid-from date",
+        });
+    }
 });
 /** Coerce a multer multipart body (all string values) into the permit schema
  * shape. Non-multipart JSON bodies pass through untouched by the route. */

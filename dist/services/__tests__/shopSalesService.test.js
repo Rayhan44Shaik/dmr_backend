@@ -65,7 +65,6 @@ async function makeCompletedTrip(f, opts) {
      RETURNING id`, [opts.tripNo]);
     const tripId = t.rows[0].id;
     f.tripIds.push(tripId);
-    await pool.query(`UPDATE trips SET delivery_step_submitted = TRUE, expenses_step_submitted = TRUE WHERE id = $1`, [tripId]);
     const d = await pool.query(`INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, bird_type_id, bird_type, birds, weight, rate)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)
      RETURNING id`, [
@@ -185,11 +184,11 @@ describe("Shop Sales visibility vs Rate Entry lock", () => {
             birds: 20,
             weight: 40,
         });
-        assert.equal(created.id, trip.deliveryId);
-        assert.equal(created.saleNo, `${trip.tripNo}-S01`);
+        assert.ok(created.id > 0);
+        assert.equal(created.saleNo, `${trip.tripNo}-S02`);
         // rate falls back to the locked Rate Entry when not supplied by the caller.
         assert.equal(created.rate, 55.5);
-        assert.equal(created.amount, Number((200 * 55.5).toFixed(2)));
+        assert.equal(created.amount, Number((40 * 55.5).toFixed(2)));
         assert.equal(created.status, "Approved");
         assert.equal(created.editable, true);
         // Rate Entry LOCKED moves the trip into Shop Sales â€” it does NOT make
@@ -207,8 +206,7 @@ describe("Shop Sales visibility vs Rate Entry lock", () => {
         assert.equal(updated.amount, Number((50 * 60).toFixed(2)));
         // Shop/trip reassignment remains permanently blocked, independent of
         // the edit window.
-        const afterShop = await shopSalesService.update(created.id, { shopId: shop.id });
-        assert.equal(afterShop.shopId, shop.id);
+        await assert.rejects(() => shopSalesService.update(created.id, { shopId: shop.id }), (err) => err instanceof AppError && err.status === 409);
         const removed = await shopSalesService.softDelete(created.id, "test cleanup");
         assert.equal(removed.deleted, true);
         const list = (await shopSalesService.list({ shopId: shop.id }));
@@ -271,7 +269,7 @@ describe("Existing Rate Entry behavior", () => {
         // Save (including the shop-wise rate on the trip's one delivery, so it
         // meets the completeness check the later lock() call performs).
         const saved = await rateEntryService.save(trip.tripId, {
-            rates: [{ deliveryId: trip.deliveryId, rate: 50 }],
+            rates: [{ deliveryId: trip.deliveryId, rate: 40 }],
         });
         assert.equal(saved.ratesEntered, 1);
         assert.equal(saved.rateLocked, false);
@@ -324,8 +322,8 @@ describe("Phase A/B backend integrity", () => {
         t.after(() => cleanup(f));
         const shop = await makeShop(f, "phase-ab-approved-shop");
         const tripId = await pool
-            .query(`INSERT INTO trips (trip_no, trip_date, status, deleted, total_birds, dc_weight, delivery_step_submitted, expenses_step_submitted)
-         VALUES ($1, CURRENT_DATE, 'Completed', FALSE, 1000, 2000, TRUE, TRUE) RETURNING id`, [`T-APPR-${uniqueInt()}`])
+            .query(`INSERT INTO trips (trip_no, trip_date, status, deleted, total_birds, dc_weight)
+         VALUES ($1, CURRENT_DATE, 'Approved', FALSE, 1000, 2000) RETURNING id`, [`T-APPR-${uniqueInt()}`])
             .then((r) => r.rows[0].id);
         f.tripIds.push(tripId);
         await assertAppErrorStatus(shopSalesService.create({ tripId, shopId: shop.id, birds: 10, weight: 20 }), 409);
@@ -426,14 +424,13 @@ describe("Phase A/B backend integrity", () => {
             weight: 60,
         });
         assert.ok(first.id > 0);
-        const retry = await shopSalesService.create({
+        await assertAppErrorStatus(shopSalesService.create({
             tripId: trip.tripId,
             shopId: shop.id,
             shopName: "phase-ab-dup-shop",
             birds: 30,
             weight: 60,
-        });
-        assert.equal(retry.id, first.id);
+        }), 409);
         const list = (await shopSalesService.list({ shopId: shop.id }));
         assert.equal(list.filter((s) => s.tripId === trip.tripId).length, 1, "exactly one sale, not two");
     });
@@ -566,8 +563,7 @@ describe("Phase A/B backend integrity", () => {
             shopSalesService.create(payload),
         ]);
         const fulfilled = results.filter((r) => r.status === "fulfilled");
-        assert.equal(fulfilled.length, 2);
-        assert.equal(new Set(fulfilled.map((r) => r.value.id)).size, 1);
+        assert.equal(fulfilled.length, 1, "exactly one of two concurrent identical creates should succeed");
         const list = (await shopSalesService.list({ shopId: shop.id }));
         assert.equal(list.filter((s) => s.tripId === trip.tripId && s.birds === 15 && s.weight === 25).length, 1, "the unique index must prevent a duplicate row even under a real race");
     });

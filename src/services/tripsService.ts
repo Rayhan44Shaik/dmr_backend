@@ -29,31 +29,7 @@ import {
   sumDieselFuel,
 } from "../utils/tripCalculations.js";
 import { loadDcPhoto, syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
-import {
-  computeMileageKmL,
-  extractDieselFromBody,
-  flattenDiesel,
-  loadDieselEntries,
-  mapDieselRow,
-  replaceDiesel,
-  stripProtectedStep5Fields,
-  submitDieselEntry,
-  updateDieselEntry,
-  deleteDieselEntry,
-  validateExpensePayload,
-  validateFinalStep5,
-  withSerializedTripDiesel,
-} from "../utils/tripStep5.js";
-import {
-  assertPickupBoxNumbers,
-  loadVehicleBoxCapacity,
-  persistPickupPhotos,
-  recalcPickupTotals,
-  removePickupBoxes,
-  replacePickupBoxes,
-  upsertPickupBoxes,
-} from "../utils/tripPickup.js";
-import { assertWithinCapacity, generateSaleNo, recalcTripDeliveryTotals, remainingPickupBox, sumActiveDeliveries } from "../utils/tripDeliverySync.js";
+import { assertWithinCapacity, generateSaleNo, recalcTripDeliveryTotals, sumActiveDeliveries } from "../utils/tripDeliverySync.js";
 import {
   getLatestVehicleMeter,
   lockVehicleForMeterWrite,
@@ -65,13 +41,9 @@ import {
   getResumeLabel,
   getResumeStep,
   getWizardProgress,
-  TRIP_STEP_LABELS,
   type TripWizardStep,
 } from "../utils/tripResume.js";
-import {
-  assertTripResourcesAvailable,
-  lockTripResourcesForWrite,
-} from "../validation/tripResourceValidation.js";
+import { assertTripResourcesAvailable } from "../validation/tripResourceValidation.js";
 import { assertTripStatus } from "../validation/operations.js";
 import {
   assertTripReadyForCompletion,
@@ -119,6 +91,7 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     farmLoadWeight: numOrNull(row.farm_load_weight),
     farmRate: numOrNull(row.farm_rate),
     farmAmount: numOrNull(row.farm_amount),
+    farmCompletedTrips: numOrNull(row.farm_completed_trips),
     farmGpsLat: numOrNull(row.farm_gps_lat),
     farmGpsLon: numOrNull(row.farm_gps_lon),
     farmGpsAccuracy: numOrNull(row.farm_gps_accuracy),
@@ -502,9 +475,16 @@ async function loadTripExtras(client: Client, tripId: number) {
     };
   });
 
-  const dieselEntries: DieselEntry[] = diesel.rows.map((r) =>
-    mapDieselRow(r as Record<string, unknown>)
-  );
+  const dieselEntries: DieselEntry[] = diesel.rows.map((r) => ({
+    rowIndex: num(r.row_index),
+    litres: numOrNull(r.litres),
+    rate: numOrNull(r.rate),
+    meter: numOrNull(r.meter),
+    bunkName: r.bunk_name == null ? null : str(r.bunk_name),
+    bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
+    imageData: r.image_data == null ? null : str(r.image_data),
+    imageName: r.image_name == null ? null : str(r.image_name),
+  }));
 
   return { helpers, loaders, boxDetails, deliveries: mappedDeliveries, dieselEntries };
 }
@@ -524,10 +504,6 @@ async function hydrateTrip(
 > {
   const base = mapTripBase(row);
   const extras = await loadTripExtras(client, base.id);
-  const submittedDiesel = extras.dieselEntries.filter((d) => d.submitted !== false);
-  const dieselLitres = submittedDiesel.reduce((s, d) => s + Number(d.litres ?? 0), 0);
-  const mileageKmL = computeMileageKmL(base.openingMeter, base.closingMeter ?? base.endMeter, dieselLitres);
-  const vehicleBoxCapacity = await loadVehicleBoxCapacity(client, base.vehicleId);
   let dcPhoto: {
     dcPhotoKey: string | null;
     dcPhotoMime: string | null;
@@ -546,7 +522,7 @@ async function hydrateTrip(
   if (options.includeDcPhoto) {
     dcPhoto = await loadDcPhoto(client, base.id, base.dcPhotoKey ?? null);
   }
-  return { ...base, ...extras, ...dcPhoto, vehicleBoxCapacity, mileageKmL };
+  return { ...base, ...extras, ...dcPhoto };
 }
 
 async function generateTripNo(client: Client, tripDate: string): Promise<string> {
@@ -652,7 +628,18 @@ async function replaceCrew(
 }
 
 async function replaceBoxes(client: Client, tripId: number, boxes: BoxDetail[] = []) {
-  await replacePickupBoxes(client, tripId, boxes);
+  await client.query(`DELETE FROM trip_boxes WHERE trip_id = $1`, [tripId]);
+  for (const box of boxes) {
+    const birds = Number(box.birds ?? 0);
+    const weight = Number(box.weight ?? 0);
+    // Per-box average weight = weight / birds. Never divide by zero.
+    const avgWeight =
+      birds > 0 && Number.isFinite(weight) ? Number((weight / birds).toFixed(3)) : null;
+    await client.query(
+      `INSERT INTO trip_boxes (trip_id, box_no, birds, weight, avg_weight) VALUES ($1,$2,$3,$4,$5)`,
+      [tripId, box.boxNo, birds, weight, avgWeight]
+    );
+  }
 }
 
 /**
@@ -762,7 +749,7 @@ async function replaceDeliveries(
          trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
          birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
          farm_birds, farm_weight, auto_capture_time, client_key
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,COALESCE($19::timestamptz, NOW()),$20)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
        RETURNING id`,
       [
         tripId,
@@ -805,6 +792,78 @@ async function replaceDeliveries(
       );
     }
   }
+}
+
+async function replaceDiesel(
+  client: Client,
+  tripId: number,
+  entries: DieselEntry[] = []
+) {
+  await client.query(`DELETE FROM trip_diesel_entries WHERE trip_id = $1`, [tripId]);
+  for (const e of entries) {
+    await client.query(
+      `INSERT INTO trip_diesel_entries (
+         trip_id, row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        tripId,
+        e.rowIndex,
+        e.litres ?? null,
+        e.rate ?? null,
+        e.meter ?? null,
+        e.bunkName ?? null,
+        e.bunkGps ?? null,
+        e.imageData ?? null,
+        e.imageName ?? null,
+      ]
+    );
+  }
+}
+
+function extractDieselFromBody(body: Record<string, unknown>): DieselEntry[] {
+  if (Array.isArray(body.dieselEntries)) {
+    return body.dieselEntries as DieselEntry[];
+  }
+
+  const indices = new Set<number>();
+  for (const key of Object.keys(body)) {
+    const match = key.match(/^dieselLtr(\d+)$/);
+    if (match) indices.add(Number(match[1]));
+  }
+
+  return [...indices]
+    .sort((a, b) => a - b)
+    .map((rowIndex) => ({
+      rowIndex,
+      litres: numOrNull(body[`dieselLtr${rowIndex}`]),
+      rate: numOrNull(body[`dieselRate${rowIndex}`]),
+      meter: numOrNull(body[`dieselMeter${rowIndex}`]),
+      bunkName: body[`dieselBunk${rowIndex}`]
+        ? str(body[`dieselBunk${rowIndex}`])
+        : null,
+      bunkGps: body[`dieselBunkGps${rowIndex}`]
+        ? str(body[`dieselBunkGps${rowIndex}`])
+        : null,
+      imageData: body[`dieselImage${rowIndex}`]
+        ? str(body[`dieselImage${rowIndex}`])
+        : null,
+      imageName: body[`dieselImageName${rowIndex}`]
+        ? str(body[`dieselImageName${rowIndex}`])
+        : null,
+    }));
+}
+
+function flattenDiesel(entries: DieselEntry[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const e of entries) {
+    out[`dieselLtr${e.rowIndex}`] = e.litres;
+    out[`dieselRate${e.rowIndex}`] = e.rate;
+    out[`dieselMeter${e.rowIndex}`] = e.meter;
+    out[`dieselBunk${e.rowIndex}`] = e.bunkName;
+    out[`dieselImage${e.rowIndex}`] = e.imageData;
+    out[`dieselImageName${e.rowIndex}`] = e.imageName;
+  }
+  return out;
 }
 
 function buildListWhere(filters: {
@@ -1159,48 +1218,6 @@ export const tripsService = {
     });
   },
 
-  async submitDiesel(tripId: number, body: Record<string, unknown>) {
-    return withSerializedTripDiesel(tripId, () =>
-      withTransaction(async (client) => {
-        const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
-        if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
-        await submitDieselEntry(client, existing.rows[0] as Record<string, unknown>, body);
-        const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
-        const trip = await hydrateTrip(client, row.rows[0], { includeDcPhoto: true });
-        return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
-      })
-    );
-  },
-
-  async updateDiesel(tripId: number, entryId: number, body: Record<string, unknown>) {
-    return withSerializedTripDiesel(tripId, () =>
-      withTransaction(async (client) => {
-        const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
-        if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
-        await updateDieselEntry(client, existing.rows[0] as Record<string, unknown>, entryId, body);
-        const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
-        const trip = await hydrateTrip(client, row.rows[0], { includeDcPhoto: true });
-        return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
-      })
-    );
-  },
-
-  async deleteDiesel(tripId: number, entryId: number) {
-    return withSerializedTripDiesel(tripId, () =>
-      withTransaction(async (client) => {
-        const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
-        if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
-        if (Boolean(existing.rows[0].deleted)) {
-          throw new AppError(422, "Cannot modify a deleted trip");
-        }
-        await deleteDieselEntry(client, tripId, entryId);
-        const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
-        const trip = await hydrateTrip(client, row.rows[0], { includeDcPhoto: true });
-        return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
-      })
-    );
-  },
-
   async createDraft(body: Partial<Trip> = {}) {
     return withTransaction(async (client) => {
       try {
@@ -1281,27 +1298,24 @@ export const tripsService = {
         await validateTripForeignKeys(body, client);
         await enrichMasterDenorm(client, body);
 
-        // Resource availability is DB-backed and transaction-safe. Lock the
-        // selected vehicle/employees FIRST so two concurrent Step 1 submits
-        // cannot both pass the availability SELECT and insert two trips.
-        // Re-check occupancy while those rows are locked. Self-exclusion uses
-        // the current trip id so Edit can keep its own resources.
+        // Resource availability is DB-backed and transaction-safe. A single
+        // trip occupies its resources while Step 1 is submitted through Step 5
+        // (status 'Draft'); Step 5 success flips status to 'Pending' and frees
+        // them. The current trip is excluded so an edit never conflicts with
+        // itself. Throws 409 with a clear message on conflict.
         if (body.vehicleId != null || body.driverId != null || body.supervisorId != null ||
             body.helpers?.length || body.loaders?.length) {
-          const resourceInput = {
-            tripId: tripId ?? 0,
-            vehicleId: body.vehicleId ?? null,
-            driverId: body.driverId ?? null,
-            supervisorId: body.supervisorId ?? null,
-            helpers: (body.helpers as string[] | undefined) ?? [],
-            loaders: (body.loaders as string[] | undefined) ?? [],
-          };
-          await lockTripResourcesForWrite(resourceInput, client);
-          await assertTripResourcesAvailable(resourceInput, client);
-        }
-
-        if (!tripId && body.status === "Pending" && body.expensesStepSubmitted !== true) {
-          body.status = "Draft";
+          await assertTripResourcesAvailable(
+            {
+              tripId: tripId ?? 0,
+              vehicleId: body.vehicleId ?? null,
+              driverId: body.driverId ?? null,
+              supervisorId: body.supervisorId ?? null,
+              helpers: (body.helpers as string[] | undefined) ?? [],
+              loaders: (body.loaders as string[] | undefined) ?? [],
+            },
+            client
+          );
         }
 
         if (!tripId) {
@@ -1323,53 +1337,6 @@ export const tripsService = {
         const dieselEntries = extractDieselFromBody(body);
         const boxDetails = (body.boxDetails as BoxDetail[]) ?? [];
         const deliveries = (body.deliveries as ShopDelivery[]) ?? [];
-
-        if (body.step5Finalize === true && tripId) {
-          await client.query(`SELECT pg_advisory_xact_lock($1)`, [tripId]);
-          await client.query(`SELECT id FROM trips WHERE id = $1 FOR UPDATE`, [tripId]);
-          const live = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
-          const persistedDiesel = (await loadDieselEntries(client, tripId)).filter((d) => d.submitted);
-          validateFinalStep5(live.rows[0], body, persistedDiesel);
-          const sums = await client.query<{ amt: string }>(
-            `SELECT COALESCE(SUM(amount), 0)::text AS amt
-               FROM trip_diesel_entries WHERE trip_id = $1 AND submitted = TRUE`,
-            [tripId]
-          );
-          body.fuel = Number(sums.rows[0].amt);
-          const endMeter = numOrNull(body.endMeter ?? body.closingMeter);
-          body.closingMeter = endMeter;
-          body.endMeter = endMeter;
-          body.totalKm = computeTotalKm(numOrNull(live.rows[0].opening_meter), endMeter);
-          body.skipDiesel = true;
-          delete body.step5Finalize;
-        }
-
-        // Draft stays Draft through Steps 1–4. Only a successful Step 5 submit
-        // (expensesStepSubmitted=true in this same transaction) moves the trip
-        // to Pending. Wizard writes must not invent Pending without Step 5, and
-        // must not clobber Pending/Completed once Step 5 is already in.
-        const existingStatus = existing?.rowCount ? str(existing.rows[0].status) : "Draft";
-        const expensesAlready = Boolean(existing?.rows[0]?.expenses_step_submitted);
-        const submittingExpenses = body.expensesStepSubmitted === true;
-        if (existingStatus === "Completed" || existingStatus === "Deleted") {
-          // Part Q: a Completed (or Deleted) trip stays Completed (or Deleted)
-          // through ordinary wizard editing — including a Step 5 re-submit,
-          // which carries status:"Pending" from the step flags. Never demote.
-          if (body.status != null && body.status !== existingStatus) delete body.status;
-        } else if (submittingExpenses) {
-          body.status = "Pending";
-        } else if (!expensesAlready) {
-          if (body.status === "Pending" || existingStatus === "Pending") {
-            body.status = "Draft";
-          }
-        } else if (
-          existingStatus === "Pending" &&
-          body.status != null &&
-          body.status !== existingStatus &&
-          body.status !== "Deleted"
-        ) {
-          delete body.status;
-        }
 
         // ---- Universal vehicle meter validation ----
         // Only runs on a real step submission (start/expenses), never on
@@ -1554,12 +1521,7 @@ export const tripsService = {
             -- NULL) instead of COALESCE silently keeping the old/default value.
             opening_meter = CASE WHEN $67::boolean THEN $11 ELSE opening_meter END,
             advance_amount = CASE WHEN $68::boolean THEN $12 ELSE advance_amount END,
-            -- Part D: step-submitted flags are monotonic latches. Once a step
-            -- has been submitted it can never become unsubmitted again, on ANY
-            -- path (Save Progress, wizard edit, generic PUT, mobile sync), no
-            -- matter what the client sends. First submission still works:
-            -- COALESCE(TRUE, FALSE) OR FALSE = TRUE.
-            start_step_submitted = COALESCE($13, start_step_submitted) OR start_step_submitted,
+            start_step_submitted = COALESCE($13, start_step_submitted),
             source_farm_id = COALESCE($14, source_farm_id),
             source_farm = COALESCE($15, source_farm),
             reached_time = COALESCE($16, reached_time),
@@ -1568,15 +1530,15 @@ export const tripsService = {
             farm_address = COALESCE($19, farm_address),
             avg_bird_weight = COALESCE($20, avg_bird_weight),
             farm_remarks = COALESCE($21, farm_remarks),
-            farm_step_submitted = COALESCE($22, farm_step_submitted) OR farm_step_submitted,
+            farm_step_submitted = COALESCE($22, farm_step_submitted),
             dc_weight = COALESCE($23, dc_weight),
             total_birds = COALESCE($24, total_birds),
             boxes = COALESCE($25, boxes),
             avg_weight = COALESCE($26, avg_weight),
             pickup_load_time = COALESCE($27, pickup_load_time),
             dc_photo_key = COALESCE($28, dc_photo_key),
-            pickup_step_submitted = COALESCE($29, pickup_step_submitted) OR pickup_step_submitted,
-            delivery_step_submitted = COALESCE($30, delivery_step_submitted) OR delivery_step_submitted,
+            pickup_step_submitted = COALESCE($29, pickup_step_submitted),
+            delivery_step_submitted = COALESCE($30, delivery_step_submitted),
             closing_meter = COALESCE($31, closing_meter),
             end_meter = COALESCE($32, end_meter),
             end_time = COALESCE($33, end_time),
@@ -1602,8 +1564,8 @@ export const tripsService = {
             submitted_at = CASE
               WHEN COALESCE($51::boolean, FALSE) AND submitted_at IS NULL THEN COALESCE($49, NOW())
               ELSE submitted_at END,
-            end_step_submitted = COALESCE($50, end_step_submitted) OR end_step_submitted,
-            expenses_step_submitted = COALESCE($51, expenses_step_submitted) OR expenses_step_submitted,
+            end_step_submitted = COALESCE($50, end_step_submitted),
+            expenses_step_submitted = COALESCE($51, expenses_step_submitted),
             total_km = COALESCE($52, total_km),
             total_shops = COALESCE($53, total_shops),
             total_weight = COALESCE($54, total_weight),
@@ -1618,12 +1580,15 @@ export const tripsService = {
             rate_completed = COALESCE($63, rate_completed),
             deleted = COALESCE($64, deleted),
             deleted_reason = COALESCE($65, deleted_reason),
-            -- Step 2 GPS: COALESCE so omitted/failed capture never overwrites
-            -- already-persisted coordinates. Client reached_time is never used.
+            -- Step 2 (Farm Loading): GPS capture + completed-trips count.
+            -- reached_time itself is NEVER taken from the client — the official
+            -- Step 2 timestamp is captured server-side on first submission (see
+            -- the guarded first-submission block below).
             farm_gps_lat = COALESCE($69, farm_gps_lat),
             farm_gps_lon = COALESCE($70, farm_gps_lon),
             farm_gps_accuracy = COALESCE($71, farm_gps_accuracy),
             farm_gps_time = COALESCE($72, farm_gps_time),
+            farm_completed_trips = COALESCE($73, farm_completed_trips),
             approved_by = COALESCE($66, approved_by)
            WHERE id = $1`,
           [
@@ -1708,10 +1673,12 @@ export const tripsService = {
             // Explicitly-provided flags for the nullable meter/advance fields.
             body.openingMeter !== undefined,
             body.advanceAmount !== undefined,
+            // Step 2 (Farm Loading) fields — GPS + completed-trips count.
             body.farmGpsLat ?? null,
             body.farmGpsLon ?? null,
             body.farmGpsAccuracy ?? null,
             normalizeTripTimestamp(body.farmGpsTime),
+            numOrNull(body.farmCompletedTrips),
           ]
         );
 
@@ -1784,10 +1751,7 @@ export const tripsService = {
                  ELSE deliveries_step_submitted_at END,
                expenses_step_submitted_at = CASE
                  WHEN COALESCE($6::boolean, FALSE) AND expenses_step_submitted_at IS NULL THEN NOW()
-                 ELSE expenses_step_submitted_at END,
-               end_time = CASE
-                 WHEN COALESCE($6::boolean, FALSE) AND end_time IS NULL THEN NOW()
-                 ELSE end_time END
+                 ELSE expenses_step_submitted_at END
              WHERE id = $1`,
             [
               tripId,
@@ -1811,29 +1775,10 @@ export const tripsService = {
             (body.loaders as string[]) ?? []
           );
         }
-        if (Array.isArray(body.boxDetails)) {
-          const writeMode = str(body.pickupBoxWrite);
-          if (writeMode === "upsert") {
-            if ((body.boxDetails as BoxDetail[]).length) {
-              await upsertPickupBoxes(client, tripId, body.boxDetails as BoxDetail[]);
-            }
-            const removed = Array.isArray(body.removedBoxNos)
-              ? (body.removedBoxNos as unknown[])
-                  .map((n) => Number(n))
-                  .filter((n) => Number.isInteger(n) && n > 0)
-              : [];
-            if (removed.length) {
-              await removePickupBoxes(client, tripId, removed);
-            }
-            if ((body.boxDetails as BoxDetail[]).length || removed.length) {
-              await recalcPickupTotals(client, tripId);
-            }
-          } else if ((body.boxDetails as BoxDetail[]).length || writeMode === "replace") {
-            await replaceBoxes(client, tripId, body.boxDetails as BoxDetail[]);
-            await recalcPickupTotals(client, tripId);
-          }
+        if (body.boxDetails) {
+          await replaceBoxes(client, tripId, body.boxDetails as BoxDetail[]);
         }
-        if (body.deliveries && body.replaceDeliveries === true) {
+        if (body.deliveries) {
           if (existing && existing.rowCount && Boolean(existing.rows[0].rate_completed)) {
             throw new AppError(
               409,
@@ -1843,28 +1788,37 @@ export const tripsService = {
           }
           await replaceDeliveries(client, tripId, body.deliveries as ShopDelivery[]);
         }
-        if (!body.skipDiesel && (dieselEntries.length || body.dieselEntries)) {
+        if (dieselEntries.length || body.dieselEntries) {
           await replaceDiesel(client, tripId, dieselEntries);
         }
 
-        const pickupPhotoSync = body.syncPickupPhotos === true;
-        const pickupPhotoTouched =
-          pickupPhotoSync ||
-          Boolean(body.dcPhotoData) ||
-          Boolean(body.dcPhotoData2) ||
-          Boolean(body.dcPhotoKey) ||
-          Boolean(body.dcPhotoKey2);
-        let persistedPhotoCount = 0;
-        if (pickupPhotoTouched) {
-          persistedPhotoCount = await persistPickupPhotos(client, tripId, body, pickupPhotoSync);
-        }
-        if (body.pickupPhotoRequired === true) {
-          if (!pickupPhotoTouched) {
-            persistedPhotoCount = await persistPickupPhotos(client, tripId, body, true);
+        // Step 3 photos — up to 2, stored in trip_media (base64). Persist the
+        // submitted set, then remove any image row no longer referenced so a
+        // removed photo never resurrects on reload.
+        const persistPhoto = async (key: unknown, mime: unknown, data: unknown) => {
+          if (data && key) {
+            await client.query(
+              `INSERT INTO trip_media (trip_id, media_key, media_type, mime_type, data_base64)
+               VALUES ($1,$2,'image',$3,$4)
+               ON CONFLICT (trip_id, media_key) DO UPDATE
+                 SET data_base64 = EXCLUDED.data_base64, mime_type = EXCLUDED.mime_type`,
+              [tripId, str(key), mime ? str(mime) : "image/jpeg", str(data)]
+            );
           }
-          if (persistedPhotoCount < 1 || persistedPhotoCount > 2) {
-            throw new AppError(422, "Step 3 requires between 1 and 2 actual uploaded photos.");
-          }
+        };
+        await persistPhoto(body.dcPhotoKey, body.dcPhotoMime, body.dcPhotoData);
+        await persistPhoto(body.dcPhotoKey2, body.dcPhotoMime2, body.dcPhotoData2);
+        if (body.dcPhotoKey || body.dcPhotoData || body.dcPhotoKey2 || body.dcPhotoData2) {
+          await client.query(
+            `DELETE FROM trip_media
+              WHERE trip_id = $1 AND media_type = 'image'
+                AND media_key NOT IN ($2, $3)`,
+            [
+              tripId,
+              body.dcPhotoKey ? str(body.dcPhotoKey) : "__none__",
+              body.dcPhotoKey2 ? str(body.dcPhotoKey2) : "__none__",
+            ]
+          );
         }
 
         const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
@@ -1917,7 +1871,7 @@ export const tripsService = {
    *
    * Save Progress / single-shop save ONLY — never submits Step 4, never
    * captures the official Step 4 timestamp, and never runs final-submit
-   * validation. Final submit still goes through submitStep → saveDeliveries({ finalize: true }).
+   * validation. Final submit still goes through submitStep → replaceDeliveries
    * (full-replace + strict completeness + server NOW() timestamp).
    *
    * Upserts the submitted deliveries idempotently:
@@ -1935,11 +1889,7 @@ export const tripsService = {
    * box-availability / active-shop check is re-run against the LIVE
    * persisted rows — never trusted from the client.
    */
-  async saveDeliveries(
-    tripId: number,
-    body: { deliveries?: ShopDelivery[] } = {},
-    options: { finalize?: boolean } = {}
-  ) {
+  async saveDeliveries(tripId: number, body: { deliveries?: ShopDelivery[] } = {}) {
     const { deliveries } = parseDeliverySave(body);
 
     return withTransaction(async (client) => {
@@ -1949,12 +1899,6 @@ export const tripsService = {
       if (Boolean(tripRow.deleted)) {
         throw new AppError(422, "Cannot modify a deleted trip", { tripId });
       }
-      if (!Boolean(tripRow.pickup_step_submitted)) {
-        throw new AppError(422, `Complete ${TRIP_STEP_LABELS.pickup} before ${TRIP_STEP_LABELS.deliveries}`, {
-          resumeStep: "pickup",
-          requestedStep: "deliveries",
-        });
-      }
       if (Boolean(tripRow.rate_completed)) {
         throw new AppError(409, "Cannot modify deliveries — trip rates are locked by Rate Entry", { tripId });
       }
@@ -1962,9 +1906,11 @@ export const tripsService = {
       // Serialize concurrent saves for this trip (read-modify-write below).
       await client.query(`SELECT id FROM trips WHERE id = $1 FOR UPDATE`, [tripId]);
 
-      // Step 3 Pickup is the only Step 4 capacity source — never Step 2 farm load.
-      const capacityBirds = num(tripRow.total_birds);
-      const capacityWeight = num(tripRow.dc_weight);
+      // Step 3 capacity (farm_load_weight ?? dc_weight, farm_bird_count ?? total_birds).
+      const capacityBirds =
+        num(tripRow.farm_bird_count) > 0 ? num(tripRow.farm_bird_count) : num(tripRow.total_birds);
+      const capacityWeight =
+        num(tripRow.farm_load_weight) > 0 ? num(tripRow.farm_load_weight) : num(tripRow.dc_weight);
       if (capacityBirds <= 0 && capacityWeight <= 0) {
         throw new AppError(422, "Step 3 (Pickup) must be completed before saving shop deliveries.");
       }
@@ -2042,58 +1988,14 @@ export const tripsService = {
       const boxParams: unknown[] = [tripId];
       if (excluded.length) boxParams.push(excluded);
       const otherBoxes = await client.query(
-        `SELECT d.id AS delivery_id, db.box_no
+        `SELECT db.box_no
            FROM trip_delivery_boxes db
            JOIN trip_deliveries d ON d.id = db.delivery_id
-          WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE ${exclClause}`,
+          WHERE d.trip_id = $1 AND d.deleted = FALSE ${exclClause}`,
         boxParams
       );
-      const otherPerBox = await client.query(
-        `SELECT d.id AS delivery_id, pb.box_no, pb.birds, pb.weight
-           FROM trip_delivery_per_box pb
-           JOIN trip_deliveries d ON d.id = pb.delivery_id
-          WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE ${exclClause}`,
-        boxParams
-      );
-      const otherSelected = new Map<number, number[]>();
-      for (const r of otherBoxes.rows) {
-        const id = num(r.delivery_id);
-        const list = otherSelected.get(id) ?? [];
-        list.push(num(r.box_no));
-        otherSelected.set(id, list);
-      }
-      const otherPer = new Map<number, BoxDetail[]>();
-      for (const r of otherPerBox.rows) {
-        const id = num(r.delivery_id);
-        const list = otherPer.get(id) ?? [];
-        list.push({ boxNo: num(r.box_no), birds: num(r.birds), weight: num(r.weight) });
-        otherPer.set(id, list);
-      }
-      const usedRemaining = new Map<number, { birds: number; weight: number }>();
-      const addUsage = (boxNo: number, birds: number, weight: number) => {
-        const cur = usedRemaining.get(boxNo) ?? { birds: 0, weight: 0 };
-        usedRemaining.set(boxNo, { birds: cur.birds + birds, weight: cur.weight + weight });
-      };
-      for (const row of existingRows) {
-        if (excludedIds.has(row.id)) continue;
-        const per = otherPer.get(row.id) ?? [];
-        const selected = otherSelected.get(row.id) ?? [];
-        if (per.length) {
-          for (const pb of per) addUsage(pb.boxNo, Number(pb.birds ?? 0), Number(pb.weight ?? 0));
-        } else if (selected.length === 1) {
-          addUsage(selected[0], row.birds + row.mortality, row.weight + row.mortKg);
-        } else {
-          const farmBirds = selected.reduce((s, n) => s + (boxesByNo.get(n)?.birds ?? 0), 0);
-          const farmWeight = selected.reduce((s, n) => s + (boxesByNo.get(n)?.weight ?? 0), 0);
-          for (const n of selected) {
-            const box = boxesByNo.get(n);
-            if (!box) continue;
-            const bShare = farmBirds > 0 ? row.birds * (box.birds / farmBirds) : 0;
-            const wShare = farmWeight > 0 ? row.weight * (box.weight / farmWeight) : 0;
-            addUsage(n, bShare, wShare);
-          }
-        }
-      }
+      const usedBoxes = new Set<number>();
+      for (const r of otherBoxes.rows) usedBoxes.add(num(r.box_no));
 
       // Cross-shop totals from live persisted rows, minus the rows we replace.
       const base = await sumActiveDeliveries(client, tripId);
@@ -2140,83 +2042,68 @@ export const tripsService = {
           throw new AppError(422, `Mortality weight must be a non-negative number (got ${d.mortKg}).`);
         }
         if (shopId == null) {
-          if (options.finalize) {
-            throw new AppError(422, "Shop is required for a delivery.");
-          }
-        } else {
-          const shopRes = await client.query(`SELECT status FROM shops WHERE id = $1`, [shopId]);
-          if (!shopRes.rowCount) {
-            throw new AppError(422, `Shop ${shopId} does not exist.`);
-          }
-          const shopStatus = str(shopRes.rows[0].status);
-          const shopChanged = match ? match.shopId !== shopId : true;
-          if (shopChanged && shopStatus !== "Active") {
-            throw new AppError(422, "Shop is no longer available for new selection.");
-          }
+          throw new AppError(422, "Shop is required for a delivery.");
         }
 
-        if (options.finalize && mode === "box" && selectedBoxIds.length === 0) {
-          throw new AppError(422, "Box mode requires a valid Pickup Box from this trip.");
+        // Active-shop rule: a new selection must be Active. Editing an existing
+        // row that keeps the SAME shop stays allowed even if the shop later
+        // became Inactive (historical data must remain viewable). Changing the
+        // shop is a new selection and requires an Active shop.
+        const shopRes = await client.query(`SELECT status FROM shops WHERE id = $1`, [shopId]);
+        if (!shopRes.rowCount) {
+          throw new AppError(422, `Shop ${shopId} does not exist.`);
+        }
+        const shopStatus = str(shopRes.rows[0].status);
+        const shopChanged = match ? match.shopId !== shopId : true;
+        if (shopChanged && shopStatus !== "Active") {
+          throw new AppError(422, "Shop is no longer available for new selection.");
         }
 
+        // Box availability: every selected box must be a Step 3 pickup box and
+        // must not already be assigned to another (not-being-overwritten) shop.
         for (const boxNo of selectedBoxIds) {
           if (!boxesByNo.has(boxNo)) {
             throw new AppError(422, `Selected box #${boxNo} is not part of this trip's Step 3 pickup.`);
           }
+          if (usedBoxes.has(boxNo)) {
+            throw new AppError(422, `Selected box #${boxNo} is already used by another shop delivery.`);
+          }
         }
+        // Box allocation is exclusive per shop — commit to the used set.
+        for (const boxNo of selectedBoxIds) usedBoxes.add(boxNo);
 
         const farmBirds = selectedBoxIds.reduce((s, n) => s + (boxesByNo.get(n)?.birds ?? 0), 0);
         const farmWeight = selectedBoxIds.reduce((s, n) => s + (boxesByNo.get(n)?.weight ?? 0), 0);
 
-        const remainingOf = (boxNo: number) => {
-          const pickup = boxesByNo.get(boxNo) ?? { birds: 0, weight: 0 };
-          const used = usedRemaining.get(boxNo) ?? { birds: 0, weight: 0 };
-          return remainingPickupBox(pickup, used);
-        };
-
-        // Shop-level bounds against remaining selected-box capacity (partial consumption).
-        const remainBirds = selectedBoxIds.reduce((s, n) => s + remainingOf(n).birds, 0);
-        const remainWeight = selectedBoxIds.reduce((s, n) => s + remainingOf(n).weight, 0);
-        if (selectedBoxIds.length && birds + mortality > remainBirds) {
-          throw new AppError(422, `Delivered birds plus mortality cannot exceed available birds (${remainBirds}).`);
+        // Shop-level bounds: delivery + mortality can never exceed what the
+        // selected pickup boxes represent (a box may hold MORE weight than the
+        // delivery — that is allowed; the reverse is not).
+        if (farmBirds > 0 && birds + mortality > farmBirds) {
+          throw new AppError(422, `Delivered birds plus mortality cannot exceed available birds (${farmBirds}).`);
         }
-        if (selectedBoxIds.length && weight + mortKg > remainWeight + 0.0001) {
+        if (farmWeight > 0 && weight + mortKg > farmWeight) {
           throw new AppError(
             422,
-            `Delivery weight cannot exceed the selected box available weight (${remainWeight.toFixed(2)} kg).`
+            `Delivery weight cannot exceed the selected box available weight (${farmWeight.toFixed(2)} kg).`
           );
         }
 
+        // Weight-mode per-box breakdown must stay within each box's capacity.
         if (mode === "weight") {
           for (const pb of perBoxData) {
             const box = boxesByNo.get(Number(pb.boxNo));
             if (!box) {
               throw new AppError(422, `Per-box entry #${pb.boxNo} is not part of this trip's Step 3 pickup.`);
             }
-            const remain = remainingOf(Number(pb.boxNo));
-            if (Number(pb.birds) > remain.birds) {
-              throw new AppError(422, `Box #${pb.boxNo} delivered birds exceed its available birds (${remain.birds}).`);
+            if (Number(pb.birds) > box.birds) {
+              throw new AppError(422, `Box #${pb.boxNo} delivered birds exceed its available birds (${box.birds}).`);
             }
-            if (Number(pb.weight) > remain.weight) {
+            if (Number(pb.weight) > box.weight) {
               throw new AppError(
                 422,
-                `Box #${pb.boxNo} delivered weight exceeds its available weight (${remain.weight.toFixed(2)} kg).`
+                `Box #${pb.boxNo} delivered weight exceeds its available weight (${box.weight.toFixed(2)} kg).`
               );
             }
-          }
-        }
-
-        if (perBoxData.length) {
-          for (const pb of perBoxData) addUsage(Number(pb.boxNo), Number(pb.birds ?? 0), Number(pb.weight ?? 0));
-        } else if (selectedBoxIds.length === 1) {
-          addUsage(selectedBoxIds[0], birds + mortality, weight + mortKg);
-        } else {
-          for (const n of selectedBoxIds) {
-            const box = boxesByNo.get(n);
-            if (!box) continue;
-            const bShare = farmBirds > 0 ? birds * (box.birds / farmBirds) : 0;
-            const wShare = farmWeight > 0 ? weight * (box.weight / farmWeight) : 0;
-            addUsage(n, bShare, wShare);
           }
         }
 
@@ -2230,6 +2117,7 @@ export const tripsService = {
           d.amount != null && Number(d.amount) > 0
             ? Number(d.amount)
             : Number((weight * Number(d.rate ?? 0)).toFixed(2));
+        const autoCaptureTime = normalizeTripTimestamp(d.autoCaptureTime);
 
         let deliveryId: number;
         if (match) {
@@ -2252,7 +2140,8 @@ export const tripsService = {
                delivery_mode = $15,
                farm_birds = $16,
                farm_weight = $17,
-               client_key = $18
+               auto_capture_time = $18,
+               client_key = $19
              WHERE id = $1`,
             [
               deliveryId,
@@ -2272,6 +2161,7 @@ export const tripsService = {
               mode,
               farmBirds,
               farmWeight,
+              autoCaptureTime,
               d.clientKey ? str(d.clientKey) : null,
             ]
           );
@@ -2283,7 +2173,7 @@ export const tripsService = {
                trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
                birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
                farm_birds, farm_weight, auto_capture_time, client_key
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,COALESCE($19::timestamptz, NOW()),$20)
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
              RETURNING id`,
             [
               tripId,
@@ -2304,7 +2194,7 @@ export const tripsService = {
               mode,
               farmBirds,
               farmWeight,
-              null,
+              autoCaptureTime,
               d.clientKey ? str(d.clientKey) : null,
             ]
           );
@@ -2325,53 +2215,6 @@ export const tripsService = {
             `INSERT INTO trip_delivery_per_box (delivery_id, box_no, birds, weight) VALUES ($1,$2,$3,$4)`,
             [deliveryId, Number(pb.boxNo), Number(pb.birds ?? 0), Number(pb.weight ?? 0)]
           );
-        }
-      }
-
-      if (options.finalize) {
-        const live = await client.query(
-          `SELECT d.shop_id, d.birds, d.weight, d.mortality, d.mort_kg, d.delivery_mode,
-                  (SELECT COUNT(*) FROM trip_delivery_boxes b WHERE b.delivery_id = d.id) AS box_count
-             FROM trip_deliveries d
-            WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE`,
-          [tripId]
-        );
-        if (!live.rowCount) {
-          throw new AppError(422, "At least one valid shop delivery is required to submit Step 4.");
-        }
-        let complete = 0;
-        for (const r of live.rows) {
-          if (numOrNull(r.shop_id) == null) {
-            throw new AppError(422, "Shop is required for a delivery.");
-          }
-          if (str(r.delivery_mode) === "box" && num(r.box_count) < 1) {
-            throw new AppError(422, "Box mode requires a valid Pickup Box from this trip.");
-          }
-          if (num(r.birds) > 0 && num(r.weight) > 0) complete += 1;
-        }
-        if (complete < 1) {
-          throw new AppError(422, "At least one valid shop delivery is required to submit Step 4.");
-        }
-        try {
-          await client.query(
-            `UPDATE trips SET
-               delivery_step_submitted = TRUE,
-               deliveries_step_submitted_at = CASE
-                 WHEN deliveries_step_submitted_at IS NULL THEN NOW()
-                 ELSE deliveries_step_submitted_at END
-             WHERE id = $1`,
-            [tripId]
-          );
-          await client.query(
-            `UPDATE trip_deliveries
-                SET auto_capture_time = NOW()
-              WHERE trip_id = $1 AND auto_capture_time IS NULL`,
-            [tripId]
-          );
-        } catch (err) {
-          const code = (err as { code?: string }).code;
-          if (code !== "42703") throw err;
-          await client.query(`UPDATE trips SET delivery_step_submitted = TRUE WHERE id = $1`, [tripId]);
         }
       }
 
@@ -2405,115 +2248,6 @@ export const tripsService = {
     });
   },
 
-  /**
-   * Orders module — create or locate the day's Shop Order Collection
-   * container and upsert its collected-shop plan rows.
-   *
-   * The container is a vehicle-LESS `trips` row identified by an
-   * ORD-YYYYMMDD-NN trip number that Orders supplies (the backend never
-   * generates one here, and never assigns a `TR-` number). It only ever
-   * holds Orders plan rows in `trip_deliveries` (remarks start with
-   * `[ORDER]`). It is NOT a vehicle trip: no vehicle / crew / meter, and
-   * none of the Step 1→3 pickup / capacity gates run. It is idempotent by
-   * `trip_no`, so a repeated save or a network retry updates the same
-   * container instead of creating a second one, and `id = 0` on the wire is
-   * never turned into a real numbered DB trip.
-   *
-   *  - the collection stage is always a permissive "save" (partial
-   *    collections allowed, no final validation);
-   *  - `startStepSubmitted === true` is Finish Collection — it latches the
-   *    container's `start_step_submitted` flag (monotonic, never cleared).
-   */
-  async saveCollectionContainer(
-    body: Partial<Trip> & Record<string, unknown>
-  ): Promise<Trip> {
-    const tripNo = str(body.tripNo).trim();
-    if (!/^ORD-\d{8}-\d+$/.test(tripNo)) {
-      throw new AppError(422, "A valid collection number (ORD-YYYYMMDD-NN) is required.");
-    }
-    const finished = body.startStepSubmitted === true;
-    const planRows = Array.isArray(body.deliveries)
-      ? (body.deliveries as unknown as Array<Record<string, unknown>>)
-      : [];
-    const tripDate =
-      dateOnly(body.tripDate) ??
-      `${tripNo.slice(4, 8)}-${tripNo.slice(8, 10)}-${tripNo.slice(10, 12)}`;
-
-    return withTransaction(async (client) => {
-      // One container per ORD trip number (idempotent create-or-locate).
-      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`ord_container_${tripNo}`]);
-      let row = (
-        await client.query<Record<string, unknown>>(
-          `SELECT * FROM trips WHERE trip_no = $1 LIMIT 1`,
-          [tripNo]
-        )
-      ).rows[0];
-
-      if (row && num(row.vehicle_id) > 0) {
-        throw new AppError(409, `${tripNo} is a vehicle trip, not a collection container.`);
-      }
-
-      if (!row) {
-        row = (
-          await client.query<Record<string, unknown>>(
-            `INSERT INTO trips (trip_no, trip_date, status, start_step_submitted)
-             VALUES ($1, $2::date, 'Draft', $3)
-             RETURNING *`,
-            [tripNo, tripDate, finished]
-          )
-        ).rows[0];
-      } else if (finished && !row.start_step_submitted) {
-        row = (
-          await client.query<Record<string, unknown>>(
-            `UPDATE trips SET start_step_submitted = TRUE, updated_at = NOW()
-             WHERE id = $1 RETURNING *`,
-            [num(row.id)]
-          )
-        ).rows[0];
-      } else {
-        await client.query(`UPDATE trips SET updated_at = NOW() WHERE id = $1`, [num(row.id)]);
-      }
-
-      const containerId = num(row.id);
-
-      // A collection save is a full snapshot of the day's collected shops —
-      // replace the plan rows (the same delete + reinsert the Step 4 path
-      // uses). No capacity / pickup checks: there is no vehicle yet.
-      await client.query(`DELETE FROM trip_deliveries WHERE trip_id = $1`, [containerId]);
-
-      let serial = 0;
-      for (const d of planRows) {
-        const shopId = numOrNull(d.shopId ?? d.shop_id);
-        if (!shopId) continue;
-        serial += 1;
-        const saleNo = await generateSaleNo(client, containerId, tripNo);
-        const rawRemarks = str(d.remarks ?? "").trim();
-        const remarks = rawRemarks.startsWith("[ORDER]") ? rawRemarks : "[ORDER]";
-        await client.query(
-          `INSERT INTO trip_deliveries
-             (trip_id, sale_no, serial_no, box_no, shop_id, shop_name,
-              bird_type_id, bird_type, birds, weight, mortality, mort_kg,
-              rate, amount, remarks, delivery_mode, client_key)
-           VALUES ($1,$2,$3,$4,$5,$6,NULL,'',$7,$8,0,0,NULL,0,$9,'box',$10)`,
-          [
-            containerId,
-            saleNo,
-            num(d.serialNo ?? d.serial_no ?? serial),
-            num(d.boxNo ?? d.box_no ?? 0),
-            shopId,
-            str(d.shopName ?? d.shop_name ?? ""),
-            num(d.birds ?? 0),
-            num(d.weight ?? 0),
-            remarks,
-            d.clientKey == null ? null : str(d.clientKey),
-          ]
-        );
-      }
-
-      return hydrateTrip(client, row, { includeDcPhoto: false });
-    });
-  },
-
   async submitStep(
     id: number,
     step: TripWizardStep,
@@ -2521,75 +2255,8 @@ export const tripsService = {
   ) {
     const isSaveMode = body.mode === "save";
 
-    // ── Orders module: the day's Shop Order Collection container ────────────
-    // A vehicle-LESS `trips` row identified by an ORD-YYYYMMDD-NN number that
-    // only holds Orders plan rows. `POST /trips/0/steps/deliveries` (ORD
-    // number in `tripNo`) creates / locates it; a later save may address the
-    // same container by its real id. Either way it must NOT run the
-    // vehicle-trip Step 1→3 gates or the Step 3 capacity checks.
-    if (step === "deliveries") {
-      const ordNo = str(body.tripNo).trim();
-      let containerRow: { trip_no: unknown; vehicle_id: unknown } | undefined;
-      if (Number.isFinite(id) && id > 0) {
-        containerRow = (
-          await query<{ trip_no: unknown; vehicle_id: unknown }>(
-            `SELECT trip_no, vehicle_id FROM trips WHERE id = $1`,
-            [id]
-          )
-        ).rows[0];
-      }
-      const isContainer =
-        (/^ORD-\d{8}-\d+$/.test(ordNo) && (!Number.isFinite(id) || id <= 0)) ||
-        (containerRow != null &&
-          containerRow.vehicle_id == null &&
-          /^ORD-\d{8}-\d+$/.test(str(containerRow.trip_no)));
-      if (isContainer) {
-        return this.saveCollectionContainer({
-          ...body,
-          tripNo: ordNo || str(containerRow?.trip_no),
-        });
-      }
-    }
-
-    if (step === "farm" || step === "pickup" || step === "deliveries" || step === "expenses") {
-      const gate = await query(
-        `SELECT start_step_submitted, farm_step_submitted, pickup_step_submitted, delivery_step_submitted FROM trips WHERE id = $1`,
-        [id]
-      );
-      if (!gate.rowCount) throw new AppError(404, `Trip ${id} not found`);
-      if (step === "farm" && !Boolean(gate.rows[0].start_step_submitted)) {
-        throw new AppError(422, `Complete ${TRIP_STEP_LABELS.start} before ${TRIP_STEP_LABELS.farm}`, {
-          resumeStep: "start",
-          requestedStep: "farm",
-        });
-      }
-      if (step === "pickup" && !Boolean(gate.rows[0].farm_step_submitted)) {
-        throw new AppError(422, `Complete ${TRIP_STEP_LABELS.farm} before ${TRIP_STEP_LABELS.pickup}`, {
-          resumeStep: "farm",
-          requestedStep: "pickup",
-        });
-      }
-      if (step === "deliveries" && !Boolean(gate.rows[0].pickup_step_submitted)) {
-        throw new AppError(422, `Complete ${TRIP_STEP_LABELS.pickup} before ${TRIP_STEP_LABELS.deliveries}`, {
-          resumeStep: "pickup",
-          requestedStep: "deliveries",
-        });
-      }
-      if (step === "expenses" && !Boolean(gate.rows[0].delivery_step_submitted) && !isSaveMode) {
-        throw new AppError(422, `Complete ${TRIP_STEP_LABELS.deliveries} before ${TRIP_STEP_LABELS.expenses}`, {
-          resumeStep: "deliveries",
-          requestedStep: "expenses",
-        });
-      }
-    }
-
-    if (!isSaveMode && step !== "deliveries") {
+    if (!isSaveMode) {
       validateStepSubmit(step, body);
-    }
-    if (!isSaveMode && step === "deliveries") {
-      if (Array.isArray(body.deliveries) && body.deliveries.length) {
-        validateStepSubmit(step, body);
-      }
     }
 
     const existing = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
@@ -2607,72 +2274,6 @@ export const tripsService = {
       deleted: Boolean(current.deleted),
     };
 
-    // Step 2 (farm) only: negative pickup tolls → 0. Empty/null is left alone so
-    // COALESCE in save() preserves previously stored Step 2 tolls. Never applied
-    // to pickup/deliveries/expenses.
-    if (step === "farm") {
-      const farmTolls = numOrNull(body.pickupTolls);
-      if (farmTolls != null && farmTolls < 0) {
-        body.pickupTolls = 0;
-      }
-      delete body.farmCompletedTrips;
-      delete body.farmRate;
-      delete body.reachedTime;
-      const lat = numOrNull(body.farmGpsLat);
-      const lon = numOrNull(body.farmGpsLon);
-      const acc = numOrNull(body.farmGpsAccuracy);
-      const gpsInvalid =
-        (lat != null && (lat < -90 || lat > 90)) ||
-        (lon != null && (lon < -180 || lon > 180)) ||
-        (acc != null && acc < 0) ||
-        (lat === 0 && lon === 0);
-      if (gpsInvalid) {
-        delete body.farmGpsLat;
-        delete body.farmGpsLon;
-        delete body.farmGpsAccuracy;
-        delete body.farmGpsTime;
-      }
-    }
-
-    if (step === "pickup") {
-      delete body.pickupLoadTime;
-      delete body.dcWeight;
-      delete body.totalBirds;
-      delete body.boxes;
-      delete body.avgWeight;
-      const boxDetails = (body.boxDetails as BoxDetail[] | undefined) ?? [];
-      const vehCap = current.vehicle_id
-        ? await query(`SELECT no_of_boxes FROM vehicles WHERE id = $1`, [current.vehicle_id])
-        : { rowCount: 0, rows: [] as Array<{ no_of_boxes: unknown }> };
-      const vehicleCapacity = vehCap.rowCount ? num(vehCap.rows[0].no_of_boxes) : 0;
-      if (isSaveMode) {
-        if (boxDetails.length) {
-          assertPickupBoxNumbers(boxDetails, vehicleCapacity, "save");
-        }
-        body.pickupBoxWrite = "upsert";
-      } else {
-        assertPickupBoxNumbers(boxDetails, vehicleCapacity, "submit");
-        body.pickupBoxWrite = "replace";
-        body.syncPickupPhotos = true;
-        body.pickupPhotoRequired = true;
-      }
-    }
-
-    if (step === "deliveries") {
-      delete body.autoCaptureTime;
-      if (isSaveMode) {
-        return this.saveDeliveries(id, body);
-      }
-    }
-
-    if (step === "expenses") {
-      stripProtectedStep5Fields(body);
-      validateExpensePayload(body);
-      if (!isSaveMode) {
-        body.skipDiesel = true;
-      }
-    }
-
     // "Save Progress" is a permissive autosave: it must never run strict step
     // validation, enforce step order, or lock/submit a step.
     if (isSaveMode) {
@@ -2689,37 +2290,19 @@ export const tripsService = {
 
     assertStepOrder(step, flags);
 
-    if (step === "deliveries") {
-      return this.saveDeliveries(id, body, { finalize: true });
-    }
-
-    if (step === "expenses") {
-      stripProtectedStep5Fields(body);
-      validateExpensePayload(body);
-      body.skipDiesel = true;
-      delete body.endTime;
-      delete body.submittedAt;
-    }
-
     // Backend-authoritative Step 2 (Farm) validation — never trust the frontend.
     // Farm Meter must be present and STRICTLY greater than the Step 1 start meter
     // (equality is rejected). Runs only on submit, never on Save Progress.
     if (step === "farm") {
+      // Normalize negative tolls to 0 (tolls may legitimately be zero).
       const tolls = numOrNull(body.pickupTolls);
-      if (tolls == null || tolls < 0) {
+      if (tolls != null && tolls < 0) {
         body.pickupTolls = 0;
       }
-      const farmId = numOrNull(body.sourceFarmId);
-      if (farmId == null || farmId <= 0) {
-        throw new AppError(422, "Farm is required.");
-      }
+      // Farm Address is a mandatory Step 2 submit field.
       const farmAddress = body.farmAddress == null ? "" : str(body.farmAddress).trim();
       if (!farmAddress) {
         throw new AppError(422, "Farm address is required.");
-      }
-      const avgBird = numOrNull(body.avgBirdWeight);
-      if (avgBird == null || avgBird <= 0) {
-        throw new AppError(422, "Average Bird Weight is required.");
       }
       const startMeter = numOrNull(current.opening_meter);
       const farmMeter = numOrNull(body.destMeter);
@@ -2732,13 +2315,62 @@ export const tripsService = {
           `Farm meter (${farmMeter} KM) must be strictly greater than the Step 1 starting meter (${startMeter} KM).`
         );
       }
-      delete body.reachedTime;
-      delete body.farmCompletedTrips;
-      delete body.farmRate;
+    }
+
+    // Backend-authoritative Step 3 (Pickup) validation — never trust the frontend.
+    // Vehicle Master box capacity + box-number integrity are enforced here on
+    // submit; Save Progress (mode save) intentionally bypasses this.
+    if (step === "pickup") {
+      const boxDetails = (body.boxDetails as BoxDetail[] | undefined) ?? [];
+      const boxNos = boxDetails.map((b) => Number(b.boxNo));
+      for (const n of boxNos) {
+        if (!Number.isInteger(n) || n <= 0) {
+          throw new AppError(422, `Invalid box number: ${n}. Box numbers must be positive whole numbers.`);
+        }
+      }
+      for (let i = 0; i < boxNos.length; i++) {
+        if (boxNos[i] !== i + 1) {
+          const msg =
+            i > 0 && boxNos[i] === boxNos[i - 1]
+              ? `Duplicate box number: ${boxNos[i]}.`
+              : "Box numbers must be sequential (1, 2, 3…).";
+          throw new AppError(422, msg);
+        }
+      }
+      for (const b of boxDetails) {
+        const birds = Number(b.birds ?? 0);
+        const weight = Number(b.weight ?? 0);
+        if (!Number.isInteger(birds) || birds < 0) {
+          throw new AppError(422, `Box ${b.boxNo} bird count must be a valid non-negative whole number.`);
+        }
+        if (!Number.isFinite(weight) || weight < 0) {
+          throw new AppError(422, `Box ${b.boxNo} weight must be a valid non-negative number.`);
+        }
+      }
+      // Derived totals must be meaningful (existing Step 3 mandatory rule).
+      const totalBirds = boxDetails.reduce((s, b) => s + Number(b.birds ?? 0), 0);
+      const totalWeight = boxDetails.reduce((s, b) => s + Number(b.weight ?? 0), 0);
+      if (totalBirds <= 0 || totalWeight <= 0) {
+        throw new AppError(422, "At least one box with birds and weight is required to submit Pickup.");
+      }
+      if (current.vehicle_id != null) {
+        const veh = await query(`SELECT no_of_boxes FROM vehicles WHERE id = $1`, [
+          current.vehicle_id,
+        ]);
+        if (veh.rowCount) {
+          const capacity = num(veh.rows[0].no_of_boxes);
+          if (capacity > 0 && boxDetails.length > capacity) {
+            throw new AppError(
+              422,
+              `Vehicle box capacity exceeded. Maximum boxes for this vehicle: ${capacity}.`
+            );
+          }
+        }
+      }
     }
 
     const stepFlags: Record<string, Partial<Trip> & Record<string, unknown>> = {
-      start: { startStepSubmitted: true },
+      start: { startStepSubmitted: true, status: (body.status as TripStatus) ?? "Draft" },
       farm: { farmStepSubmitted: true },
       pickup: { pickupStepSubmitted: true },
       deliveries: { deliveryStepSubmitted: true },
@@ -2746,17 +2378,15 @@ export const tripsService = {
         expensesStepSubmitted: true,
         endStepSubmitted: true,
         status: "Pending" as TripStatus,
-        skipDiesel: true,
-        step5Finalize: true,
+        // submitted_at is a first-submission marker: never overwrite it.
+        submittedAt: current.expenses_step_submitted
+          ? undefined
+          : (body.submittedAt ?? new Date().toISOString()),
+        syncFuel: true,
       },
     };
 
-    const merged = { ...body, ...stepFlags[step] };
-    if (step === "start") {
-      delete merged.startTime;
-      merged.startStepSubmitted = true;
-    }
-    return this.save(id, merged);
+    return this.save(id, { ...body, ...stepFlags[step] });
   },
 
   async softDelete(id: number, reason?: string) {
@@ -2798,17 +2428,6 @@ export const tripsService = {
       // is already flagged as deleted but whose `status` was left inconsistent.
       if (currentDeleted && status !== "Deleted") {
         throw new AppError(422, "Cannot restore a deleted trip", { tripId: id });
-      }
-
-      if (status === "Pending") {
-        const step5Submitted = Boolean(
-          existing.rows[0].expenses_step_submitted || existing.rows[0].end_step_submitted
-        );
-        if (!step5Submitted) {
-          throw new AppError(422, "Complete Step 5 before moving the trip to Pending", {
-            tripId: id,
-          });
-        }
       }
 
       if (status === "Completed") {
@@ -2875,11 +2494,9 @@ export const tripsService = {
    * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
    * maintenance), not just trip closing meters, while keeping the same
    * response shape the frontend already consumes. */
-  async lastClosingMeter(vehicleId: number, excludeTripId?: number | null) {
+  async lastClosingMeter(vehicleId: number) {
     await validateTripForeignKeys({ vehicleId });
-    // Part L: on edit, exclude the trip being edited so its own start/end meter
-    // is never reported back as its "previous" reading.
-    const latest = await getLatestVehicleMeter(null, vehicleId, excludeTripId ?? null);
+    const latest = await getLatestVehicleMeter(null, vehicleId);
     if (!latest) return null;
     return {
       closingMeter: latest.meter,

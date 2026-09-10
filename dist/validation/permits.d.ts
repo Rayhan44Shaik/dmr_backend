@@ -5,7 +5,7 @@ export declare const permitDocTypeSchema: z.ZodEnum<["insurance", "fitness", "pe
 /** Upsert body for a single (vehicle, doc_type) permit record. expiryDate is
  * mandatory — the Permits matrix is driven by expiry dates. The document scan
  * itself is optional and travels as a multipart file, never in this body. */
-export declare const permitBodySchema: z.ZodObject<{
+export declare const permitBodySchema: z.ZodEffects<z.ZodObject<{
     vehicleId: z.ZodOptional<z.ZodNumber>;
     documentNumber: z.ZodOptional<z.ZodString>;
     validFrom: z.ZodOptional<z.ZodNullable<z.ZodEffects<z.ZodString, string, string>>>;
@@ -15,6 +15,22 @@ export declare const permitBodySchema: z.ZodObject<{
     /** Explicitly remove the attached scan without replacing it. */
     removeDocument: z.ZodOptional<z.ZodBoolean>;
 }, "strip", z.ZodTypeAny, {
+    expiryDate: string;
+    vehicleId?: number | undefined;
+    remarks?: string | null | undefined;
+    createdBy?: string | undefined;
+    documentNumber?: string | undefined;
+    validFrom?: string | null | undefined;
+    removeDocument?: boolean | undefined;
+}, {
+    expiryDate: string;
+    vehicleId?: number | undefined;
+    remarks?: string | null | undefined;
+    createdBy?: string | undefined;
+    documentNumber?: string | undefined;
+    validFrom?: string | null | undefined;
+    removeDocument?: boolean | undefined;
+}>, {
     expiryDate: string;
     vehicleId?: number | undefined;
     remarks?: string | null | undefined;

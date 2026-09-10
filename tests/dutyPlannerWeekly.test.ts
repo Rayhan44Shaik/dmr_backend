@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { applySchema, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
+import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
@@ -25,7 +25,8 @@ const { mastersService } = await import("../src/services/mastersService.js");
 const { dutyPlannerService } = await import("../src/services/dutyPlannerService.js");
 
 after(async () => {
-  await shutdownTestEnv({ testDb, pool });
+  await testDb.close();
+  await pool.end();
 });
 
 // Local-calendar date strings, matching dateOnly()/server "today".
@@ -93,7 +94,7 @@ describe("Duty Planner — previous (Closed) weeks", () => {
     await assert.rejects(
       () => dutyPlannerService.submitWeek(pastMonday),
       (err: Error & { status?: number }) =>
-        err.message.toLowerCase().includes("closed") && (err as any).status === 409
+        err.message.toLowerCase().includes("closed") && err.status === 409
     );
   });
 });
@@ -132,7 +133,7 @@ describe("Duty Planner — current week lifecycle", () => {
       () => dutyPlannerService.submitWeek(curMonday),
       (err: Error & { status?: number }) => {
         const msg = err.message;
-        return msg.includes("already been submitted") && (err as any).status === 409;
+        return msg.includes("already been submitted") && err.status === 409;
       }
     );
   });
@@ -150,7 +151,7 @@ describe("Duty Planner — current week lifecycle", () => {
           dutyType: "Repair",
           date: wed,
         }),
-      (err: Error & { status?: number }) => (err as any).status === 409
+      (err: Error & { status?: number }) => err.status === 409
     );
   });
 
@@ -158,7 +159,33 @@ describe("Duty Planner — current week lifecycle", () => {
     await assert.rejects(
       () => dutyPlannerService.autoAssignApply(curMonday),
       (err: Error & { status?: number }) =>
-        err.message.toLowerCase().includes("submitted") && (err as any).status === 409
+        err.message.toLowerCase().includes("submitted") && err.status === 409
     );
+  });
+});
+
+describe("Duty Planner — date and concurrency integrity", () => {
+  it("rejects impossible month-end dates and accepts leap day", async () => {
+    await assert.rejects(
+      () => dutyPlannerService.validateAssignment({ employeeId: empId, dutyType: "Delivery", date: "2026-09-31" }),
+      (err: Error & { status?: number }) => err.status === 422 && /invalid duty date/i.test(err.message)
+    );
+    await dutyPlannerService.validateAssignment({ employeeId: empId, dutyType: "Delivery", date: "2028-02-29" });
+  });
+
+  it("allows only one concurrent assignment for an employee and date", async () => {
+    const date = "2028-03-01";
+    const results = await Promise.allSettled([
+      dutyPlannerService.upsertDuty({ employeeId: empId, dutyType: "Delivery", date }),
+      dutyPlannerService.upsertDuty({ employeeId: empId, dutyType: "Repair", date }),
+    ]);
+    assert.equal(
+      results.filter((result) => result.status === "fulfilled").length,
+      1,
+      results.map((result) => result.status === "rejected" ? String(result.reason) : "fulfilled").join(" | ")
+    );
+    assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+    const stored = await pool.query("SELECT COUNT(*)::int count FROM duty_assignments WHERE employee_id = $1 AND duty_date = $2", [empId, date]);
+    assert.equal(stored.rows[0].count, 1);
   });
 });

@@ -177,32 +177,6 @@ export declare const salaryGenerateSchema: z.ZodObject<{
     department?: unknown;
     month?: unknown;
 }>;
-export interface SalaryBulkStatusBody {
-    ids: string[];
-    status: "Paid" | "Pending";
-    paymentDate?: string;
-    paymentMode?: PaymentMode;
-    paidBy?: string;
-}
-export declare const salaryBulkStatusSchema: z.ZodObject<{
-    ids: z.ZodArray<z.ZodString, "many">;
-    status: z.ZodEnum<["Paid", "Pending"]>;
-    paymentDate: z.ZodOptional<z.ZodEffects<z.ZodEffects<z.ZodString, string, string>, string, unknown>>;
-    paymentMode: z.ZodOptional<z.ZodEnum<["Cash", "Bank Transfer", "UPI", "NEFT", "RTGS", "IMPS", "Cheque"]>>;
-    paidBy: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
-}, "strip", z.ZodTypeAny, {
-    status: "Pending" | "Paid";
-    ids: string[];
-    paymentMode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
-    paymentDate?: string | undefined;
-    paidBy?: string | undefined;
-}, {
-    status: "Pending" | "Paid";
-    ids: string[];
-    paymentMode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
-    paymentDate?: unknown;
-    paidBy?: unknown;
-}>;
 export interface SalaryListQuery {
     month?: string;
     department?: string;

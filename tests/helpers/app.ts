@@ -6,6 +6,7 @@
  * talk to the exact same server the app runs in production.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,9 +37,15 @@ function getFreePort(): Promise<number> {
 export async function startApp(env: Record<string, string>): Promise<TestApp> {
   const port = await getFreePort();
 
+  // Test sources normally run through tsx. A precompiled test run is also
+  // supported so CI can use Node directly when a platform-level tsx bootstrap
+  // is unavailable. Both paths execute the same production entry point.
+  const compiledEntry = path.join(repoRoot, "src", "index.js");
+  const isCompiledRun = fs.existsSync(compiledEntry);
+
   const child: ChildProcess = spawn(
     process.execPath,
-    ["--import", "tsx", "tests/helpers/runTestServer.ts"],
+    isCompiledRun ? [compiledEntry] : ["--import", "tsx", "src/index.ts"],
     {
       cwd: repoRoot,
       env: {
@@ -47,20 +54,21 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
         CORS_ORIGIN: "*",
         ...env,
       },
-      stdio: ["ignore", "pipe", "pipe", "ipc"],
+      stdio: ["ignore", "pipe", "pipe"],
     }
   );
 
   let stderr = "";
   child.stderr?.on("data", (chunk: Buffer) => {
     stderr += chunk.toString();
+    if (process.env.DEBUG_TEST_SERVER === "1") process.stderr.write(chunk);
   });
 
   const baseUrl = `http://127.0.0.1:${port}`;
 
   // Wait for the health endpoint to come up (the server does
   // `SELECT 1`-equivalent checks before listening).
-  const deadline = Date.now() + 90_000;
+  const deadline = Date.now() + 30_000;
   for (;;) {
     if (child.exitCode !== null) {
       throw new Error(`test server exited early (code ${child.exitCode}):\n${stderr}`);
@@ -73,7 +81,7 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
     }
     if (Date.now() > deadline) {
       child.kill("SIGKILL");
-      throw new Error(`test server did not start within 90s:\n${stderr}`);
+      throw new Error(`test server did not start within 30s:\n${stderr}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
@@ -82,11 +90,7 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
     baseUrl,
     close: async () => {
       if (child.exitCode === null) {
-        if (typeof child.send === "function") {
-          child.send("shutdown");
-        } else {
-          child.kill("SIGTERM");
-        }
+        child.kill("SIGTERM");
         await Promise.race([
           new Promise<void>((resolve) => child.once("exit", () => resolve())),
           new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
@@ -94,10 +98,6 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
       }
       if (child.exitCode === null) {
         child.kill("SIGKILL");
-        await Promise.race([
-          new Promise<void>((resolve) => child.once("exit", () => resolve())),
-          new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-        ]);
       }
     },
   };
@@ -140,21 +140,6 @@ export async function patchJson(
     body: JSON.stringify(body),
   });
   return { status: res.status, body: await res.json() };
-}
-
-export async function deleteJson(
-  baseUrl: string,
-  apiPath: string
-): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${baseUrl}${apiPath}`, { method: "DELETE" });
-  const text = await res.text();
-  let body: any = {};
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch {
-    body = { raw: text };
-  }
-  return { status: res.status, body };
 }
 
 export async function getJson(

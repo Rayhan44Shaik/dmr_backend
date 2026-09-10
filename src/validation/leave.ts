@@ -19,8 +19,11 @@ import { parseBody } from "./operations.js";
 
 const trimmed = (v: unknown) => (typeof v === "string" ? v.trim() : v);
 
-const isDateString = (v: string) =>
-  /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(new Date(`${v}T00:00:00Z`).getTime());
+const isDateString = (v: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const parsed = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === v;
+};
 
 const dateString = z.preprocess(
   trimmed,
@@ -93,17 +96,19 @@ export const leaveCreateSchema = z
 // Status patch body (PATCH /leaves/:id/status).
 // ---------------------------------------------------------------------------
 export interface LeaveStatusBody {
-  status: "Pending" | "Approved" | "Rejected";
-  approvedBy?: string;
+  status: "Approved" | "Rejected" | "Cancelled";
   rejectionReason?: string;
 }
 
 export const leaveStatusSchema = z.object({
-  status: z.enum(["Pending", "Approved", "Rejected"], {
-    errorMap: () => ({ message: "status must be one of Pending | Approved | Rejected" }),
+  status: z.enum(["Approved", "Rejected", "Cancelled"], {
+    errorMap: () => ({ message: "status must be one of Approved | Rejected | Cancelled" }),
   }),
-  approvedBy: z.preprocess(trimmed, z.string().optional()),
   rejectionReason: z.preprocess(trimmed, z.string().optional()),
+}).strict().superRefine((value, ctx) => {
+  if (value.status === "Rejected" && !value.rejectionReason) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["rejectionReason"], message: "rejectionReason is required when rejecting leave" });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -125,7 +130,7 @@ export interface LeaveListQuery {
 export const leaveListQuerySchema = z.object({
   status: z.preprocess(
     trimmed,
-    z.enum(["All", "Pending", "Approved", "Rejected"]).optional()
+    z.enum(["All", "Pending", "Approved", "Rejected", "Cancelled"]).optional()
   ),
   month: monthString.optional(),
   employeeId: optionalInt("employeeId"),

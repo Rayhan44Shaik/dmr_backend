@@ -28,8 +28,9 @@ export async function startTestDb(): Promise<TestDb> {
       async onMessage(data) {
         return db.execProtocolRaw(data);
       },
-    }).catch(() => {
-      /* client disconnected during teardown */
+    }).catch((err: unknown) => {
+      const error = err as NodeJS.ErrnoException;
+      if (error.code !== "ECONNRESET") console.error("[test-db] connection error:", error.message);
     });
     socket.on("error", () => {
       /* connection teardown noise */
@@ -85,7 +86,7 @@ export async function applySchema(): Promise<void> {
 export async function resetMasters(): Promise<void> {
   const { pool } = await import("../../src/config/db.js");
   await pool.query(
-    `TRUNCATE employees, vehicles, farms, shops, banks, bird_types RESTART IDENTITY CASCADE`
+    `TRUNCATE employees, vehicles, farms, shops, banks, bird_types, routes, master_number_counters RESTART IDENTITY CASCADE`
   );
 }
 
@@ -95,76 +96,4 @@ export async function countRows(table: string): Promise<number> {
     `SELECT COUNT(*)::int AS n FROM ${table}`
   );
   return result.rows[0].n;
-}
-
-/**
- * tripsService.save() no longer persists a client-supplied `status: Completed`
- * (Complete is a production status transition). Rate Entry / Shop Sales /
- * Collection tests that need a rate-lockable trip must stamp Completed in SQL.
- * Production tripsService is unchanged.
- */
-export async function markTripCompletedForTests(tripId: number): Promise<void> {
-  const { pool } = await import("../../src/config/db.js");
-  await pool.query(
-    `UPDATE trips SET
-       status = 'Completed',
-       deleted = FALSE,
-       start_step_submitted = TRUE,
-       farm_step_submitted = TRUE,
-       pickup_step_submitted = TRUE,
-       delivery_step_submitted = TRUE,
-       expenses_step_submitted = TRUE,
-       approved_at = COALESCE(approved_at, NOW())
-     WHERE id = $1`,
-    [tripId]
-  );
-}
-
-/** Authoritative calendar date inside the test database (not JS timezone). */
-export async function currentPgDate(): Promise<string> {
-  const { pool } = await import("../../src/config/db.js");
-  const result = await pool.query<{ d: string }>(`SELECT CURRENT_DATE::text AS d`);
-  return result.rows[0].d;
-}
-
-/** Serialize async work in one test file (trip_no generation is per-date). */
-export function createMutex() {
-  let tail = Promise.resolve();
-  return async function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
-    const prev = tail;
-    let unlock: () => void = () => undefined;
-    tail = new Promise<void>((resolve) => {
-      unlock = resolve;
-    });
-    await prev;
-    try {
-      return await fn();
-    } finally {
-      unlock();
-    }
-  };
-}
-export function shiftIsoDate(iso: string, days: number): string {
-  const [y, m, d] = iso.split("-").map(Number);
-  const utc = Date.UTC(y, m - 1, d + days);
-  return new Date(utc).toISOString().slice(0, 10);
-}
-
-/**
- * Close HTTP child, in-process pool, then PGlite — in that order so the
- * pg-gateway socket is not torn down under live pool connections.
- */
-export async function shutdownTestEnv(opts: {
-  app?: { close: () => Promise<void> };
-  testDb: TestDb;
-  pool: { end: () => Promise<void> };
-}): Promise<void> {
-  if (opts.app) await opts.app.close();
-  try {
-    await opts.pool.end();
-  } catch {
-    /* already ended */
-  }
-  await new Promise((resolve) => setImmediate(resolve));
-  await opts.testDb.close();
 }

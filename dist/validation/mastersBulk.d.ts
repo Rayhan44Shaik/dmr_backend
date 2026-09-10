@@ -16,6 +16,7 @@ export interface NormalizedShopRow {
     ownerName: string;
     phoneNumber: string;
     secondaryPhoneNumber: string;
+    whatsappNumber: string;
     email: string;
     city: string;
     address: string | null;
@@ -23,8 +24,8 @@ export interface NormalizedShopRow {
     longitude: number | null;
     paperRate: number;
     associationType: string;
-    status: "Active" | "Inactive";
     openingBalance: number;
+    status: "Active" | "Inactive";
 }
 export interface NormalizedVehicleRow {
     vehicleNo: number | null;
@@ -43,6 +44,8 @@ export interface NormalizedVehicleRow {
     purchaseDate: string | null;
     purchaseAmount: number | null;
     emiStartDate: string | null;
+    emiDay: number | null;
+    totalEMIs: number | null;
     rcDate: string | null;
     status: "Active" | "Inactive";
 }

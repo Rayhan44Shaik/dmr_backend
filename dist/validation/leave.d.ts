@@ -32,9 +32,9 @@ export declare const leaveCreateSchema: z.ZodEffects<z.ZodObject<{
     days: z.ZodOptional<z.ZodNumber>;
     reason: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
 }, "strip", z.ZodTypeAny, {
+    type: "Casual" | "Sick" | "Emergency" | "Annual";
     fromDate: string;
     toDate: string;
-    type: "Casual" | "Sick" | "Emergency" | "Annual";
     employeeId: number;
     reason?: string | undefined;
     days?: number | undefined;
@@ -46,9 +46,9 @@ export declare const leaveCreateSchema: z.ZodEffects<z.ZodObject<{
     reason?: unknown;
     days?: number | undefined;
 }>, {
+    type: "Casual" | "Sick" | "Emergency" | "Annual";
     fromDate: string;
     toDate: string;
-    type: "Casual" | "Sick" | "Emergency" | "Annual";
     employeeId: number;
     reason?: string | undefined;
     days?: number | undefined;
@@ -61,21 +61,23 @@ export declare const leaveCreateSchema: z.ZodEffects<z.ZodObject<{
     days?: number | undefined;
 }>;
 export interface LeaveStatusBody {
-    status: "Pending" | "Approved" | "Rejected";
-    approvedBy?: string;
+    status: "Approved" | "Rejected" | "Cancelled";
     rejectionReason?: string;
 }
-export declare const leaveStatusSchema: z.ZodObject<{
-    status: z.ZodEnum<["Pending", "Approved", "Rejected"]>;
-    approvedBy: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
+export declare const leaveStatusSchema: z.ZodEffects<z.ZodObject<{
+    status: z.ZodEnum<["Approved", "Rejected", "Cancelled"]>;
     rejectionReason: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
-}, "strip", z.ZodTypeAny, {
-    status: "Pending" | "Approved" | "Rejected";
-    approvedBy?: string | undefined;
+}, "strict", z.ZodTypeAny, {
+    status: "Approved" | "Rejected" | "Cancelled";
     rejectionReason?: string | undefined;
 }, {
-    status: "Pending" | "Approved" | "Rejected";
-    approvedBy?: unknown;
+    status: "Approved" | "Rejected" | "Cancelled";
+    rejectionReason?: unknown;
+}>, {
+    status: "Approved" | "Rejected" | "Cancelled";
+    rejectionReason?: string | undefined;
+}, {
+    status: "Approved" | "Rejected" | "Cancelled";
     rejectionReason?: unknown;
 }>;
 export interface LeaveListQuery {
@@ -91,7 +93,7 @@ export interface LeaveListQuery {
     limit?: number;
 }
 export declare const leaveListQuerySchema: z.ZodObject<{
-    status: z.ZodEffects<z.ZodOptional<z.ZodEnum<["All", "Pending", "Approved", "Rejected"]>>, "Pending" | "Approved" | "Rejected" | "All" | undefined, unknown>;
+    status: z.ZodEffects<z.ZodOptional<z.ZodEnum<["All", "Pending", "Approved", "Rejected", "Cancelled"]>>, "Pending" | "Approved" | "Rejected" | "Cancelled" | "All" | undefined, unknown>;
     month: z.ZodOptional<z.ZodEffects<z.ZodEffects<z.ZodString, string, string>, string, unknown>>;
     employeeId: z.ZodEffects<z.ZodOptional<z.ZodNumber>, number | undefined, unknown>;
     department: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
@@ -104,12 +106,12 @@ export declare const leaveListQuerySchema: z.ZodObject<{
 }, "strip", z.ZodTypeAny, {
     page: number;
     limit: number;
-    status?: "Pending" | "Approved" | "Rejected" | "All" | undefined;
+    status?: "Pending" | "Approved" | "Rejected" | "Cancelled" | "All" | undefined;
     department?: string | undefined;
     fromDate?: string | undefined;
     toDate?: string | undefined;
-    month?: string | undefined;
     search?: string | undefined;
+    month?: string | undefined;
     employeeId?: number | undefined;
     leaveType?: "Casual" | "Sick" | "Emergency" | "Annual" | undefined;
 }, {
@@ -118,9 +120,9 @@ export declare const leaveListQuerySchema: z.ZodObject<{
     fromDate?: unknown;
     toDate?: unknown;
     page?: unknown;
+    search?: unknown;
     limit?: unknown;
     month?: unknown;
-    search?: unknown;
     employeeId?: unknown;
     leaveType?: unknown;
 }>;

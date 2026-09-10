@@ -73,8 +73,8 @@ try {
   // ---- Fixtures: one dedicated vehicle ----
   const vMax = (await db(`SELECT COALESCE(MAX(vehicle_no),0)::int m FROM vehicles`)).rows[0].m;
   const veh = await db(
-    `INSERT INTO vehicles (vehicle_no, vehicle_number, vehicle_type, status)
-     VALUES ($1,$2,'Truck','Active') RETURNING id, vehicle_number`,
+    `INSERT INTO vehicles (vehicle_no, vehicle_number, vehicle_type, status, no_of_boxes, bird_capacity, capacity_kg)
+     VALUES ($1,$2,'Truck','Active',85,1000,5000) RETURNING id, vehicle_number`,
     [vMax + 1, VEH_NO]
   );
   vehId = veh.rows[0].id;

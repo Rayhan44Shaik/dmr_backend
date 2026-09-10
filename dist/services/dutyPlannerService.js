@@ -305,7 +305,7 @@ function buildPlan(week) {
     return { employeesAffected: grouped.size, delivery: rows.filter((r) => r.dutyType === "Delivery").length, repair: rows.filter((r) => r.dutyType === "Repair").length, office: rows.filter((r) => ["Office", "OfficeDuty"].includes(r.dutyType)).length, collection: rows.filter((r) => r.dutyType === "Collection").length, weeklyOff: rows.filter((r) => r.dutyType === "WeeklyOff").length, saturdayRequired: week.saturday.required, saturdayAssigned: satAssigned, saturdayShortage: Math.max(0, week.saturday.required - satAssigned), conflicts, rows };
 }
 export async function autoAssignPreview(weekStart) { const week = await getDutyWeek(weekStart); return buildPlan(week); }
-export async function autoAssignApply(weekStart, plan, changedBy = "user") {
+export async function autoAssignApply(weekStart, plan, changedBy) {
     const week = await getDutyWeek(weekStart);
     const locked = await weekIsLocked(week.weekStart, week.weekEnd);
     if (locked)
@@ -328,26 +328,28 @@ export async function autoAssignApply(weekStart, plan, changedBy = "user") {
     });
     return getDutyWeek(week.weekStart);
 }
-export async function upsertDuty(body, changedBy = "user") {
+export async function upsertDuty(body, changedBy) {
     const weekStart = mondayOf(body.date);
     await validateAssignment(body, { ignoreId: body.id });
     const emp = (await query("SELECT employee_name, department, role FROM employees WHERE id = $1", [body.employeeId])).rows[0];
+    if (!body.id) {
+        // One statement keeps the assignment and its audit row atomic. The unique
+        // business key arbitrates concurrent callers without aborting a transaction.
+        const inserted = await query("WITH new_assignment AS (INSERT INTO duty_assignments (employee_id, employee_name, department, role, duty_type, duty_date, vehicle_id, vehicle_no) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (employee_id, duty_date) DO NOTHING RETURNING id) INSERT INTO duty_assignment_changes (assignment_id, employee_id, employee_name, duty_date, new_duty_type, new_vehicle_id, changed_by, action) SELECT id,$1,$2,$6,$5,$7,$9,'insert' FROM new_assignment RETURNING assignment_id", [body.employeeId, emp.employee_name, emp.department, emp.role || emp.department, body.dutyType, body.date, body.vehicleId ?? null, body.vehicleNo ?? null, changedBy]);
+        if (!inserted.rows[0])
+            throw new AppError(409, "Employee already has a duty assignment on this date.");
+        return getDutyWeek(weekStart);
+    }
     await withTransaction(async (client) => {
-        if (body.id) {
-            const old = (await client.query("SELECT * FROM duty_assignments WHERE id = $1", [body.id])).rows[0];
-            if (!old)
-                throw new AppError(404, "Duty assignment not found");
-            await client.query("INSERT INTO duty_assignment_changes (assignment_id, employee_id, employee_name, duty_date, old_duty_type, new_duty_type, old_vehicle_id, new_vehicle_id, changed_by, action) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'update')", [body.id, body.employeeId, emp.employee_name, body.date, old.duty_type, body.dutyType, old.vehicle_id, body.vehicleId ?? null, changedBy]);
-            await client.query("UPDATE duty_assignments SET employee_id=$2, employee_name=$3, department=$4, role=$5, duty_type=$6, duty_date=$7, vehicle_id=$8, vehicle_no=$9 WHERE id=$1", [body.id, body.employeeId, emp.employee_name, emp.department, emp.role || emp.department, body.dutyType, body.date, body.vehicleId ?? null, body.vehicleNo ?? null]);
-        }
-        else {
-            const res = await client.query("INSERT INTO duty_assignments (employee_id, employee_name, department, role, duty_type, duty_date, vehicle_id, vehicle_no) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id", [body.employeeId, emp.employee_name, emp.department, emp.role || emp.department, body.dutyType, body.date, body.vehicleId ?? null, body.vehicleNo ?? null]);
-            await client.query("INSERT INTO duty_assignment_changes (assignment_id, employee_id, employee_name, duty_date, new_duty_type, new_vehicle_id, changed_by, action) VALUES ($1,$2,$3,$4,$5,$6,$7,'insert')", [res.rows[0].id, body.employeeId, emp.employee_name, body.date, body.dutyType, body.vehicleId ?? null, changedBy]);
-        }
+        const old = (await client.query("SELECT * FROM duty_assignments WHERE id = $1", [body.id])).rows[0];
+        if (!old)
+            throw new AppError(404, "Duty assignment not found");
+        await client.query("INSERT INTO duty_assignment_changes (assignment_id, employee_id, employee_name, duty_date, old_duty_type, new_duty_type, old_vehicle_id, new_vehicle_id, changed_by, action) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'update')", [body.id, body.employeeId, emp.employee_name, body.date, old.duty_type, body.dutyType, old.vehicle_id, body.vehicleId ?? null, changedBy]);
+        await client.query("UPDATE duty_assignments SET employee_id=$2, employee_name=$3, department=$4, role=$5, duty_type=$6, duty_date=$7, vehicle_id=$8, vehicle_no=$9 WHERE id=$1", [body.id, body.employeeId, emp.employee_name, emp.department, emp.role || emp.department, body.dutyType, body.date, body.vehicleId ?? null, body.vehicleNo ?? null]);
     });
     return getDutyWeek(weekStart);
 }
-export async function deleteDuty(id, changedBy = "user") {
+export async function deleteDuty(id, changedBy) {
     const found = (await query("SELECT * FROM duty_assignments WHERE id = $1", [id])).rows[0];
     if (!found)
         throw new AppError(404, "Duty assignment not found");
@@ -362,7 +364,7 @@ export async function deleteDuty(id, changedBy = "user") {
     });
     return getDutyWeek(weekStart);
 }
-export async function submitWeek(weekStart, submittedBy = "user") {
+export async function submitWeek(weekStart, submittedBy) {
     const ms = mondayOf(weekStart);
     const week = await getDutyWeek(ms);
     if (week.status === "Locked")

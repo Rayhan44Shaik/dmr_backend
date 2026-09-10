@@ -1,9 +1,7 @@
 /** Fleet module request validation (Fleet → Entry / History). */
 import { z } from "zod";
 import { parseBody } from "./operations.js";
-
-const isDateString = (v: string) =>
-  /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(new Date(`${v}T00:00:00Z`).getTime());
+import { isValidDateOnly } from "../utils/dateValidation.js";
 
 export const fleetMaintenancePartSchema = z.object({
   name: z.string().min(1, "Part name is required"),
@@ -17,10 +15,10 @@ export const fleetMaintenanceBodySchema = z.object({
   date: z
     .string()
     .min(1, "Date is required")
-    .refine(isDateString, "Date must be a valid YYYY-MM-DD value"),
-  vehicleId: z.number().int(),
+    .refine(isValidDateOnly, "Date must be a valid YYYY-MM-DD value"),
+  vehicleId: z.number().int().positive(),
   vehicleNo: z.string().nullable().optional(),
-  driverId: z.number().int().nullable().optional(),
+  driverId: z.number().int().positive().nullable().optional(),
   driverName: z.string().nullable().optional(),
   currentKM: z.number().nonnegative(),
   nextServiceKM: z.number().nonnegative().nullable().optional(),
@@ -32,6 +30,7 @@ export const fleetMaintenanceBodySchema = z.object({
   totalCost: z.number().nonnegative().optional(),
   remarks: z.string().nullable().optional(),
   createdBy: z.string().optional(),
+  idempotencyKey: z.string().uuid().optional(),
 });
 
 /** Update body — everything optional; removeDocumentIds lets the caller
@@ -39,7 +38,7 @@ export const fleetMaintenanceBodySchema = z.object({
 export const fleetMaintenanceUpdateSchema = fleetMaintenanceBodySchema
   .partial()
   .extend({
-    removeDocumentIds: z.array(z.number().int().nonnegative()).optional(),
+    removeDocumentIds: z.array(z.number().int().positive()).max(5).optional(),
   });
 
 export const fleetMaintenanceApproveSchema = z.object({

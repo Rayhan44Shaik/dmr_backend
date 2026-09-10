@@ -20,7 +20,6 @@ export const EMPLOYEE_DEPARTMENTS = [
 ];
 export const ACTIVE_STATUSES = ["Active", "Inactive"];
 export const EMPLOYEE_STATUSES = ["Active", "Inactive", "Suspended"];
-export const ASSOCIATION_TYPES = ["Vencob Vij", "Vencob Gun", "Ass Vij", "Ass Gun"];
 export function isMissing(value) {
     return value === undefined || value === null || String(value).trim() === "";
 }
@@ -50,9 +49,7 @@ export function validateShopFields(raw) {
     const shopName = str(raw.shopName ?? raw.shop_name).trim();
     const ownerName = str(raw.ownerName ?? raw.owner_name).trim();
     const phoneNumber = str(raw.phoneNumber ?? raw.phone ?? raw.phone_number).trim();
-    // `city` replaced the legacy `village` field (shop master redesign); accept
-    // either key, consistent with the other alias fallbacks above.
-    const city = str(raw.city ?? raw.village).trim();
+    const village = str(raw.city ?? raw.village).trim();
     if (isMissing(shopName))
         errors.push({ field: "shopName", message: "Shop Name is required." });
     else if (shopName.length < 3)
@@ -65,49 +62,8 @@ export function validateShopFields(raw) {
         errors.push({ field: "phoneNumber", message: "Mobile Number is required." });
     else if (!/^[0-9]{10}$/.test(phoneNumber))
         errors.push({ field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
-    if (isMissing(city))
+    if (isMissing(village))
         errors.push({ field: "city", message: "City is required." });
-    // Shop master redesign (migration 040): Email ID is REQUIRED on create,
-    // update and bulk import.
-    const email = str(raw.email).trim();
-    if (isMissing(email)) {
-        errors.push({ field: "email", message: "Email ID is required." });
-    }
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        errors.push({ field: "email", message: "Please enter a valid email address." });
-    }
-    const secondaryPhone = str(raw.secondaryPhoneNumber ?? raw.secondary_phone_number).trim();
-    if (!isMissing(secondaryPhone) && !/^[0-9]{10}$/.test(secondaryPhone)) {
-        errors.push({ field: "secondaryPhoneNumber", message: "Secondary Mobile Number must be exactly 10 digits." });
-    }
-    const latitude = raw.latitude;
-    if (!isMissing(latitude)) {
-        const lat = Number(latitude);
-        if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
-            errors.push({ field: "latitude", message: "Latitude must be between -90 and 90." });
-        }
-    }
-    const longitude = raw.longitude;
-    if (!isMissing(longitude)) {
-        const lon = Number(longitude);
-        if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
-            errors.push({ field: "longitude", message: "Longitude must be between -180 and 180." });
-        }
-    }
-    const paperRate = raw.paperRate;
-    if (!isMissing(paperRate)) {
-        const rate = Number(paperRate);
-        if (!Number.isInteger(rate) || rate < 1 || rate > 30) {
-            errors.push({ field: "paperRate", message: "Paper Rate must be an integer between 1 and 30." });
-        }
-    }
-    const associationType = str(raw.associationType ?? raw.association_type).trim();
-    if (isMissing(associationType)) {
-        errors.push({ field: "associationType", message: "Association Type is required." });
-    }
-    else if (!ASSOCIATION_TYPES.includes(associationType)) {
-        errors.push({ field: "associationType", message: `Association Type must be one of: ${ASSOCIATION_TYPES.join(", ")}` });
-    }
     if (!isMissing(raw.openingBalance) && !Number.isFinite(Number(raw.openingBalance))) {
         errors.push({ field: "openingBalance", message: "Opening Balance must be a valid number." });
     }

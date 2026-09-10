@@ -27,12 +27,4 @@ export interface AnalyticsQuery {
  * so an omitted range never silently drifts to a different window than the
  * frontend uses.
  */
-/**
- * Analytics-level safe maximum for a report window. Prevents an uncontrolled
- * weekly series (and unbounded aggregation) from a pathological range.
- * 50 years ≈ 2600 Sunday buckets — well within the memory/CPU budget while
- * covering every realistic fleet report. Exceeding it is rejected with a clear
- * 400 (global validation is left untouched).
- */
-export declare const MAX_ANALYTICS_RANGE_DAYS: number;
 export declare function parseAnalyticsQuery(query: Record<string, unknown>): AnalyticsQuery;

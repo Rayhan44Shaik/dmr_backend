@@ -7,6 +7,7 @@
  * Unknown/obsolete fields are ignored — nothing outside the current schema
  * is ever persisted.
  */
+import { employeeSchema, vehicleSchema, farmSchema, shopSchema, birdTypeSchema } from "./masters.js";
 import { AppError } from "../middleware/errorHandler.js";
 export const ACTIVE_STATUSES = ["Active", "Inactive"];
 export const EMPLOYEE_STATUSES = ["Active", "Inactive", "Suspended"];
@@ -239,51 +240,24 @@ class RowContext {
 // ---------------------------------------------------------------------------
 // Per-kind normalizers
 // ---------------------------------------------------------------------------
-const ASSOCIATION_TYPES = ["Vencob Vij", "Vencob Gun", "Ass Vij", "Ass Gun"];
 function normalizeShop(ctx) {
-    // Shop master redesign (migration 040): Email ID is REQUIRED on bulk import.
-    const email = ctx.nullableStr("email");
-    if (!email || email.trim() === "") {
-        ctx.fail("email", "Email ID is required.");
-    }
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-        ctx.fail("email", "Please enter a valid email address.");
-    }
-    const latitude = ctx.nullableNum("latitude", { min: -90 });
-    if (latitude !== null && (latitude < -90 || latitude > 90)) {
-        ctx.fail("latitude", "Latitude must be between -90 and 90.");
-    }
-    const longitude = ctx.nullableNum("longitude", { min: -180 });
-    if (longitude !== null && (longitude < -180 || longitude > 180)) {
-        ctx.fail("longitude", "Longitude must be between -180 and 180.");
-    }
-    const paperRate = ctx.num("paperRate", { fallback: 1, min: 1, integer: true });
-    if (paperRate < 1 || paperRate > 30) {
-        ctx.fail("paperRate", "Paper Rate must be an integer between 1 and 30.");
-    }
-    const associationType = ctx.str("associationType");
-    if (!associationType || !ASSOCIATION_TYPES.includes(associationType)) {
-        ctx.fail("associationType", `Association Type must be one of: ${ASSOCIATION_TYPES.join(", ")}`);
-    }
-    const openingBalance = ctx.num("openingBalance", { fallback: 0 });
     return {
         shopNo: ctx.optionalNo("shopNo"),
         shopNumber: ctx.str("shopNumber"),
         shopName: ctx.requiredStr("shopName"),
         ownerName: ctx.str("ownerName"),
         phoneNumber: ctx.phone("phoneNumber"),
-        secondaryPhoneNumber: ctx.nullableStr("secondaryPhoneNumber") ?? "",
-        email: email ?? "",
-        // `city` replaced the legacy `village` field (shop master redesign);
-        // accept either key so older import sheets keep working.
-        city: ctx.str("city") || ctx.requiredStr("village"),
+        secondaryPhoneNumber: ctx.phone("secondaryPhoneNumber"),
+        whatsappNumber: ctx.phone("whatsappNumber"),
+        email: ctx.str("email"),
+        city: ctx.requiredStr("city"),
         address: ctx.nullableStr("address"),
-        latitude,
-        longitude,
-        paperRate,
-        associationType: associationType ?? "",
+        latitude: ctx.nullableNum("latitude", { min: -90 }),
+        longitude: ctx.nullableNum("longitude", { min: -180 }),
+        paperRate: ctx.num("paperRate", { fallback: 1, min: 1, integer: true }),
+        associationType: ctx.requiredStr("associationType"),
+        openingBalance: ctx.num("openingBalance"),
         status: ctx.status("status", ACTIVE_STATUSES),
-        openingBalance,
     };
 }
 function normalizeVehicle(ctx) {
@@ -304,6 +278,8 @@ function normalizeVehicle(ctx) {
         purchaseDate: ctx.date("purchaseDate"),
         purchaseAmount: ctx.nullableNum("purchaseAmount", { min: 0 }),
         emiStartDate: ctx.date("emiStartDate"),
+        emiDay: ctx.nullableNum("emiDay", { min: 1 }),
+        totalEMIs: ctx.nullableNum("totalEMIs", { min: 1 }),
         rcDate: ctx.date("rcDate"),
         status: ctx.status("status", ACTIVE_STATUSES),
     };
@@ -359,7 +335,6 @@ const duplicateConfigs = {
         noField: "shopNo",
         naturalField: "shopName",
         naturalKey: (row) => row.shopName.toLowerCase(),
-        shopNumberField: "shopNumber",
     },
     vehicles: {
         noField: "vehicleNo",
@@ -398,17 +373,6 @@ function detectBatchDuplicates(kind, rows) {
             config.naturalField,
             `${config.naturalField} "${String(raw[config.naturalField])}"`,
         ]);
-        // Check for duplicate shopNumber within the batch for shops
-        if (kind === "shops") {
-            const shopNumber = raw["shopNumber"];
-            if (shopNumber && shopNumber.trim() !== "") {
-                entries.push([
-                    `shopNumber:${shopNumber.trim().toLowerCase()}`,
-                    "shopNumber",
-                    `Shop Number "${shopNumber.trim()}"`,
-                ]);
-            }
-        }
         for (const [key, field, label] of entries) {
             const first = seen.get(key);
             if (first === undefined) {
@@ -451,6 +415,14 @@ export function validateBulkRows(kind, body) {
             errors: [{ row: 0, field: "", message: "Request body must contain at least one row" }],
         });
     }
+    if (body.length > 1000) {
+        throw new AppError(413, "Bulk import is limited to 1,000 rows per request", {
+            total: body.length,
+            successful: 0,
+            failed: body.length,
+            errors: [{ row: 0, field: "", message: "Split the import into batches of 1,000 rows or fewer" }],
+        });
+    }
     const rows = [];
     const errors = [];
     body.forEach((entry, index) => {
@@ -459,7 +431,17 @@ export function validateBulkRows(kind, body) {
             return;
         }
         const ctx = new RowContext(index + 1, entry);
-        rows.push(normalizers[kind](ctx));
+        const normalized = normalizers[kind](ctx);
+        rows.push(normalized);
+        const schemas = { employees: employeeSchema, vehicles: vehicleSchema, farms: farmSchema, shops: shopSchema, "bird-types": birdTypeSchema };
+        const candidate = Object.fromEntries(Object.entries(normalized).filter(([key, value]) => !(key.endsWith("No") && value === null)));
+        if (kind === "shops" && candidate.address === null)
+            candidate.address = "";
+        const validation = schemas[kind].safeParse(candidate);
+        if (!validation.success)
+            for (const issue of validation.error.issues) {
+                ctx.fail(issue.path.join("."), issue.message);
+            }
         errors.push(...ctx.errors);
     });
     if (errors.length === 0) {

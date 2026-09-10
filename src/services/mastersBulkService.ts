@@ -69,28 +69,16 @@ const SHOP_CONFIG: KindConfig<NormalizedShopRow, Shop> = {
     client.query(
       `INSERT INTO shops (
          shop_no, shop_number, shop_name, owner_name, phone_number,
-         secondary_phone_number, email, city, address, latitude, longitude,
-         paper_rate, association_type, status,
-         opening_balance, current_balance
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`,
+         secondary_phone_number, whatsapp_number, email, city, village, address,
+         latitude, longitude, paper_rate, association_type, opening_balance,
+         current_balance, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,$12,$13,$14,$15,$15,$16)
+       RETURNING *`,
       [
-        no,
-        // shop_number is NOT NULL — auto-generate when the imported row omits it,
-        // mirroring the singular create endpoint.
-        row.shopNumber.trim() || `SHOP-${String(no).padStart(6, "0")}`,
-        row.shopName,
-        row.ownerName,
-        row.phoneNumber,
-        row.secondaryPhoneNumber,
-        row.email,
-        row.city,
-        row.address,
-        row.latitude,
-        row.longitude,
-        row.paperRate,
-        row.associationType,
-        row.status,
-        row.openingBalance,
+        no, row.shopNumber, row.shopName, row.ownerName, row.phoneNumber,
+        row.secondaryPhoneNumber, row.whatsappNumber, row.email, row.city,
+        row.address, row.latitude, row.longitude, row.paperRate,
+        row.associationType, row.openingBalance, row.status,
       ]
     ),
   map: mapShop,
@@ -108,8 +96,8 @@ const VEHICLE_CONFIG: KindConfig<NormalizedVehicleRow, Vehicle> = {
          vehicle_no, vehicle_number, vehicle_type, no_of_boxes, bird_capacity,
          capacity_kg, tracking_id, fastag_bank, engine_number, chassis_number,
          insurance_expiry, permit_expiry, fitness_expiry, purchase_date,
-         purchase_amount, emi_start_date, rc_date, status
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+         purchase_amount, emi_start_date, rc_date, status, emi_day, total_emis
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
        RETURNING *`,
       [
         no,
@@ -130,6 +118,8 @@ const VEHICLE_CONFIG: KindConfig<NormalizedVehicleRow, Vehicle> = {
         row.emiStartDate,
         row.rcDate,
         row.status,
+        row.emiDay,
+        row.totalEMIs,
       ]
     ),
   map: mapVehicle,
@@ -320,20 +310,16 @@ async function bulkImport<Row extends NormalizedBulkRow, Mapped>(
         }
       }
 
-      const maxResult = await client.query<{ n: number }>(
-        `SELECT COALESCE(MAX(${config.noColumn}), 0) AS n FROM ${config.table}`
-      );
-      let nextNo =
-        Math.max(Number(maxResult.rows[0].n), providedNos.length > 0 ? Math.max(...providedNos) : 0) + 1;
-
       const created: Mapped[] = [];
       for (let index = 0; index < rows.length; index += 1) {
         currentRow = index + 1;
         const row = rows[index];
-        const no = config.noOf(row) ?? nextNo;
+        const allocated = await client.query<{ n: number }>(
+          "SELECT next_master_number($1, $2) AS n", [config.table, config.noOf(row)]
+        );
+        const no = allocated.rows[0].n;
         const result = await config.insert(client, row, no);
         created.push(config.map(result.rows[0]));
-        if (config.noOf(row) === null) nextNo += 1;
       }
       return created;
     });

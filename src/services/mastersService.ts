@@ -88,21 +88,23 @@ export function mapShop(row: Record<string, unknown>): Shop {
     shopName: str(row.shop_name),
     ownerName: str(row.owner_name),
     phoneNumber: str(row.phone_number),
-    secondaryPhoneNumber: row.secondary_phone_number == null || str(row.secondary_phone_number).trim() === "" ? null : str(row.secondary_phone_number).trim(),
-    email: row.email == null || str(row.email).trim() === "" ? null : str(row.email).trim(),
-    city: str(row.city),
+    secondaryPhoneNumber: str(row.secondary_phone_number),
+    whatsappNumber: str(row.whatsapp_number),
+    email: str(row.email),
+    city: str(row.city || row.village),
+    village: str(row.city || row.village),
     address: row.address == null ? null : str(row.address),
     latitude: row.latitude == null ? null : num(row.latitude),
     longitude: row.longitude == null ? null : num(row.longitude),
-    paperRate: num(row.paper_rate ?? 0),
-    associationType: str(row.association_type ?? ""),
+    paperRate: num(row.paper_rate),
+    associationType: str(row.association_type),
     status: str(row.status) as Shop["status"],
     openingBalance: num(row.opening_balance),
     currentBalance: num(row.current_balance),
   };
 }
 
-function mapBank(row: Record<string, unknown>): Bank {
+export function mapBank(row: Record<string, unknown>): Bank {
   return {
     id: num(row.id),
     bankNo: num(row.bank_no),
@@ -134,9 +136,12 @@ const UNIQUE_CHECK: Record<
   vehicle: { table: "vehicles", column: "vehicle_number", label: "Vehicle number" },
   farm: { table: "farms", column: "farm_name", label: "Farm" },
   shop: { table: "shops", column: "shop_name", label: "Shop" },
-  shopNumber: { table: "shops", column: "shop_number", label: "Shop Number" },
   bank: { table: "banks", column: "bank_name", label: "Bank" },
   birdType: { table: "bird_types", column: "bird_type", label: "Bird type" },
+  shopNumber: { table: "shops", column: "shop_number", label: "Shop number" },
+  bankAccount: { table: "banks", column: "account_number", label: "Bank account number" },
+  vehicleEngine: { table: "vehicles", column: "engine_number", label: "Engine number" },
+  vehicleChassis: { table: "vehicles", column: "chassis_number", label: "Chassis number" },
 };
 
 async function assertUnique(
@@ -162,6 +167,17 @@ function requireFields(body: Record<string, unknown>, fields: string[]) {
       throw new AppError(400, `${field.replace(/^./, (c) => c.toUpperCase())} is required.`);
     }
   }
+}
+
+async function getMasterById<T>(
+  table: string,
+  id: number,
+  label: string,
+  mapper: (row: Record<string, unknown>) => T
+): Promise<T> {
+  const result = await query(`SELECT * FROM ${table} WHERE id = $1`, [id]);
+  if (!result.rowCount) throw new AppError(404, `${label} not found`);
+  return mapper(result.rows[0]);
 }
 
 /** Throws the first shared-validation error as a 400 (normal CRUD format). */
@@ -232,6 +248,9 @@ function bulkValidationFailed(errors: BulkRowError[]): never {
 }
 
 export const mastersService = {
+  getEmployee(id: number) {
+    return getMasterById("employees", id, "Employee", mapEmployee);
+  },
   async listEmployees(department?: string) {
     const result = department
       ? await query(
@@ -252,7 +271,7 @@ export const mastersService = {
       await assertEmployeeUnique(body, body.id);
       const result = await query(
         `UPDATE employees SET
-          employee_no=$2, employee_name=$3, department=$4, role=$5,
+          employee_no=COALESCE($2,employee_no), employee_name=$3, department=$4, role=$5,
           phone_number=$6, email=$7, address=$8, joining_date=$9,
           aadhar_number=$10, license_number=$11, salary=$12, status=$13, avatar=$14
          WHERE id=$1 RETURNING *`,
@@ -273,11 +292,12 @@ export const mastersService = {
           body.avatar ?? null,
         ]
       );
+      if (!result.rowCount) throw new AppError(404, "Employee not found");
       return mapEmployee(result.rows[0]);
     }
 
     const nextNo = await query<{ n: number }>(
-      `SELECT COALESCE(MAX(employee_no), 0) + 1 AS n FROM employees`
+      `SELECT next_master_number('employees') AS n`
     );
     if (body.employeeNo != null) {
       await assertUnique("employee", String(body.employeeNo));
@@ -330,14 +350,20 @@ export const mastersService = {
     return result.rows.map(mapVehicle);
   },
 
+  getVehicle(id: number) {
+    return getMasterById("vehicles", id, "Vehicle", mapVehicle);
+  },
+
   async upsertVehicle(body: Partial<Vehicle> & { vehicleNumber: string }) {
     assertValid(validateVehicleFields(body));
 
     if (body.id) {
       await assertUnique("vehicle", body.vehicleNumber, body.id);
+      await assertUnique("vehicleEngine", body.engineNumber ?? "", body.id);
+      await assertUnique("vehicleChassis", body.chassisNumber ?? "", body.id);
       const result = await query(
         `UPDATE vehicles SET
-          vehicle_no=$2, vehicle_number=$3, vehicle_type=$4, no_of_boxes=$5,
+          vehicle_no=COALESCE($2,vehicle_no), vehicle_number=$3, vehicle_type=$4, no_of_boxes=$5,
           bird_capacity=$6, capacity_kg=$7, tracking_id=$8, fastag_bank=$9,
           engine_number=$10, chassis_number=$11, insurance_expiry=$12,
           permit_expiry=$13, fitness_expiry=$14, purchase_date=$15,
@@ -368,13 +394,16 @@ export const mastersService = {
           body.totalEMIs ?? null,
         ]
       );
+      if (!result.rowCount) throw new AppError(404, "Vehicle not found");
       return mapVehicle(result.rows[0]);
     }
 
     const nextNo = await query<{ n: number }>(
-      `SELECT COALESCE(MAX(vehicle_no), 0) + 1 AS n FROM vehicles`
+      `SELECT next_master_number('vehicles') AS n`
     );
     await assertUnique("vehicle", body.vehicleNumber);
+    await assertUnique("vehicleEngine", body.engineNumber ?? "");
+    await assertUnique("vehicleChassis", body.chassisNumber ?? "");
     const result = await query(
       `INSERT INTO vehicles (
          vehicle_no, vehicle_number, vehicle_type, no_of_boxes, bird_capacity,
@@ -432,6 +461,10 @@ export const mastersService = {
     return result.rows.map(mapFarm);
   },
 
+  getFarm(id: number) {
+    return getMasterById("farms", id, "Farm", mapFarm);
+  },
+
   async upsertFarm(body: Partial<Farm> & { farmName: string }) {
     assertValid(validateFarmFields(body));
 
@@ -439,7 +472,7 @@ export const mastersService = {
       await assertUnique("farm", body.farmName, body.id);
       const result = await query(
         `UPDATE farms SET
-          farm_no=$2, farm_name=$3, owner_name=$4, supervisor_name=$5,
+          farm_no=COALESCE($2,farm_no), farm_name=$3, owner_name=$4, supervisor_name=$5,
           phone_number=$6, village=$7, address=$8, capacity=$9, status=$10
          WHERE id=$1 RETURNING *`,
         [
@@ -455,11 +488,12 @@ export const mastersService = {
           body.status ?? "Active",
         ]
       );
+      if (!result.rowCount) throw new AppError(404, "Farm not found");
       return mapFarm(result.rows[0]);
     }
 
     const nextNo = await query<{ n: number }>(
-      `SELECT COALESCE(MAX(farm_no), 0) + 1 AS n FROM farms`
+      `SELECT next_master_number('farms') AS n`
     );
     await assertUnique("farm", body.farmName);
     const result = await query(
@@ -505,88 +539,76 @@ export const mastersService = {
     return result.rows.map(mapShop);
   },
 
+  getShop(id: number) {
+    return getMasterById("shops", id, "Shop", mapShop);
+  },
+
   async upsertShop(body: Partial<Shop> & { shopName: string }) {
-    // Shop master redesign renamed `village` -> `city` (migration 045). Accept
-    // the legacy `village` key as a fallback so older callers / imports keep
-    // working; `city` is the canonical column.
-    if ((body.city == null || String(body.city).trim() === "")) {
-      const legacyVillage = (body as { village?: unknown }).village;
-      if (legacyVillage != null && String(legacyVillage).trim() !== "") {
-        body = { ...body, city: String(legacyVillage) };
-      }
-    }
     assertValid(validateShopFields(body));
 
     if (body.id) {
-      // shop_number is immutable and NOT NULL — when the caller omits it (e.g.
-      // a partial edit), keep whatever is already persisted via COALESCE.
-      const shopNumberUpdate = str(body.shopNumber ?? "").trim() || null;
       await assertUnique("shop", body.shopName, body.id);
-      if (shopNumberUpdate) {
-        await assertUnique("shopNumber", shopNumberUpdate, body.id);
-      }
+      if (body.shopNumber) await assertUnique("shopNumber", body.shopNumber, body.id);
       const result = await query(
         `UPDATE shops SET
-          shop_no=$2, shop_number=COALESCE($3, shop_number), shop_name=$4, owner_name=$5, phone_number=$6,
-          secondary_phone_number=$7, email=$8, city=$9, address=$10, latitude=$11,
-          longitude=$12, paper_rate=$13, association_type=$14, status=$15,
-          opening_balance=$16,
-          current_balance = $16 + COALESCE(
+          shop_no=COALESCE($2,shop_no), shop_number=$3, shop_name=$4, owner_name=$5, phone_number=$6,
+          secondary_phone_number=$7, whatsapp_number=$8, email=$9,
+          city=$10, village=$10, address=$11, latitude=$12, longitude=$13,
+          paper_rate=$14, association_type=$15, status=$16, opening_balance=$17,
+          current_balance = $17 + COALESCE(
             (SELECT SUM(debit) - SUM(credit) FROM shop_ledger WHERE shop_id = $1), 0)
          WHERE id=$1 RETURNING *`,
         [
           body.id,
           body.shopNo,
-          shopNumberUpdate,
+          body.shopNumber ?? "",
           body.shopName,
           body.ownerName ?? "",
           body.phoneNumber ?? "",
-          body.secondaryPhoneNumber ?? null,
-          str(body.email ?? "").trim(),
-          body.city ?? "",
+          body.secondaryPhoneNumber ?? "",
+          body.whatsappNumber ?? "",
+          body.email ?? "",
+          body.city ?? body.village ?? "",
           body.address ?? null,
           body.latitude ?? null,
           body.longitude ?? null,
-          body.paperRate ?? 0,
+          body.paperRate ?? 1,
           body.associationType ?? "",
           body.status ?? "Active",
           body.openingBalance ?? 0,
         ]
       );
+      if (!result.rowCount) throw new AppError(404, "Shop not found");
       return mapShop(result.rows[0]);
     }
 
     const nextNo = await query<{ n: number }>(
-      `SELECT COALESCE(MAX(shop_no), 0) + 1 AS n FROM shops`
+      `SELECT next_master_number('shops') AS n`
     );
-    const shopNo = body.shopNo ?? nextNo.rows[0].n;
-    // shop_number is NOT NULL and auto-generated when the caller (e.g. the Shop
-    // form, which shows it as read-only) does not supply one.
-    const shopNumber =
-      str(body.shopNumber ?? "").trim() ||
-      `SHOP-${String(shopNo).padStart(6, "0")}`;
     await assertUnique("shop", body.shopName);
-    await assertUnique("shopNumber", shopNumber);
+    if (body.shopNumber) await assertUnique("shopNumber", body.shopNumber);
     const result = await query(
       `INSERT INTO shops (
          shop_no, shop_number, shop_name, owner_name, phone_number,
-         secondary_phone_number, email, city, address, latitude, longitude,
-         paper_rate, association_type, status,
+         secondary_phone_number, whatsapp_number, email, city, village, address,
+         latitude, longitude, paper_rate, association_type, status,
          opening_balance, current_balance
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,$12,$13,$14,$15,$16,$16)
+       RETURNING *`,
       [
-        shopNo,
-        shopNumber,
+        body.shopNo ?? nextNo.rows[0].n,
+        body.shopNumber ?? "",
         body.shopName,
         body.ownerName ?? "",
         body.phoneNumber ?? "",
-        body.secondaryPhoneNumber ?? null,
-        str(body.email ?? "").trim(),
-        body.city ?? "",
+        body.secondaryPhoneNumber ?? "",
+        body.whatsappNumber ?? "",
+        body.email ?? "",
+        body.city ?? body.village ?? "",
         body.address ?? null,
         body.latitude ?? null,
         body.longitude ?? null,
-        body.paperRate ?? 0,
+        body.paperRate ?? 1,
         body.associationType ?? "",
         body.status ?? "Active",
         body.openingBalance ?? 0,
@@ -620,104 +642,42 @@ export const mastersService = {
     }
 
     const errors: BulkRowError[] = [];
-    const seenShopNumbers = new Set<string>();
-    const seenShopNames = new Set<string>();
-    
     inputs.forEach((raw, index) => {
       const row = index + 1;
       validateShopFields(raw).forEach(({ field, message }) =>
         errors.push({ row, field, message })
       );
-      
-      // Check for duplicate shopNumber within the batch
-      const shopNumber = str(raw.shopNumber ?? "").trim();
-      if (shopNumber) {
-        const key = shopNumber.toLowerCase();
-        if (seenShopNumbers.has(key)) {
-          errors.push({ row, field: "shopNumber", message: `Duplicate Shop Number "${shopNumber}" within the uploaded batch.` });
-        } else {
-          seenShopNumbers.add(key);
-        }
-      }
-      
-      // Check for duplicate shopName within the batch
-      const shopName = str(raw.shopName).trim();
-      const nameKey = shopName.toLowerCase();
-      if (seenShopNames.has(nameKey)) {
-        errors.push({ row, field: "shopName", message: `Duplicate Shop Name "${shopName}" within the uploaded batch.` });
-      } else {
-        seenShopNames.add(nameKey);
-      }
     });
     if (errors.length) bulkValidationFailed(errors);
 
     return withTransaction(async (client) => {
       const created: Shop[] = [];
-      
-      // Check for conflicts with existing database records
-      const shopNumbersToCheck = Array.from(seenShopNumbers);
-      if (shopNumbersToCheck.length > 0) {
-        const existing = await client.query(
-          `SELECT shop_number FROM shops WHERE LOWER(shop_number) = ANY($1::text[])`,
-          [shopNumbersToCheck]
-        );
-        if (existing.rowCount) {
-          const existingNumbers = new Set(existing.rows.map(r => r.shop_number.toLowerCase()));
-          inputs.forEach((raw, index) => {
-            const row = index + 1;
-            const shopNumber = str(raw.shopNumber ?? "").trim();
-            if (shopNumber && existingNumbers.has(shopNumber.toLowerCase())) {
-              throw new AppError(409, `Shop Number "${shopNumber}" already exists.`);
-            }
-          });
-        }
-      }
-      
-      const shopNamesToCheck = Array.from(seenShopNames);
-      if (shopNamesToCheck.length > 0) {
-        const existing = await client.query(
-          `SELECT shop_name FROM shops WHERE LOWER(shop_name) = ANY($1::text[])`,
-          [shopNamesToCheck]
-        );
-        if (existing.rowCount) {
-          const existingNames = new Set(existing.rows.map(r => r.shop_name.toLowerCase()));
-          inputs.forEach((raw, index) => {
-            const row = index + 1;
-            const shopName = str(raw.shopName).trim();
-            if (existingNames.has(shopName.toLowerCase())) {
-              throw new AppError(409, `Shop "${shopName}" already exists.`);
-            }
-          });
-        }
-      }
-      
       for (const input of inputs) {
         const shopName = str(input.shopName).trim();
 
+        const dup = await client.query(
+          `SELECT 1 FROM shops WHERE LOWER(shop_name) = LOWER($1) LIMIT 1`,
+          [shopName]
+        );
+        if (dup.rowCount) {
+          throw new AppError(409, `Shop "${shopName}" already exists.`);
+        }
+
         const no = await client.query<{ n: number }>(
-          `SELECT COALESCE(MAX(shop_no), 0) + 1 AS n FROM shops`
+          `SELECT next_master_number('shops') AS n`
         );
         const result = await client.query(
           `INSERT INTO shops (
-             shop_no, shop_number, shop_name, owner_name, phone_number,
-             secondary_phone_number, email, city, address, latitude, longitude,
-             paper_rate, association_type, status,
-             opening_balance, current_balance
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15) RETURNING *`,
+             shop_no, shop_name, owner_name, phone_number, village, address,
+             status, opening_balance, current_balance
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING *`,
           [
             input.shopNo ?? no.rows[0].n,
-            input.shopNumber ?? `SHOP-${String(no.rows[0].n).padStart(6, "0")}`,
             shopName,
             str(input.ownerName).trim(),
             str(input.phoneNumber).trim(),
-            str(input.secondaryPhoneNumber ?? "").trim() || null,
-            str(input.email ?? "").trim(),
-            str(input.city ?? "").trim(),
+            str(input.village).trim(),
             input.address ? str(input.address).trim() : null,
-            input.latitude ?? null,
-            input.longitude ?? null,
-            num(input.paperRate ?? 0),
-            str(input.associationType ?? "").trim(),
             input.status ?? "Active",
             num(input.openingBalance ?? 0),
           ]
@@ -765,7 +725,7 @@ export const mastersService = {
         if (dup.rowCount) throw new AppError(409, `Farm "${farmName}" already exists.`);
 
         const no = await client.query<{ n: number }>(
-          `SELECT COALESCE(MAX(farm_no), 0) + 1 AS n FROM farms`
+          `SELECT next_master_number('farms') AS n`
         );
         const result = await client.query(
           `INSERT INTO farms (
@@ -827,7 +787,7 @@ export const mastersService = {
         if (dup.rowCount) throw new AppError(409, `Vehicle number "${vehicleNumber}" already exists.`);
 
         const no = await client.query<{ n: number }>(
-          `SELECT COALESCE(MAX(vehicle_no), 0) + 1 AS n FROM vehicles`
+          `SELECT next_master_number('vehicles') AS n`
         );
         const result = await client.query(
           `INSERT INTO vehicles (
@@ -935,7 +895,7 @@ export const mastersService = {
         }
 
         const no = await client.query<{ n: number }>(
-          `SELECT COALESCE(MAX(employee_no), 0) + 1 AS n FROM employees`
+          `SELECT next_master_number('employees') AS n`
         );
         const result = await client.query(
           `INSERT INTO employees (
@@ -1001,7 +961,7 @@ export const mastersService = {
         if (dup.rowCount) throw new AppError(409, `Bird type "${birdType}" already exists.`);
 
         const no = await client.query<{ n: number }>(
-          `SELECT COALESCE(MAX(bird_type_no), 0) + 1 AS n FROM bird_types`
+          `SELECT next_master_number('bird_types') AS n`
         );
         const result = await client.query(
           `INSERT INTO bird_types (
@@ -1026,14 +986,19 @@ export const mastersService = {
     return result.rows.map(mapBank);
   },
 
+  getBank(id: number) {
+    return getMasterById("banks", id, "Bank", mapBank);
+  },
+
   async upsertBank(body: Partial<Bank> & { bankName: string }) {
     requireFields(body, ["bankName", "branch", "accountNumber", "ifscCode"]);
 
     if (body.id) {
       await assertUnique("bank", body.bankName, body.id);
+      await assertUnique("bankAccount", body.accountNumber ?? "", body.id);
       const result = await query(
         `UPDATE banks SET
-          bank_no=$2, bank_name=$3, branch=$4, account_number=$5,
+          bank_no=COALESCE($2,bank_no), bank_name=$3, branch=$4, account_number=$5,
           ifsc_code=$6, upi_id=$7, status=$8
          WHERE id=$1 RETURNING *`,
         [
@@ -1047,13 +1012,15 @@ export const mastersService = {
           body.status ?? "Active",
         ]
       );
+      if (!result.rowCount) throw new AppError(404, "Bank not found");
       return mapBank(result.rows[0]);
     }
 
     const nextNo = await query<{ n: number }>(
-      `SELECT COALESCE(MAX(bank_no), 0) + 1 AS n FROM banks`
+      `SELECT next_master_number('banks') AS n`
     );
     await assertUnique("bank", body.bankName);
+    await assertUnique("bankAccount", body.accountNumber ?? "");
     const result = await query(
       `INSERT INTO banks (
          bank_no, bank_name, branch, account_number, ifsc_code, upi_id, status
@@ -1094,6 +1061,10 @@ export const mastersService = {
     return result.rows.map(mapBirdType);
   },
 
+  getBirdType(id: number) {
+    return getMasterById("bird_types", id, "Bird type", mapBirdType);
+  },
+
   async upsertBirdType(body: Partial<BirdType> & { birdType: string }) {
     assertValid(validateBirdTypeFields(body));
 
@@ -1101,7 +1072,7 @@ export const mastersService = {
       await assertUnique("birdType", body.birdType, body.id);
       const result = await query(
         `UPDATE bird_types SET
-          bird_type_no=$2, bird_type=$3, average_weight=$4, description=$5, status=$6
+          bird_type_no=COALESCE($2,bird_type_no), bird_type=$3, average_weight=$4, description=$5, status=$6
          WHERE id=$1 RETURNING *`,
         [
           body.id,
@@ -1112,11 +1083,12 @@ export const mastersService = {
           body.status ?? "Active",
         ]
       );
+      if (!result.rowCount) throw new AppError(404, "BirdType not found");
       return mapBirdType(result.rows[0]);
     }
 
     const nextNo = await query<{ n: number }>(
-      `SELECT COALESCE(MAX(bird_type_no), 0) + 1 AS n FROM bird_types`
+      `SELECT next_master_number('bird_types') AS n`
     );
     await assertUnique("birdType", body.birdType);
     const result = await query(

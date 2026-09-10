@@ -15,9 +15,9 @@
  *     counted as approved, leaveDates + leaveTypes
  */
 import assert from "node:assert/strict";
-import { after, before, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 import { getJson, patchJson, postJson, startApp, type TestApp } from "./helpers/app.js";
-import { applySchema, shutdownTestEnv, startTestDb, type TestDb } from "./helpers/testDb.js";
+import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
@@ -29,7 +29,9 @@ const { pool } = await import("../src/config/db.js");
 const { mastersService } = await import("../src/services/mastersService.js");
 
 after(async () => {
-  await shutdownTestEnv({ app, testDb, pool });
+  await app.close();
+  await testDb.close();
+  await pool.end();
 });
 
 interface EmpSeed {
@@ -55,6 +57,11 @@ let empB: EmpSeed;
 before(async () => {
   empA = await seedEmployee("Leave Test A", "Operations");
   empB = await seedEmployee("Leave Test B", "Supervisor");
+});
+
+beforeEach(async () => {
+  await pool.query("DELETE FROM duty_assignments");
+  await pool.query("DELETE FROM leave_requests");
 });
 
 async function createLeave(overrides: Record<string, unknown> = {}) {
@@ -92,10 +99,20 @@ describe("Leave — create & validation", () => {
     assert.equal(res.status, 400);
   });
 
-  it("honours an explicitly supplied days value", async () => {
+  it("ignores an explicitly supplied days value and derives calendar days", async () => {
     const res = await createLeave({ fromDate: "2026-08-20", toDate: "2026-08-22", days: 2.5 });
     assert.equal(res.status, 201);
-    assert.equal(res.body.days, 2.5);
+    assert.equal(res.body.days, 3);
+  });
+
+  it("rejects impossible calendar dates", async () => {
+    const res = await createLeave({ fromDate: "2026-09-31", toDate: "2026-10-01" });
+    assert.equal(res.status, 400);
+  });
+
+  it("rejects overlapping pending requests", async () => {
+    assert.equal((await createLeave()).status, 201);
+    assert.equal((await createLeave({ fromDate: "2026-08-21", toDate: "2026-08-23" })).status, 409);
   });
 });
 
@@ -104,7 +121,6 @@ describe("Leave — status transitions", () => {
     const created = await createLeave();
     const patch = await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, {
       status: "Approved",
-      approvedBy: "Admin",
     });
     assert.equal(patch.status, 200);
     assert.equal(patch.body.status, "Approved");
@@ -127,6 +143,22 @@ describe("Leave — status transitions", () => {
       status: "Approved",
     });
     assert.equal(res.status, 404);
+  });
+
+  it("allows exactly one concurrent approval", async () => {
+    const created = await createLeave();
+    const results = await Promise.all([
+      patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Approved" }),
+      patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Approved" }),
+    ]);
+    assert.deepEqual(results.map((result) => result.status).sort(), [200, 409]);
+  });
+
+  it("cancels approved leave and prevents a repeated cancellation", async () => {
+    const created = await createLeave();
+    assert.equal((await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Approved" })).status, 200);
+    assert.equal((await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Cancelled" })).status, 200);
+    assert.equal((await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Cancelled" })).status, 409);
   });
 });
 
@@ -184,7 +216,7 @@ describe("Leave — delete rules", () => {
 
   it("refuses to delete a Rejected leave", async () => {
     const created = await createLeave();
-    await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Rejected" });
+    await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Rejected", rejectionReason: "Not eligible" });
     const del = await fetch(`${baseUrl}/api/staff/leaves/${created.body.id}`, { method: "DELETE" });
     assert.equal(del.status, 409);
   });
@@ -199,16 +231,29 @@ describe("Leave — delete rules", () => {
 
 describe("Leave → Duty enforcement", () => {
   it("rejects a duty assignment on an approved-leave date", async () => {
-    const created = await createLeave({ fromDate: "2026-08-20", toDate: "2026-08-20" });
+    const created = await createLeave({ fromDate: "2027-08-20", toDate: "2027-08-20" });
     await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Approved" });
 
     const assign = await postJson(baseUrl, "/api/staff/duty-planner/assign", {
       employeeId: empA.id,
       dutyType: "Delivery",
-      date: "2026-08-20",
+      date: "2027-08-20",
     });
     assert.equal(assign.status, 422);
     assert.match(assign.body?.error ?? assign.body?.message ?? "", /approved leave/i);
+  });
+
+  it("rejects approval while a conflicting duty exists", async () => {
+    const assign = await postJson(baseUrl, "/api/staff/duty-planner/assign", {
+      employeeId: empA.id,
+      dutyType: "Delivery",
+      date: "2027-08-21",
+    });
+    assert.equal(assign.status, 201);
+    const created = await createLeave({ fromDate: "2027-08-21", toDate: "2027-08-21" });
+    const approval = await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Approved" });
+    assert.equal(approval.status, 409);
+    assert.match(approval.body?.error ?? "", /conflicting duty/i);
   });
 });
 
@@ -218,7 +263,7 @@ describe("Leave — report (authoritative calendar days)", () => {
     await patchJson(baseUrl, `/api/staff/leaves/${approved.body.id}/status`, { status: "Approved" });
     const pending = await createLeave({ fromDate: "2026-08-10", toDate: "2026-08-11" });
     const rejected = await createLeave({ type: "Emergency", fromDate: "2026-08-05", toDate: "2026-08-05" });
-    await patchJson(baseUrl, `/api/staff/leaves/${rejected.body.id}/status`, { status: "Rejected" });
+    await patchJson(baseUrl, `/api/staff/leaves/${rejected.body.id}/status`, { status: "Rejected", rejectionReason: "Not eligible" });
     void pending;
 
     const res = await getJson(baseUrl, `/api/staff/leaves/report?month=2026-08&employeeId=${empA.id}`);
@@ -247,10 +292,7 @@ describe("Leave — report (authoritative calendar days)", () => {
     const pending = await createLeave({ fromDate: "2026-08-01", toDate: "2026-08-04" });
     void pending;
     const res = await getJson(baseUrl, `/api/staff/leaves/report?month=2026-08&employeeId=${empA.id}`);
-    // EmpA approved so far: 08-01, 08-02 (from cross-month 07-31..08-02) and
-    // 08-20, 08-21, 08-22 (from the distinct-days test). Pending 08-01..04 must
-    // NOT add to approvedLeaveDays. => 5 distinct approved dates.
-    assert.equal(res.body.items[0].approvedLeaveDays, 5);
+    assert.equal(res.body.items[0].approvedLeaveDays, 0);
   });
 
   it("filters the report by department", async () => {

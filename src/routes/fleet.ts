@@ -22,6 +22,13 @@ import {
 
 export const fleetRouter = Router();
 
+function positiveId(value: string, label: string): number {
+  if (!/^\d+$/.test(value)) throw new AppError(400, `${label} must be a positive integer`);
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id < 1) throw new AppError(400, `${label} must be a positive integer`);
+  return id;
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -64,8 +71,6 @@ function bodyAndFiles(
 // Backs the Vehicle History meter timeline and the "Latest Meter: X KM" hint
 // shown on Fuel Entry / Maintenance Entry vehicle selection. Read-only —
 // derived from trips + fuel_expenses + fleet_maintenance, never written to.
-// NOTE: registered before the /:vehicleId routes so "meter-summary" is never
-// parsed as a vehicle id.
 fleetRouter.get(
   "/vehicles/meter-summary",
   asyncHandler(async (_req, res) => {
@@ -76,14 +81,14 @@ fleetRouter.get(
 fleetRouter.get(
   "/vehicles/:vehicleId/meter-history",
   asyncHandler(async (req, res) => {
-    res.json(await listVehicleMeterHistory(Number(req.params.vehicleId)));
+    res.json(await listVehicleMeterHistory(positiveId(req.params.vehicleId, "vehicleId")));
   })
 );
 
 fleetRouter.get(
   "/vehicles/:vehicleId/latest-meter",
   asyncHandler(async (req, res) => {
-    res.json(await getLatestVehicleMeter(null, Number(req.params.vehicleId)));
+    res.json(await getLatestVehicleMeter(null, positiveId(req.params.vehicleId, "vehicleId")));
   })
 );
 
@@ -94,8 +99,8 @@ fleetRouter.get(
     const { params: pagination, enabled } = parsePagination(req.query);
     res.json(
       await fleetMaintenanceService.list({
-        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
-        driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
+        vehicleId: typeof req.query.vehicleId === "string" ? positiveId(req.query.vehicleId, "vehicleId") : undefined,
+        driverId: typeof req.query.driverId === "string" ? positiveId(req.query.driverId, "driverId") : undefined,
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
@@ -111,7 +116,7 @@ fleetRouter.get(
 fleetRouter.get(
   "/maintenance/:id",
   asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.getById(Number(req.params.id)));
+    res.json(await fleetMaintenanceService.getById(positiveId(req.params.id, "id")));
   })
 );
 
@@ -131,21 +136,21 @@ fleetRouter.put(
   maintenanceUpload,
   asyncHandler(async (req, res) => {
     const { body, files } = bodyAndFiles(req);
-    res.json(await fleetMaintenanceService.update(Number(req.params.id), body, files));
+    res.json(await fleetMaintenanceService.update(positiveId(req.params.id, "id"), body, files));
   })
 );
 
 fleetRouter.post(
   "/maintenance/:id/approve",
   asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.approve(Number(req.params.id), req.body));
+    res.json(await fleetMaintenanceService.approve(positiveId(req.params.id, "id"), req.body));
   })
 );
 
 fleetRouter.post(
   "/maintenance/:id/reject",
   asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.reject(Number(req.params.id), req.body));
+    res.json(await fleetMaintenanceService.reject(positiveId(req.params.id, "id"), req.body));
   })
 );
 
@@ -154,7 +159,7 @@ fleetRouter.delete(
   asyncHandler(async (req, res) => {
     res.json(
       await fleetMaintenanceService.softDelete(
-        Number(req.params.id),
+        positiveId(req.params.id, "id"),
         typeof req.body?.reason === "string" ? req.body.reason : undefined
       )
     );
@@ -165,7 +170,7 @@ fleetRouter.delete(
 fleetRouter.get(
   "/maintenance/:id/documents",
   asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.listDocuments(Number(req.params.id)));
+    res.json(await fleetMaintenanceService.listDocuments(positiveId(req.params.id, "id")));
   })
 );
 
@@ -173,8 +178,8 @@ fleetRouter.get(
   "/maintenance/:id/documents/:documentId",
   asyncHandler(async (req, res) => {
     const doc = await fleetMaintenanceService.getDocumentBinary(
-      Number(req.params.id),
-      Number(req.params.documentId)
+      positiveId(req.params.id, "id"),
+      positiveId(req.params.documentId, "documentId")
     );
     res.setHeader("Content-Type", doc.mimeType);
     res.setHeader(
@@ -191,8 +196,8 @@ fleetRouter.delete(
   asyncHandler(async (req, res) => {
     res.json(
       await fleetMaintenanceService.deleteDocument(
-        Number(req.params.id),
-        Number(req.params.documentId)
+        positiveId(req.params.id, "id"),
+        positiveId(req.params.documentId, "documentId")
       )
     );
   })
@@ -252,7 +257,7 @@ fleetRouter.put(
     const { body, file } = permitBodyAndFile(req);
     res.json(
       await vehiclePermitService.upsert(
-        Number(req.params.vehicleId),
+        positiveId(req.params.vehicleId, "vehicleId"),
         req.params.docType,
         body,
         file
@@ -266,7 +271,7 @@ fleetRouter.delete(
   asyncHandler(async (req, res) => {
     res.json(
       await vehiclePermitService.remove(
-        Number(req.params.vehicleId),
+        positiveId(req.params.vehicleId, "vehicleId"),
         req.params.docType
       )
     );
@@ -277,7 +282,7 @@ fleetRouter.get(
   "/permits/:vehicleId/:docType/document",
   asyncHandler(async (req, res) => {
     const doc = await vehiclePermitService.getDocumentBinary(
-      Number(req.params.vehicleId),
+      positiveId(req.params.vehicleId, "vehicleId"),
       req.params.docType
     );
     res.setHeader("Content-Type", doc.mimeType);
@@ -300,7 +305,7 @@ fleetRouter.get(
   asyncHandler(async (req, res) => {
     res.json(
       await vehicleEmiService.list({
-        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        vehicleId: typeof req.query.vehicleId === "string" ? positiveId(req.query.vehicleId, "vehicleId") : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
       })
@@ -312,32 +317,21 @@ fleetRouter.get(
 fleetRouter.get(
   "/emis/vehicle/:vehicleId",
   asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.getByVehicleId(Number(req.params.vehicleId)));
-  })
-);
-
-// EMI Management overview — every ACTIVE vehicle from the Vehicle Master with
-// its EMI status (purchase amount/date, total EMI, completed/pending, next EMI
-// date) derived from the master + existing payment schedule. Read-only. Must be
-// registered before /emis/:id so "overview" is not parsed as an EMI id.
-fleetRouter.get(
-  "/emis/overview",
-  asyncHandler(async (_req, res) => {
-    res.json(await vehicleEmiService.overview());
+    res.json(await vehicleEmiService.getByVehicleId(positiveId(req.params.vehicleId, "vehicleId")));
   })
 );
 
 fleetRouter.get(
   "/emis/:id",
   asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.getById(Number(req.params.id)));
+    res.json(await vehicleEmiService.getById(positiveId(req.params.id, "id")));
   })
 );
 
 fleetRouter.get(
   "/emis/:id/schedule",
   asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.listSchedule(Number(req.params.id)));
+    res.json(await vehicleEmiService.listSchedule(positiveId(req.params.id, "id")));
   })
 );
 
@@ -351,21 +345,21 @@ fleetRouter.post(
 fleetRouter.put(
   "/emis/:id",
   asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.update(Number(req.params.id), req.body));
+    res.json(await vehicleEmiService.update(positiveId(req.params.id, "id"), req.body));
   })
 );
 
 fleetRouter.delete(
   "/emis/:id",
   asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.remove(Number(req.params.id)));
+    res.json(await vehicleEmiService.remove(positiveId(req.params.id, "id")));
   })
 );
 
 fleetRouter.post(
   "/emis/:id/pay",
   asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.pay(Number(req.params.id), req.body));
+    res.json(await vehicleEmiService.pay(positiveId(req.params.id, "id"), req.body));
   })
 );
 

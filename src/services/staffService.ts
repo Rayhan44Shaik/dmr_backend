@@ -1,4 +1,3 @@
-import pg from "pg";
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
@@ -13,14 +12,7 @@ import { dateOnly, isoOrNull, num, numOrNull, str } from "../utils/coerce.js";
 import { salaryCalculationService } from "./salaryCalculationService.js";
 import { dutyPlannerService } from "./dutyPlannerService.js";
 import { paymentsService } from "./paymentsService.js";
-import {
-  parseBody,
-  salaryBulkStatusSchema,
-  salaryCreateSchema,
-  salaryPaySchema,
-  salarySubmitSchema,
-  salaryUpdateSchema,
-} from "../validation/salary.js";
+import { parseBody, salaryCreateSchema, salaryPaySchema, salarySubmitSchema, salaryUpdateSchema } from "../validation/salary.js";
 
 function mapDuty(row: Record<string, unknown>): DutyAssignment {
   return {
@@ -134,22 +126,14 @@ const SALARY_CORRECTION_DAYS = 7;
  *  Paid with an expired correction window. A closed month rejects all
  *  mutations, so an older finalized payroll month can never be edited
  *  accidentally (or bypassed) regardless of frontend state. */
-async function salaryMonthIsClosed(month: string, client?: pg.PoolClient): Promise<boolean> {
-  const res = client
-    ? await client.query(
-        `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE status <> 'Paid') AS not_paid,
-                COUNT(*) FILTER (WHERE paid_at IS NULL OR paid_at + INTERVAL '7 days' <= NOW()) AS expired
-         FROM salary_records WHERE month = $1`,
-        [month]
-      )
-    : await query(
-        `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE status <> 'Paid') AS not_paid,
-                COUNT(*) FILTER (WHERE paid_at IS NULL OR paid_at + INTERVAL '7 days' <= NOW()) AS expired
-         FROM salary_records WHERE month = $1`,
-        [month]
-      );
+async function salaryMonthIsClosed(month: string): Promise<boolean> {
+  const res = await query(
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status <> 'Paid') AS not_paid,
+            COUNT(*) FILTER (WHERE paid_at IS NULL OR paid_at + INTERVAL '7 days' <= NOW()) AS expired
+     FROM salary_records WHERE month = $1`,
+    [month]
+  );
   const row = res.rows[0];
   const total = num(row.total);
   if (!total) return false;
@@ -397,32 +381,35 @@ export const staffService = {
     days?: number;
     reason?: string | null;
   }) {
-    const emp = await query(
-      `SELECT id, employee_no, employee_name, department FROM employees WHERE id = $1`,
-      [body.employeeId]
-    );
-    if (!emp.rows.length) {
-      throw new AppError(422, `Employee ${body.employeeId} does not exist.`);
-    }
-    const employee = emp.rows[0];
-    const days = body.days ?? this.inclusiveDays(body.fromDate, body.toDate);
-
-    const result = await query(
-      `INSERT INTO leave_requests (
-         employee_id, employee_name, leave_type, from_date, to_date, days, status, reason
-       ) VALUES ($1,$2,$3,$4,$5,$6,'Pending',$7)
-       RETURNING id`,
-      [
-        body.employeeId,
-        str(employee.employee_name),
-        body.type,
-        body.fromDate,
-        body.toDate,
-        days,
-        body.reason ?? null,
-      ]
-    );
-    return this.getLeaveById(str(result.rows[0].id));
+    const id = await withTransaction(async (client) => {
+      // Lock the employee so concurrent overlapping requests serialize.
+      const emp = await client.query(
+        `SELECT id, employee_no, employee_name, department, status FROM employees WHERE id = $1 FOR UPDATE`,
+        [body.employeeId]
+      );
+      if (!emp.rows.length) throw new AppError(422, `Employee ${body.employeeId} does not exist.`);
+      const employee = emp.rows[0];
+      if (employee.status !== "Active") throw new AppError(422, "Inactive or suspended employees cannot request leave.");
+      const overlap = await client.query(
+        `SELECT id FROM leave_requests
+         WHERE employee_id = $1 AND status IN ('Pending','Approved')
+           AND from_date <= $3 AND to_date >= $2
+         LIMIT 1`,
+        [body.employeeId, body.fromDate, body.toDate]
+      );
+      if (overlap.rowCount) throw new AppError(409, "An overlapping pending or approved leave request already exists.");
+      // Calendar days are always derived server-side; a client total is never trusted.
+      const days = this.inclusiveDays(body.fromDate, body.toDate);
+      const result = await client.query(
+        `INSERT INTO leave_requests (
+           employee_id, employee_name, leave_type, from_date, to_date, days, status, reason
+         ) VALUES ($1,$2,$3,$4,$5,$6,'Pending',$7)
+         RETURNING id`,
+        [body.employeeId, str(employee.employee_name), body.type, body.fromDate, body.toDate, days, body.reason ?? null]
+      );
+      return str(result.rows[0].id);
+    });
+    return this.getLeaveById(id);
   },
 
   async getLeaveById(id: string) {
@@ -442,16 +429,34 @@ export const staffService = {
     status: LeaveRequest["status"],
     opts: { approvedBy?: string; rejectionReason?: string } = {}
   ) {
-    const result = await query(
-      `UPDATE leave_requests SET
-         status = $2,
-         approved_by = CASE WHEN $2 = 'Approved' THEN $3 ELSE approved_by END,
-         approved_at = CASE WHEN $2 = 'Approved' THEN NOW() ELSE approved_at END,
-         rejection_reason = CASE WHEN $2 = 'Rejected' THEN $4 ELSE rejection_reason END
-       WHERE id = $1 RETURNING id`,
-      [id, status, opts.approvedBy ?? null, opts.rejectionReason ?? null]
-    );
-    if (!result.rowCount) throw new AppError(404, "Leave request not found");
+    await withTransaction(async (client) => {
+      const current = await client.query("SELECT * FROM leave_requests WHERE id = $1 FOR UPDATE", [id]);
+      if (!current.rowCount) throw new AppError(404, "Leave request not found");
+      const row = current.rows[0];
+      const from = str(dateOnly(row.from_date));
+      const to = str(dateOnly(row.to_date));
+      if (status === "Cancelled") {
+        if (!['Pending', 'Approved'].includes(str(row.status))) throw new AppError(409, `A ${str(row.status).toLowerCase()} leave cannot be cancelled.`);
+      } else if (row.status !== "Pending") {
+        throw new AppError(409, `Only pending leave can be ${status.toLowerCase()}.`);
+      }
+      if (status === "Approved") {
+        const duty = await client.query(
+          "SELECT id FROM duty_assignments WHERE employee_id = $1 AND duty_date BETWEEN $2 AND $3 LIMIT 1",
+          [row.employee_id, from, to]
+        );
+        if (duty.rowCount) throw new AppError(409, "Remove conflicting duty assignments before approving this leave.");
+      }
+      const result = await client.query(
+        `UPDATE leave_requests SET status = $2::leave_status,
+           approved_by = CASE WHEN $2::leave_status = 'Approved' THEN $3 ELSE approved_by END,
+           approved_at = CASE WHEN $2::leave_status = 'Approved' THEN NOW() ELSE approved_at END,
+           rejection_reason = CASE WHEN $2::leave_status = 'Rejected' THEN $4 ELSE rejection_reason END
+         WHERE id = $1 AND status = $5 RETURNING id`,
+        [id, status, opts.approvedBy ?? null, opts.rejectionReason ?? null, row.status]
+      );
+      if (!result.rowCount) throw new AppError(409, "Leave status changed concurrently. Refresh and try again.");
+    });
     return this.getLeaveById(id);
   },
 
@@ -463,15 +468,7 @@ export const staffService = {
     if (!found.rows.length) throw new AppError(404, "Leave request not found");
 
     const status = str(found.rows[0].status);
-    if (status === "Approved") {
-      throw new AppError(
-        409,
-        "Approved leave cannot be deleted — it is already reflected in duty, attendance and salary."
-      );
-    }
-    if (status === "Rejected") {
-      throw new AppError(409, "Rejected leave cannot be deleted.");
-    }
+    if (status !== "Pending") throw new AppError(409, `${status} leave cannot be deleted.`);
 
     const del = await query(`DELETE FROM leave_requests WHERE id = $1 RETURNING id`, [id]);
     if (!del.rowCount) throw new AppError(404, "Leave request not found");
@@ -820,81 +817,67 @@ const data = parseBody(salaryCreateSchema, body);
    *  increment included — leaving the salary Pending. */
   async paySalary(id: string, body: unknown): Promise<SalaryRecord> {
     const data = parseBody(salaryPaySchema, body);
-    return withTransaction((client) =>
-      this.paySalaryInTx(client, id, {
-        paymentDate:
-          typeof data.paymentDate === "string" ? data.paymentDate : new Date().toISOString().slice(0, 10),
-        paymentMode: typeof data.paymentMode === "string" ? data.paymentMode : "Cash",
-        paidBy: typeof data.paidBy === "string" ? data.paidBy : undefined,
-      })
-    );
-  },
 
-  /** Transactional core of paySalary(), reused verbatim by the bulk endpoint so
-   *  both paths share the exact same lifecycle rules and Accounts payment. */
-  async paySalaryInTx(
-    client: pg.PoolClient,
-    id: string,
-    data: { paymentDate: string; paymentMode: string; paidBy?: string }
-  ): Promise<SalaryRecord> {
-    try {
-      // Row lock serializes concurrent pay requests — the second one blocks
-      // here until the first commits and then sees status = Paid → 409.
-      const locked = await client.query(
-        "SELECT * FROM salary_records WHERE id = $1 FOR UPDATE",
-        [id]
-      );
-      if (!locked.rowCount) throw new AppError(404, "Salary record not found");
-      const row = locked.rows[0];
+    return withTransaction(async (client) => {
+      try {
+        // Row lock serializes concurrent pay requests — the second one blocks
+        // here until the first commits and then sees status = Paid → 409.
+        const locked = await client.query(
+          "SELECT * FROM salary_records WHERE id = $1 FOR UPDATE",
+          [id]
+        );
+        if (!locked.rowCount) throw new AppError(404, "Salary record not found");
+        const row = locked.rows[0];
 
-      if (await salaryMonthIsClosed(str(row.month), client)) {
-        throw new AppError(409, "This payroll month is closed and cannot be modified");
-      }
-      if (row.status !== "Pending" && row.status !== "Submitted") {
-        throw new AppError(409, "Salary is not Pending or Submitted — it cannot be paid again");
-      }
-      if (row.payment_ref != null) {
-        throw new AppError(409, "Duplicate payment — this salary already has a payment reference");
-      }
-      if (num(row.net_salary) <= 0) {
-        throw new AppError(422, "Cannot pay a salary with zero or negative net amount");
-      }
+        if (await salaryMonthIsClosed(str(row.month))) {
+          throw new AppError(409, "This payroll month is closed and cannot be modified");
+        }
+        if (row.status !== "Pending" && row.status !== "Submitted") {
+          throw new AppError(409, "Salary is not Pending or Submitted — it cannot be paid again");
+        }
+        if (row.payment_ref != null) {
+          throw new AppError(409, "Duplicate payment — this salary already has a payment reference");
+        }
+        if (num(row.net_salary) <= 0) {
+          throw new AppError(422, "Cannot pay a salary with zero or negative net amount");
+        }
 
-      // Create the Accounts Payment on the SAME transaction/connection so the
-      // payment + its number-counter increment commit atomically with the
-      // salary transition (or roll back together).
-      const payment = await paymentsService.create(
-        {
-          paymentDate: data.paymentDate,
-          paymentType: "Salary Payment",
-          paidTo: str(row.employee_name),
-          amount: num(row.net_salary),
-          paymentMode: data.paymentMode,
-          category: "Salary",
-          status: "Paid",
-          createdBy: data.paidBy ?? "system",
-        },
-        client
-      );
+        // Create the Accounts Payment on the SAME transaction/connection so the
+        // payment + its number-counter increment commit atomically with the
+        // salary transition (or roll back together).
+        const payment = await paymentsService.create(
+          {
+            paymentDate: data.paymentDate,
+            paymentType: "Salary Payment",
+            paidTo: str(row.employee_name),
+            amount: num(row.net_salary),
+            paymentMode: data.paymentMode,
+            category: "Salary",
+            status: "Paid",
+            createdBy: data.paidBy ?? "system",
+          },
+          client
+        );
 
-      const updated = await client.query(
-        `UPDATE salary_records SET
-           status = 'Paid', payment_ref = $2, payment_date = $3, paid_at = NOW()
-         WHERE id = $1 AND status IN ('Pending','Submitted') AND payment_ref IS NULL
-         RETURNING *`,
-        [id, payment.paymentNo, data.paymentDate]
-      );
-      if (!updated.rowCount) {
-        // Concurrency safety net — the row changed under us despite the lock.
-        throw new AppError(409, "Salary payment could not be applied");
+        const updated = await client.query(
+          `UPDATE salary_records SET
+             status = 'Paid', payment_ref = $2, payment_date = $3, paid_at = NOW()
+           WHERE id = $1 AND status IN ('Pending','Submitted') AND payment_ref IS NULL
+           RETURNING *`,
+          [id, payment.paymentNo, data.paymentDate]
+        );
+        if (!updated.rowCount) {
+          // Concurrency safety net — the row changed under us despite the lock.
+          throw new AppError(409, "Salary payment could not be applied");
+        }
+        const records = await this.enrichAttendance([mapSalary(updated.rows[0])], [str(row.month)]);
+        return records[0];
+      } catch (err) {
+        // Roll back everything (payment + salary remain untouched).
+        rethrowIfAppError(err);
+        throw err;
       }
-      const records = await this.enrichAttendance([mapSalary(updated.rows[0])], [str(row.month)]);
-      return records[0];
-    } catch (err) {
-      // Roll back everything (payment + salary remain untouched).
-      rethrowIfAppError(err);
-      throw err;
-    }
+    });
   },
 
   /** PATCH /salaries/:id/status. Only target "Pending" is accepted by the route,
@@ -909,17 +892,11 @@ const data = parseBody(salaryCreateSchema, body);
    *  Pending → Paid remains reserved for paySalary(). A closed payroll month
    *  rejects every transition. */
   async updateSalaryStatus(id: string): Promise<SalaryRecord> {
-    return withTransaction((client) => this.updateSalaryStatusInTx(client, id));
-  },
-
-  /** Transactional core of updateSalaryStatus(), reused verbatim by the bulk
-   *  endpoint so Mark-Unpaid / un-submit obey the exact same rules. */
-  async updateSalaryStatusInTx(client: pg.PoolClient, id: string): Promise<SalaryRecord> {
-    const existing = await client.query("SELECT * FROM salary_records WHERE id = $1 FOR UPDATE", [id]);
+    const existing = await query("SELECT * FROM salary_records WHERE id = $1", [id]);
     if (!existing.rowCount) throw new AppError(404, "Salary record not found");
     const row = existing.rows[0];
     const month = str(row.month);
-    if (await salaryMonthIsClosed(month, client)) {
+    if (await salaryMonthIsClosed(month)) {
       throw new AppError(409, "This payroll month is closed and cannot be modified");
     }
 
@@ -929,7 +906,7 @@ const data = parseBody(salaryCreateSchema, body);
     }
 
     if (row.status === "Submitted") {
-      const updated = await client.query(
+      const updated = await query(
         `UPDATE salary_records SET status = 'Pending', submitted_at = NULL, submitted_by = NULL
          WHERE id = $1 AND status = 'Submitted'
          RETURNING *`,
@@ -950,7 +927,7 @@ const data = parseBody(salaryCreateSchema, body);
           "Correction window expired — paid salaries are permanently locked 7 calendar days after payment"
         );
       }
-      const updated = await client.query(
+      const updated = await query(
         `UPDATE salary_records SET
            status = 'Pending', payment_ref = NULL, payment_date = NULL, paid_at = NULL
          WHERE id = $1 AND status = 'Paid' AND paid_at = $2::timestamptz
@@ -965,108 +942,6 @@ const data = parseBody(salaryCreateSchema, body);
     }
 
     throw new AppError(409, "Salary record is not in a supported lifecycle state and cannot be modified");
-  },
-
-  /** Bulk lifecycle transition (POST /salaries/bulk-status). Applies the SAME
-   *  transition to many records inside ONE transaction, using the identical
-   *  per-record business rules as the single-record endpoints:
-   *    - "Paid"    → paySalaryInTx() per record (Pending/Submitted only,
-   *                  per-employee Accounts payment, no closed months).
-   *    - "Pending" → updateSalaryStatusInTx() per record (un-submit or
-   *                  Mark-Unpaid inside the 7-day correction window).
-   *  Every record is pre-validated before ANY write; the first violation
-   *  aborts the whole batch atomically. */
-  async bulkUpdateSalaryStatus(
-    ids: string[],
-    body: unknown
-  ): Promise<{ updated: SalaryRecord[]; skipped: { id: string; reason: string }[] }> {
-    const data = parseBody(salaryBulkStatusSchema, body);
-    if (ids.length === 0) {
-      throw new AppError(400, "At least one salary record id is required");
-    }
-
-    return withTransaction(async (client) => {
-      // Lock every requested row up-front so the batch is serialized against
-      // concurrent single-record payments and the checks below are stable.
-      const locked = await client.query(
-        "SELECT * FROM salary_records WHERE id::text = ANY($1) ORDER BY employee_name FOR UPDATE",
-        [ids]
-      );
-      const byId = new Map<string, Record<string, unknown>>();
-      for (const row of locked.rows) byId.set(str(row.id), row);
-
-      const missing = ids.filter((id) => !byId.has(id));
-      if (missing.length > 0) {
-        throw new AppError(404, `Salary records not found: ${missing.join(", ")}`);
-      }
-
-      const target = data.status;
-
-      // ---- Pre-validate every record (read-only pass, no writes yet). ----
-      const failures: { id: string; reason: string }[] = [];
-      for (const id of ids) {
-        const row = byId.get(id)!;
-        const month = str(row.month);
-        if (await salaryMonthIsClosed(month, client)) {
-          failures.push({ id, reason: `payroll month ${month} is closed` });
-          continue;
-        }
-        if (target === "Paid") {
-          if (row.status !== "Pending" && row.status !== "Submitted") {
-            failures.push({ id, reason: "salary is already paid and cannot be paid again" });
-            continue;
-          }
-          if (row.payment_ref != null) {
-            failures.push({ id, reason: "salary already has a payment reference" });
-            continue;
-          }
-          if (num(row.net_salary) <= 0) {
-            failures.push({ id, reason: "net amount is zero or negative and cannot be paid" });
-            continue;
-          }
-        } else {
-          // target "Pending"
-          if (row.status === "Paid") {
-            if (correctionWindowExpired(row.paid_at == null ? null : String(row.paid_at))) {
-              failures.push({
-                id,
-                reason: "correction window expired — paid salaries are permanently locked 7 calendar days after payment",
-              });
-            }
-          }
-        }
-      }
-      if (failures.length > 0) {
-        const first = failures[0];
-        const names = locked.rows
-          .filter((r) => failures.some((f) => f.id === str(r.id)))
-          .map((r) => str(r.employee_name));
-        throw new AppError(
-          409,
-          `Cannot update ${names.length} of the selected salaries (${names.slice(0, 3).join(", ")}${names.length > 3 ? "…" : ""}): ${first.reason}`
-        );
-      }
-
-      // ---- Apply the shared per-record rules in the same transaction. ----
-      const updated: SalaryRecord[] = [];
-      for (const id of ids) {
-        if (target === "Paid") {
-          updated.push(
-            await this.paySalaryInTx(client, id, {
-              paymentDate:
-                typeof data.paymentDate === "string"
-                  ? data.paymentDate
-                  : new Date().toISOString().slice(0, 10),
-              paymentMode: typeof data.paymentMode === "string" ? data.paymentMode : "Cash",
-              paidBy: typeof data.paidBy === "string" ? data.paidBy : undefined,
-            })
-          );
-        } else {
-          updated.push(await this.updateSalaryStatusInTx(client, id));
-        }
-      }
-      return { updated, skipped: [] };
-    });
   },
 
   async deleteSalary(id: string): Promise<{ id: string; deleted: boolean }> {
@@ -1096,12 +971,16 @@ const data = parseBody(salaryCreateSchema, body);
    *  monthly deduction are considered. Recovery is capped at remaining_balance
    *  (never negative, never exceeding the balance). */
   async activeAdvanceRecovery(month: string): Promise<Map<number, { advanceRecovery: number; loanEMI: number }>> {
-    const monthEnd = `${month}-31`;
+    // Use the first day of the month and an exclusive upper bound for the
+    // following month. Constructing `${month}-31` is invalid for February and
+    // the months with 30 days (for example, 2026-09-31).
+    const monthStart = `${month}-01`;
     const result = await query(
       `SELECT employee_id, loan_type, monthly_deduction, remaining_balance
        FROM advance_loans
-       WHERE status = 'Active' AND monthly_deduction > 0 AND issued_date <= $1::date`,
-      [monthEnd]
+       WHERE status = 'Active' AND monthly_deduction > 0
+         AND issued_date < ($1::date + INTERVAL '1 month')`,
+      [monthStart]
     );
     const byEmp = new Map<number, { advanceRecovery: number; loanEMI: number }>();
     for (const row of result.rows) {
@@ -1129,8 +1008,8 @@ const data = parseBody(salaryCreateSchema, body);
     generated: number;
     skippedExisting: number;
   }> {
-    if (!/^\d{4}-\d{2}$/.test(month)) {
-      throw new AppError(400, "month must be in YYYY-MM format");
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      throw new AppError(400, "month must be a valid YYYY-MM value");
     }
     if (await salaryMonthIsClosed(month)) {
       throw new AppError(409, "This payroll month is closed — salary regeneration is not allowed");

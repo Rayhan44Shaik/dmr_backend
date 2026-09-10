@@ -60,63 +60,6 @@ export interface VehicleEMI {
   updatedAt: string | null;
 }
 
-/**
- * A read-only EMI row for the EMI Management page.
- *
- * Unlike VehicleEMI (which represents an EMI record that exists in
- * vehicle_emis), EmiOverview is derived FROM the Vehicle Master for EVERY
- * Active vehicle. Vehicle facts (vehicle number, purchase amount, purchase
- * date, total EMI, EMI day) come straight from `vehicles`; the completed /
- * payment state comes from the existing EMI payment schedule (vehicle_emis +
- * vehicle_emi_installments) when one exists. The page never creates, edits or
- * saves a separate vehicle — this DTO only reads the authoritative master and
- * joins the payment history onto it.
- *
- * Status is intentionally restricted to the two meaningful EMI states:
- *   'pending'   -> completedEMIs < totalEMIs
- *   'completed' -> completedEMIs >= totalEMIs (nothing left to pay)
- * Vehicle Active/Inactive is a separate Vehicle Master concern; this page only
- * ever sees Active vehicles.
- */
-export type EmiOverviewStatus = "pending" | "completed";
-
-export interface EmiOverview {
-  /** vehicles.id — always present (every Active vehicle is listed). */
-  vehicleId: number;
-  /** Registration number resolved from the Vehicle Master. */
-  vehicleNo: string;
-  /** Finance company from the EMI record if one exists, otherwise ''. */
-  financeCompany: string;
-  /** Purchase amount from the Vehicle Master. */
-  purchaseAmount: number;
-  /** Purchase date from the Vehicle Master (fallback: EMI start date). */
-  purchaseDate: string | null;
-  /** EMI due day of the month from the Vehicle Master. */
-  emiDay: number | null;
-  /** Total EMI months from the Vehicle Master (fallback: EMI record tenure). */
-  totalEMIs: number;
-  /** Number of installments actually paid (from the payment schedule). */
-  completedEMIs: number;
-  /** totalEMIs - completedEMIs, never negative. */
-  pendingEMIs: number;
-  /**
-   * Next unpaid EMI date. When a payment schedule exists this is the earliest
-   * pending installment (MIN due_date WHERE status='pending'); otherwise it is
-   * the next occurrence of the vehicle's EMI day. Null when completed.
-   */
-  emiDate: string | null;
-  /** 'pending' | 'completed' only. */
-  status: EmiOverviewStatus;
-  /** Monthly EMI installment amount (from the EMI record, else derived). */
-  monthlyEmi: number;
-  /** vehicle_emis.id when a payment schedule exists, else null. */
-  emiRecordId: number | null;
-  /** EMI schedule start date (from the EMI record, else vehicle master). */
-  startDate: string | null;
-  /** EMI schedule end date (from the EMI record when present). */
-  endDate: string | null;
-}
-
 /** One persisted installment of a vehicle EMI schedule. */
 export interface VehicleEMIInstallment {
   id: number;

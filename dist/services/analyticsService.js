@@ -4,31 +4,23 @@ import { num, str } from "../utils/coerce.js";
 /**
  * Fleet Analytics — a READ-ONLY aggregation layer over the existing
  * authoritative Fleet sources (trips, fuel_expenses, fleet_maintenance,
- * vehicle_emis, vehicles). Nothing is written; every figure is computed inside
- * PostgreSQL. The browser must render exactly what this endpoint returns.
- *
- * Cost-centre separation guarantees every rupee appears exactly once:
- * fuel <> other, trip tolls <> other, maintenance counted once, EMI counted
- * once, no duplicate trip-generated fuel.
+ * vehicles). Nothing is written; every figure is computed inside PostgreSQL.
  *
  * Business rules (kept identical to the verified Analytics page):
- *  - Distance/Trips→ completed, non-deleted trips (trip_date business date).
- *  - Fuel       → non-deleted fuel_expenses (bill date). Eligibility follows
- *                 the AUTHORITATIVE Fuel list endpoint exactly:
- *                 `(source_type <> 'TRIP' OR ops_status = 'Approved')`.
- *                 Trip-origin fuel is approved automatically on trip completion,
- *                 so this is the same posted/eligible gate the Fuel page shows.
+ *  - Distance   → completed, non-deleted trips (trip_date business date).
+ *  - Fuel       → non-deleted fuel_expenses (bill date); trip-generated fuel
+ *                 is only visible once its trip is Completed (same gate as
+ *                 the fuel expenses list endpoint).
  *  - Maintenance→ fleet_maintenance with status = 'Approved', not deleted.
  *  - Toll       → trip pickup + delivery + destination tolls (the authoritative
  *                 FASTag ledger is browser-local, so it is NOT double-counted
  *                 here and no fake expense source is invented).
  *  - Other      → the non-diesel, non-toll trip cash items (driver bata, meals,
  *                 meals/tiffin, loading, on-road maintenance, others1–5, RC).
- *  - EMI        → non-paid EMI records (status <> 'paid'; the data model only
- *                 has active/paid/overdue, so this selects active + overdue)
- *                 whose next_emi_date falls inside the report window (or is
- *                 NULL). Sum of emi_amount. This is the exact rule the legacy
- *                 page applied (`status !== 'paid' && nextEmiDate in range`).
+ *
+ * Cost-centre separation guarantees every rupee appears exactly once:
+ * fuel <> other, trip tolls <> other, maintenance counted once, no duplicate
+ * trip-generated fuel.
  */
 const completedTripsCte = `completed_trips AS (
   SELECT
@@ -47,10 +39,6 @@ const completedTripsCte = `completed_trips AS (
     AND t.trip_date BETWEEN $1::date AND $2::date
     AND ($3::int IS NULL OR t.vehicle_id = $3::int)
 )`;
-/**
- * Fuel eligibility mirrors fuelExpensesService.buildFuelWhere() exactly, so
- * Analytics can never disagree with the Fuel page about what is posted/eligible.
- */
 const filteredFuelCte = `filtered_fuel AS (
   SELECT
     fe.vehicle_id,
@@ -58,8 +46,9 @@ const filteredFuelCte = `filtered_fuel AS (
     COALESCE(fe.litres, 0) AS litres,
     COALESCE(fe.amount, 0) AS amount
   FROM fuel_expenses fe
+  LEFT JOIN trips t ON t.id = fe.trip_id
   WHERE COALESCE(fe.deleted, FALSE) = FALSE
-    AND (fe.source_type <> 'TRIP' OR fe.ops_status = 'Approved'::ops_record_status)
+    AND (fe.source_type <> 'TRIP' OR (t.status = 'Completed' AND COALESCE(t.deleted, FALSE) = FALSE))
     AND fe.expense_date BETWEEN $1::date AND $2::date
     AND ($3::int IS NULL OR fe.vehicle_id = $3::int)
 )`;
@@ -73,35 +62,18 @@ const filteredMaintCte = `filtered_maint AS (
     AND fm.maintenance_date BETWEEN $1::date AND $2::date
     AND ($3::int IS NULL OR fm.vehicle_id = $3::int)
 )`;
-const emiCte = `emi AS (
-  SELECT
-    ve.vehicle_id,
-    COALESCE(ve.emi_amount, 0) AS emi_amount
-  FROM vehicle_emis ve
-  WHERE ve.status <> 'paid'
-    AND (ve.next_emi_date IS NULL OR ve.next_emi_date BETWEEN $1::date AND $2::date)
-    AND ($3::int IS NULL OR ve.vehicle_id = $3::int)
-)`;
 /** Compose a WITH clause from the shared filter CTEs plus an optional lead CTE. */
 function ctes(lead) {
-    const parts = [
-        lead,
-        completedTripsCte,
-        filteredFuelCte,
-        filteredMaintCte,
-        emiCte,
-    ].filter((s) => s.trim() !== "");
+    const parts = [lead, completedTripsCte, filteredFuelCte, filteredMaintCte].filter((s) => s.trim() !== "");
     return `WITH ${parts.join(",\n")}`;
 }
 const KPI_SQL = `
 ${ctes("")}
 SELECT
-  COALESCE((SELECT COUNT(*) FROM completed_trips t), 0) AS total_trips,
   COALESCE((SELECT SUM(t.total_km) FROM completed_trips t), 0) AS total_distance,
   COALESCE((SELECT SUM(f.litres) FROM filtered_fuel f), 0) AS fuel_litres,
   COALESCE((SELECT SUM(f.amount) FROM filtered_fuel f), 0) AS fuel_cost,
   COALESCE((SELECT SUM(m.total_cost) FROM filtered_maint m), 0) AS maint_cost,
-  COALESCE((SELECT SUM(e.emi_amount) FROM emi e), 0) AS emi_cost,
   COALESCE((SELECT SUM(t.toll_expense) FROM completed_trips t), 0) AS toll_cost,
   COALESCE((SELECT SUM(t.other_expense) FROM completed_trips t), 0) AS other_cost`;
 /**
@@ -128,52 +100,59 @@ SELECT
              WHERE f.expense_date >= ws.week_start AND f.expense_date < ws.week_start + 7), 0) AS litres
 FROM week_series ws
 ORDER BY ws.week_start`;
-/**
- * One per-vehicle aggregation pass over the shared CTEs. Top performers and
- * highest-expense are derived from this in JS with deterministic tie-breaks, so
- * the same numbers feed KPIs, the tables and the vehicle-level statistics.
- */
-const VEHICLE_STATS_SQL = `
+const TOP_PERFORMERS_SQL = `
 ${ctes("")}
 SELECT
   v.id AS vehicle_id,
   v.vehicle_number AS vehicle_number,
-  COALESCE(d.trips, 0) AS trips,
-  COALESCE(d.total_km, 0) AS distance,
-  COALESCE(f.litres, 0) AS fuel_litres,
-  COALESCE(f.fuel_cost, 0) AS fuel_cost,
-  COALESCE(m.maint_cost, 0) AS maint_cost,
-  COALESCE(e.emi_cost, 0) AS emi_cost,
-  COALESCE(t.toll_cost, 0) AS toll_cost,
-  COALESCE(t.other_cost, 0) AS other_cost
+  COALESCE(td.total_km, 0) AS distance,
+  COALESCE(fl.litres, 0) AS fuel_litres,
+  CASE WHEN COALESCE(td.total_km, 0) > 0 AND COALESCE(fl.litres, 0) > 0
+       THEN COALESCE(td.total_km, 0) / COALESCE(fl.litres, 0)
+       ELSE 0 END AS mileage
 FROM vehicles v
 LEFT JOIN (
-  SELECT vehicle_id, COUNT(*) AS trips, SUM(total_km) AS total_km
+  SELECT vehicle_id, SUM(total_km) AS total_km
   FROM completed_trips
   GROUP BY vehicle_id
-) d ON d.vehicle_id = v.id
+) td ON td.vehicle_id = v.id
 LEFT JOIN (
-  SELECT vehicle_id, SUM(litres) AS litres, SUM(amount) AS fuel_cost
+  SELECT vehicle_id, SUM(litres) AS litres
   FROM filtered_fuel
   GROUP BY vehicle_id
-) f ON f.vehicle_id = v.id
+) fl ON fl.vehicle_id = v.id
+WHERE ($3::int IS NULL OR v.id = $3::int)
+ORDER BY mileage DESC, v.vehicle_number ASC`;
+const HIGHEST_EXPENSE_SQL = `
+${ctes("")}
+SELECT
+  v.id AS vehicle_id,
+  v.vehicle_number AS vehicle_number,
+  COALESCE(fc.fuel_cost, 0) AS fuel_cost,
+  COALESCE(mc.maint_cost, 0) AS maint_cost,
+  COALESCE(tc.toll_cost, 0) AS toll_cost,
+  COALESCE(tc.other_cost, 0) AS other_cost
+FROM vehicles v
+LEFT JOIN (
+  SELECT vehicle_id, SUM(amount) AS fuel_cost
+  FROM filtered_fuel
+  GROUP BY vehicle_id
+) fc ON fc.vehicle_id = v.id
 LEFT JOIN (
   SELECT vehicle_id, SUM(total_cost) AS maint_cost
   FROM filtered_maint
   GROUP BY vehicle_id
-) m ON m.vehicle_id = v.id
-LEFT JOIN (
-  SELECT vehicle_id, SUM(emi_amount) AS emi_cost
-  FROM emi
-  GROUP BY vehicle_id
-) e ON e.vehicle_id = v.id
+) mc ON mc.vehicle_id = v.id
 LEFT JOIN (
   SELECT vehicle_id, SUM(toll_expense) AS toll_cost, SUM(other_expense) AS other_cost
   FROM completed_trips
   GROUP BY vehicle_id
-) t ON t.vehicle_id = v.id
+) tc ON tc.vehicle_id = v.id
 WHERE ($3::int IS NULL OR v.id = $3::int)
-ORDER BY v.vehicle_number ASC`;
+ORDER BY
+  (COALESCE(fc.fuel_cost, 0) + COALESCE(mc.maint_cost, 0)
+   + COALESCE(tc.toll_cost, 0) + COALESCE(tc.other_cost, 0)) DESC,
+  v.vehicle_number ASC`;
 function round2(n) {
     return Math.round((n + Number.EPSILON) * 100) / 100;
 }
@@ -204,71 +183,45 @@ export const analyticsService = {
         // ---- KPIs ----------------------------------------------------------
         const kpiResult = await query(KPI_SQL, params);
         const kpiRow = kpiResult.rows[0] ?? {};
-        const totalTrips = num(kpiRow.total_trips);
         const fuelCost = num(kpiRow.fuel_cost);
         const maintenanceCost = num(kpiRow.maint_cost);
-        const emiDue = num(kpiRow.emi_cost);
         const tollCost = num(kpiRow.toll_cost);
         const otherCost = num(kpiRow.other_cost);
         const totalDistance = num(kpiRow.total_distance);
         const totalFuelLitres = num(kpiRow.fuel_litres);
-        const totalExpense = fuelCost + maintenanceCost + emiDue + tollCost + otherCost;
+        const totalExpense = fuelCost + maintenanceCost + tollCost + otherCost;
         const averageMileage = totalDistance > 0 && totalFuelLitres > 0 ? round2(totalDistance / totalFuelLitres) : 0;
         const costPerKm = totalDistance > 0 ? round2(totalExpense / totalDistance) : 0;
         const kpis = {
-            totalTrips,
             totalDistance,
             averageMileage,
             totalFuelLitres,
-            fuelCost,
-            maintenanceCost,
-            emiDue,
-            tollCost,
-            otherCost,
             totalExpense,
             costPerKm,
+            fuelCost,
+            maintenanceCost,
+            tollCost,
+            otherCost,
         };
         // ---- Weekly fuel + mileage ------------------------------------------
         const weeklyParams = [...params, weekCount(fromDate, toDate)];
         const weeklyResult = await query(WEEKLY_SQL, weeklyParams);
-        const weekly = weeklyResult.rows.map((row) => {
+        const weeklyFuelConsumption = [];
+        const weeklyMileage = [];
+        for (const row of weeklyResult.rows) {
             const weekLabel = str(row.week);
             const distance = num(row.distance);
             const litres = num(row.litres);
-            return {
+            weeklyFuelConsumption.push({ week: weekLabel, weekLabel, litres });
+            weeklyMileage.push({
                 week: weekLabel,
                 weekLabel,
-                fuel: litres,
                 distance,
+                litres,
                 mileage: distance > 0 && litres > 0 ? round2(distance / litres) : 0,
-            };
-        });
-        // ---- Vehicle stats (single authoritative pass) ----------------------
-        const statsResult = await query(VEHICLE_STATS_SQL, params);
-        const vehicleStats = statsResult.rows.map((row) => {
-            const distance = num(row.distance);
-            const fuelLitres = num(row.fuel_litres);
-            const fuelCostV = num(row.fuel_cost);
-            const maintenanceCostV = num(row.maint_cost);
-            const emiCostV = num(row.emi_cost);
-            const tollCostV = num(row.toll_cost);
-            const otherCostV = num(row.other_cost);
-            return {
-                vehicleId: num(row.vehicle_id),
-                vehicleNumber: str(row.vehicle_number),
-                trips: num(row.trips),
-                distance,
-                fuelLitres,
-                fuelCost: fuelCostV,
-                maintenanceCost: maintenanceCostV,
-                emiCost: emiCostV,
-                tollCost: tollCostV,
-                otherCost: otherCostV,
-                totalExpense: fuelCostV + maintenanceCostV + emiCostV + tollCostV + otherCostV,
-                mileage: distance > 0 && fuelLitres > 0 ? round2(distance / fuelLitres) : 0,
-            };
-        });
-        // ---- Cost centres (expense breakdown; sum == kpis.totalExpense) ------
+            });
+        }
+        // ---- Cost centres ----------------------------------------------------
         const costCenters = [
             { name: "Fuel", amount: fuelCost, percentage: percent(fuelCost, totalExpense), value: fuelCost },
             {
@@ -277,52 +230,65 @@ export const analyticsService = {
                 percentage: percent(maintenanceCost, totalExpense),
                 value: maintenanceCost,
             },
-            { name: "EMI", amount: emiDue, percentage: percent(emiDue, totalExpense), value: emiDue },
             { name: "Toll", amount: tollCost, percentage: percent(tollCost, totalExpense), value: tollCost },
             { name: "Other", amount: otherCost, percentage: percent(otherCost, totalExpense), value: otherCost },
         ];
-        // ---- Top performers: deterministic (mileage DESC, vehicle_number ASC) --
-        const topPerformers = [...vehicleStats]
-            .sort((a, b) => b.mileage - a.mileage || a.vehicleNumber.localeCompare(b.vehicleNumber))
+        // ---- Top performers ---------------------------------------------------
+        const topResult = await query(TOP_PERFORMERS_SQL, params);
+        const topPerformers = topResult.rows.slice(0, 5).map((row) => {
+            const vehicleIdN = num(row.vehicle_id);
+            const vehicleNumber = str(row.vehicle_number);
+            const distance = num(row.distance);
+            const fuelLitres = num(row.fuel_litres);
+            const mileage = round2(num(row.mileage));
+            return {
+                vehicleId: vehicleIdN,
+                id: vehicleIdN,
+                vehicleNo: vehicleNumber,
+                vehicleNumber,
+                mileage,
+                distance,
+                dist: distance,
+                fuelLitres,
+                fuel: fuelLitres,
+            };
+        });
+        // ---- Highest expense ---------------------------------------------------
+        const expResult = await query(HIGHEST_EXPENSE_SQL, params);
+        const highestExpense = expResult.rows
             .slice(0, 5)
-            .map((row) => ({
-            vehicleId: row.vehicleId,
-            id: row.vehicleId,
-            vehicleNumber: row.vehicleNumber,
-            mileage: row.mileage,
-            distance: row.distance,
-            dist: row.distance,
-            fuelLitres: row.fuelLitres,
-            fuel: row.fuelLitres,
-            trips: row.trips,
-        }));
-        // ---- Highest expense: deterministic (totalExpense DESC, vehicle_number ASC) --
-        const highestExpense = [...vehicleStats]
-            .sort((a, b) => b.totalExpense - a.totalExpense ||
-            a.vehicleNumber.localeCompare(b.vehicleNumber))
-            .slice(0, 5)
-            .map((row) => ({
-            vehicleId: row.vehicleId,
-            id: row.vehicleId,
-            vehicleNumber: row.vehicleNumber,
-            totalExpense: row.totalExpense,
-            maintenanceCost: row.maintenanceCost,
-            maintenance: row.maintenanceCost,
-            fuelCost: row.fuelCost,
-            fuel: row.fuelCost,
-            emiCost: row.emiCost,
-            tollCost: row.tollCost,
-            otherCost: row.otherCost,
-        }));
+            .map((row) => {
+            const vehicleIdN = num(row.vehicle_id);
+            const vehicleNumber = str(row.vehicle_number);
+            const fuelCostV = num(row.fuel_cost);
+            const maintenanceCostV = num(row.maint_cost);
+            const tollCostV = num(row.toll_cost);
+            const otherCostV = num(row.other_cost);
+            const totalCost = fuelCostV + maintenanceCostV + tollCostV + otherCostV;
+            return {
+                vehicleId: vehicleIdN,
+                id: vehicleIdN,
+                vehicleNo: vehicleNumber,
+                vehicleNumber,
+                totalCost,
+                totalExpense: totalCost,
+                maintenanceCost: maintenanceCostV,
+                maintenance: maintenanceCostV,
+                fuelCost: fuelCostV,
+                fuel: fuelCostV,
+                tollCost: tollCostV,
+                otherCost: otherCostV,
+            };
+        });
         return {
             fromDate,
             toDate,
             vehicleId,
             safe: true,
             kpis,
-            weekly,
+            weeklyFuelConsumption,
+            weeklyMileage,
             costCenters,
-            vehicleStats,
             topPerformers,
             highestExpense,
         };

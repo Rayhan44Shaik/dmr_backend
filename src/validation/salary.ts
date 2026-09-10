@@ -186,45 +186,6 @@ export const salaryGenerateSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// Bulk status body (POST /salaries/bulk-status).
-//
-// One transaction applies the SAME lifecycle transition to many records:
-//   - status "Paid"    → Pending/Submitted → Paid. A per-employee Accounts
-//                        payment is created inside the same transaction using
-//                        the shared paymentDate/paymentMode (business rule
-//                        identical to the single-record POST /:id/pay).
-//   - status "Pending" → Mark-Unpaid / un-submit. Paid → Pending is only
-//                        allowed inside the 7-day correction window; the rule
-//                        is identical to the single-record PATCH /:id/status.
-// All records are pre-validated before anything is written; any violation
-// aborts the whole transaction.
-// ---------------------------------------------------------------------------
-export interface SalaryBulkStatusBody {
-  ids: string[];
-  status: "Paid" | "Pending";
-  paymentDate?: string;
-  paymentMode?: PaymentMode;
-  paidBy?: string;
-}
-
-export const salaryBulkStatusSchema = z.object({
-  ids: z
-    .array(z.string().min(1), {
-      invalid_type_error: "ids must be an array of salary record ids",
-    })
-    .min(1, "At least one salary record id is required")
-    .max(500, "A bulk operation can apply to at most 500 records"),
-  status: z.enum(["Paid", "Pending"], {
-    errorMap: () => ({
-      message: 'status must be either "Paid" or "Pending"',
-    }),
-  }),
-  paymentDate: dateString.optional(),
-  paymentMode: z.enum(PAYMENT_MODES).optional(),
-  paidBy: z.preprocess(trimmed, z.string().optional()),
-});
-
-// ---------------------------------------------------------------------------
 // List query (GET /salaries).
 // ---------------------------------------------------------------------------
 export interface SalaryListQuery {

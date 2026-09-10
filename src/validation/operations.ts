@@ -123,6 +123,10 @@ export const rateEntryUpdateSchema = z.object({
   deliveries: z.array(rateEntryDeliverySchema).optional(),
 });
 
+export const rateEntryLockSchema = z.object({
+  lockedBy: z.string().optional(),
+});
+
 /**
  * Rate Entry payload.
  *
@@ -137,32 +141,9 @@ export const rateEntryItemSchema = z.object({
     .max(MAX_SHOP_SALE_RATE, `Rate must be between ₹${MIN_SHOP_SALE_RATE} and ₹${MAX_SHOP_SALE_RATE}`),
 });
 
-function uniqueDeliveryIds(
-  rows: Array<{ deliveryId: number }> | undefined,
-  ctx: z.RefinementCtx
-) {
-  if (!rows) return;
-  const seen = new Set<number>();
-  for (const row of rows) {
-    if (seen.has(row.deliveryId)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Duplicate rate entry for delivery ${row.deliveryId}`,
-      });
-    }
-    seen.add(row.deliveryId);
-  }
-}
-
 export const rateEntrySaveSchema = z.object({
-  /** Partial list — only deliveries included are updated. Empty is allowed. */
-  rates: z.array(rateEntryItemSchema).default([]).superRefine(uniqueDeliveryIds),
-});
-
-export const rateEntryLockSchema = z.object({
-  lockedBy: z.string().optional(),
-  /** Optional rates applied in the same lock transaction (atomic save+lock). */
-  rates: z.array(rateEntryItemSchema).optional().superRefine(uniqueDeliveryIds),
+  /** Partial list — only deliveries included are updated. */
+  rates: z.array(rateEntryItemSchema).min(1),
 });
 
 export const collectionBodySchema = z.object({
@@ -192,19 +173,15 @@ export const fuelExpenseBodySchema = z.object({
   supervisorName: z.string().nullable().optional(),
   tripId: z.number().int().nullable().optional(),
   currentMeter: z.number().nonnegative().optional(),
-  fuelRate: z.number().optional(),
-  liters: z.number().optional(),
-  amount: z.number().optional(),
+  fuelRate: z.number().nonnegative().optional(),
+  liters: z.number().nonnegative().optional(),
+  amount: z.number().nonnegative().optional(),
   pumpName: z.string().optional(),
   bunkAddress: z.string().nullable().optional(),
   remarks: z.string().nullable().optional(),
   imageData: z.string().nullable().optional(),
   imageName: z.string().nullable().optional(),
   imageMime: z.string().nullable().optional(),
-  gpsLat: z.number().nullable().optional(),
-  gpsLon: z.number().nullable().optional(),
-  gpsAccuracy: z.number().nullable().optional(),
-  gpsCapturedAt: z.string().nullable().optional(),
   createdBy: z.string().optional(),
 });
 

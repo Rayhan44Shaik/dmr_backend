@@ -11,6 +11,14 @@ import { coerceMultipartBody, MAINTENANCE_DOCUMENT_MAX_BYTES, MAINTENANCE_DOCUME
 import { parsePagination } from "../utils/pagination.js";
 import { getLatestVehicleMeter, listLatestVehicleMeters, listVehicleMeterHistory, } from "../utils/vehicleMeterLedger.js";
 export const fleetRouter = Router();
+function positiveId(value, label) {
+    if (!/^\d+$/.test(value))
+        throw new AppError(400, `${label} must be a positive integer`);
+    const id = Number(value);
+    if (!Number.isSafeInteger(id) || id < 1)
+        throw new AppError(400, `${label} must be a positive integer`);
+    return id;
+}
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
@@ -46,23 +54,21 @@ function bodyAndFiles(req) {
 // Backs the Vehicle History meter timeline and the "Latest Meter: X KM" hint
 // shown on Fuel Entry / Maintenance Entry vehicle selection. Read-only —
 // derived from trips + fuel_expenses + fleet_maintenance, never written to.
-// NOTE: registered before the /:vehicleId routes so "meter-summary" is never
-// parsed as a vehicle id.
 fleetRouter.get("/vehicles/meter-summary", asyncHandler(async (_req, res) => {
     res.json(await listLatestVehicleMeters());
 }));
 fleetRouter.get("/vehicles/:vehicleId/meter-history", asyncHandler(async (req, res) => {
-    res.json(await listVehicleMeterHistory(Number(req.params.vehicleId)));
+    res.json(await listVehicleMeterHistory(positiveId(req.params.vehicleId, "vehicleId")));
 }));
 fleetRouter.get("/vehicles/:vehicleId/latest-meter", asyncHandler(async (req, res) => {
-    res.json(await getLatestVehicleMeter(null, Number(req.params.vehicleId)));
+    res.json(await getLatestVehicleMeter(null, positiveId(req.params.vehicleId, "vehicleId")));
 }));
 // ── Fleet → Entry / History (Vehicle Maintenance) ────────────────
 fleetRouter.get("/maintenance", asyncHandler(async (req, res) => {
     const { params: pagination, enabled } = parsePagination(req.query);
     res.json(await fleetMaintenanceService.list({
-        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
-        driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
+        vehicleId: typeof req.query.vehicleId === "string" ? positiveId(req.query.vehicleId, "vehicleId") : undefined,
+        driverId: typeof req.query.driverId === "string" ? positiveId(req.query.driverId, "driverId") : undefined,
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
@@ -73,7 +79,7 @@ fleetRouter.get("/maintenance", asyncHandler(async (req, res) => {
     }));
 }));
 fleetRouter.get("/maintenance/:id", asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.getById(Number(req.params.id)));
+    res.json(await fleetMaintenanceService.getById(positiveId(req.params.id, "id")));
 }));
 // Create — supports multipart/form-data (documents) AND plain JSON.
 fleetRouter.post("/maintenance", maintenanceUpload, asyncHandler(async (req, res) => {
@@ -83,30 +89,30 @@ fleetRouter.post("/maintenance", maintenanceUpload, asyncHandler(async (req, res
 // Update — supports multipart/form-data (new documents + removeDocumentIds) and JSON.
 fleetRouter.put("/maintenance/:id", maintenanceUpload, asyncHandler(async (req, res) => {
     const { body, files } = bodyAndFiles(req);
-    res.json(await fleetMaintenanceService.update(Number(req.params.id), body, files));
+    res.json(await fleetMaintenanceService.update(positiveId(req.params.id, "id"), body, files));
 }));
 fleetRouter.post("/maintenance/:id/approve", asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.approve(Number(req.params.id), req.body));
+    res.json(await fleetMaintenanceService.approve(positiveId(req.params.id, "id"), req.body));
 }));
 fleetRouter.post("/maintenance/:id/reject", asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.reject(Number(req.params.id), req.body));
+    res.json(await fleetMaintenanceService.reject(positiveId(req.params.id, "id"), req.body));
 }));
 fleetRouter.delete("/maintenance/:id", asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.softDelete(Number(req.params.id), typeof req.body?.reason === "string" ? req.body.reason : undefined));
+    res.json(await fleetMaintenanceService.softDelete(positiveId(req.params.id, "id"), typeof req.body?.reason === "string" ? req.body.reason : undefined));
 }));
 // ── Maintenance bill / spare-part documents ──────────────────────
 fleetRouter.get("/maintenance/:id/documents", asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.listDocuments(Number(req.params.id)));
+    res.json(await fleetMaintenanceService.listDocuments(positiveId(req.params.id, "id")));
 }));
 fleetRouter.get("/maintenance/:id/documents/:documentId", asyncHandler(async (req, res) => {
-    const doc = await fleetMaintenanceService.getDocumentBinary(Number(req.params.id), Number(req.params.documentId));
+    const doc = await fleetMaintenanceService.getDocumentBinary(positiveId(req.params.id, "id"), positiveId(req.params.documentId, "documentId"));
     res.setHeader("Content-Type", doc.mimeType);
     res.setHeader("Content-Disposition", `inline; filename="${doc.fileName.replace(/"/g, "")}"; filename*=UTF-8''${encodeURIComponent(doc.fileName)}`);
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.send(doc.buffer);
 }));
 fleetRouter.delete("/maintenance/:id/documents/:documentId", asyncHandler(async (req, res) => {
-    res.json(await fleetMaintenanceService.deleteDocument(Number(req.params.id), Number(req.params.documentId)));
+    res.json(await fleetMaintenanceService.deleteDocument(positiveId(req.params.id, "id"), positiveId(req.params.documentId, "documentId")));
 }));
 // ── Fleet → Permits (Vehicle permit / document expiry) ─────────────
 /** Optional single scan per permit record; JSON bodies are left untouched. */
@@ -145,13 +151,13 @@ fleetRouter.get("/permits/summary", asyncHandler(async (_req, res) => {
 // and plain JSON are both supported.
 fleetRouter.put("/permits/:vehicleId/:docType", permitUpload, asyncHandler(async (req, res) => {
     const { body, file } = permitBodyAndFile(req);
-    res.json(await vehiclePermitService.upsert(Number(req.params.vehicleId), req.params.docType, body, file));
+    res.json(await vehiclePermitService.upsert(positiveId(req.params.vehicleId, "vehicleId"), req.params.docType, body, file));
 }));
 fleetRouter.delete("/permits/:vehicleId/:docType", asyncHandler(async (req, res) => {
-    res.json(await vehiclePermitService.remove(Number(req.params.vehicleId), req.params.docType));
+    res.json(await vehiclePermitService.remove(positiveId(req.params.vehicleId, "vehicleId"), req.params.docType));
 }));
 fleetRouter.get("/permits/:vehicleId/:docType/document", asyncHandler(async (req, res) => {
-    const doc = await vehiclePermitService.getDocumentBinary(Number(req.params.vehicleId), req.params.docType);
+    const doc = await vehiclePermitService.getDocumentBinary(positiveId(req.params.vehicleId, "vehicleId"), req.params.docType);
     res.setHeader("Content-Type", doc.mimeType);
     res.setHeader("Content-Disposition", `inline; filename="${doc.fileName.replace(/"/g, "")}"; filename*=UTF-8''${encodeURIComponent(doc.fileName)}`);
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -164,39 +170,32 @@ fleetRouter.get("/permits/:vehicleId/:docType/document", asyncHandler(async (req
 // next/status. Payment advances the schedule transactionally.
 fleetRouter.get("/emis", asyncHandler(async (req, res) => {
     res.json(await vehicleEmiService.list({
-        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        vehicleId: typeof req.query.vehicleId === "string" ? positiveId(req.query.vehicleId, "vehicleId") : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
     }));
 }));
 // NOTE: must be registered before /emis/:id so "vehicle" is not parsed as an id.
 fleetRouter.get("/emis/vehicle/:vehicleId", asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.getByVehicleId(Number(req.params.vehicleId)));
-}));
-// EMI Management overview — every ACTIVE vehicle from the Vehicle Master with
-// its EMI status (purchase amount/date, total EMI, completed/pending, next EMI
-// date) derived from the master + existing payment schedule. Read-only. Must be
-// registered before /emis/:id so "overview" is not parsed as an EMI id.
-fleetRouter.get("/emis/overview", asyncHandler(async (_req, res) => {
-    res.json(await vehicleEmiService.overview());
+    res.json(await vehicleEmiService.getByVehicleId(positiveId(req.params.vehicleId, "vehicleId")));
 }));
 fleetRouter.get("/emis/:id", asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.getById(Number(req.params.id)));
+    res.json(await vehicleEmiService.getById(positiveId(req.params.id, "id")));
 }));
 fleetRouter.get("/emis/:id/schedule", asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.listSchedule(Number(req.params.id)));
+    res.json(await vehicleEmiService.listSchedule(positiveId(req.params.id, "id")));
 }));
 fleetRouter.post("/emis", asyncHandler(async (req, res) => {
     res.status(201).json(await vehicleEmiService.create(req.body));
 }));
 fleetRouter.put("/emis/:id", asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.update(Number(req.params.id), req.body));
+    res.json(await vehicleEmiService.update(positiveId(req.params.id, "id"), req.body));
 }));
 fleetRouter.delete("/emis/:id", asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.remove(Number(req.params.id)));
+    res.json(await vehicleEmiService.remove(positiveId(req.params.id, "id")));
 }));
 fleetRouter.post("/emis/:id/pay", asyncHandler(async (req, res) => {
-    res.json(await vehicleEmiService.pay(Number(req.params.id), req.body));
+    res.json(await vehicleEmiService.pay(positiveId(req.params.id, "id"), req.body));
 }));
 // ── Fleet → Vehicle Analytics ─────────────────────────────────────
 // Read-only aggregation over the authoritative Fleet sources

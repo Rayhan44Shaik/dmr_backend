@@ -111,6 +111,8 @@ export function coerceMultipartBody(raw) {
         out.remarks = first(raw.remarks) ?? null;
     if ("createdBy" in raw)
         out.createdBy = first(raw.createdBy);
+    if ("idempotencyKey" in raw)
+        out.idempotencyKey = first(raw.idempotencyKey);
     if ("removeDocumentIds" in raw) {
         out.removeDocumentIds = tryJson(first(raw.removeDocumentIds), undefined);
     }

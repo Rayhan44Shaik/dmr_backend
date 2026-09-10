@@ -94,22 +94,6 @@ export const salaryGenerateSchema = z.object({
     month: monthString,
     department: z.preprocess(trimmed, z.string().optional()),
 });
-export const salaryBulkStatusSchema = z.object({
-    ids: z
-        .array(z.string().min(1), {
-        invalid_type_error: "ids must be an array of salary record ids",
-    })
-        .min(1, "At least one salary record id is required")
-        .max(500, "A bulk operation can apply to at most 500 records"),
-    status: z.enum(["Paid", "Pending"], {
-        errorMap: () => ({
-            message: 'status must be either "Paid" or "Pending"',
-        }),
-    }),
-    paymentDate: dateString.optional(),
-    paymentMode: z.enum(PAYMENT_MODES).optional(),
-    paidBy: z.preprocess(trimmed, z.string().optional()),
-});
 export const salaryListQuerySchema = z.object({
     month: monthString.optional(),
     department: z.preprocess(trimmed, z.string().optional()),

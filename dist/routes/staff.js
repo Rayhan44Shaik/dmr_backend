@@ -1,12 +1,12 @@
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { staffService } from "../services/staffService.js";
-import { staffPerformanceService } from "../services/staffPerformanceService.js";
 import { dutyPlannerService } from "../services/dutyPlannerService.js";
 import { parseBody, salaryGenerateSchema, salaryListQuerySchema, salaryStatusPatchSchema, salarySubmitSchema, } from "../validation/salary.js";
-import { driverPerformanceQuerySchema, supervisorPerformanceQuerySchema, } from "../validation/performance.js";
 import { leaveCreateSchema, leaveListQuerySchema, leaveReportQuerySchema, leaveStatusSchema, } from "../validation/leave.js";
+import { staffBoundary } from "../middleware/staffBoundary.js";
 export const staffRouter = Router();
+staffRouter.use(staffBoundary);
 // Duty Planner
 staffRouter.get("/duties", asyncHandler(async (req, res) => {
     res.json(await staffService.listDuties(typeof req.query.fromDate === "string" ? req.query.fromDate : undefined, typeof req.query.toDate === "string" ? req.query.toDate : undefined, typeof req.query.department === "string" ? req.query.department : undefined));
@@ -36,7 +36,7 @@ staffRouter.post("/leaves", asyncHandler(async (req, res) => {
 staffRouter.patch("/leaves/:id/status", asyncHandler(async (req, res) => {
     const body = parseBody(leaveStatusSchema, req.body);
     res.json(await staffService.updateLeaveStatus(req.params.id, body.status, {
-        approvedBy: body.approvedBy,
+        approvedBy: undefined,
         rejectionReason: body.rejectionReason,
     }));
 }));
@@ -53,15 +53,6 @@ staffRouter.get("/salaries", asyncHandler(async (req, res) => {
 staffRouter.post("/salaries/generate", asyncHandler(async (req, res) => {
     const body = parseBody(salaryGenerateSchema, req.body);
     res.json(await staffService.generateForMonth(body.month, body.department));
-}));
-// Bulk lifecycle transition (Mark Paid / Mark Unpaid on many records at once).
-// One transaction; every record is pre-validated with the same per-record
-// business rules as the single-record endpoints; any violation aborts the
-// whole batch atomically.
-staffRouter.post("/salaries/bulk-status", asyncHandler(async (req, res) => {
-    const body = req.body;
-    const ids = Array.isArray(body?.ids) ? body.ids.filter((x) => typeof x === "string") : [];
-    res.json(await staffService.bulkUpdateSalaryStatus(ids, req.body));
 }));
 staffRouter.post("/salaries", asyncHandler(async (req, res) => {
     res.status(201).json(await staffService.createSalary(req.body));
@@ -118,19 +109,6 @@ staffRouter.get("/attendance", asyncHandler(async (req, res) => {
 staffRouter.post("/attendance", asyncHandler(async (req, res) => {
     res.status(201).json(await staffService.upsertAttendance(req.body));
 }));
-// ============ DRIVER / SUPERVISOR PERFORMANCE (read-only) ============
-// GET /api/staff/performance/drivers?fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD
-//   &search=&driverId=&vehicleId=
-staffRouter.get("/performance/drivers", asyncHandler(async (req, res) => {
-    const query = parseBody(driverPerformanceQuerySchema, req.query);
-    res.json(await staffPerformanceService.getDriverPerformance(query));
-}));
-// GET /api/staff/performance/supervisors?fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD
-//   &search=&supervisorId=&vehicleId=
-staffRouter.get("/performance/supervisors", asyncHandler(async (req, res) => {
-    const query = parseBody(supervisorPerformanceQuerySchema, req.query);
-    res.json(await staffPerformanceService.getSupervisorPerformance(query));
-}));
 // ============ DUTY PLANNER (PostgreSQL-backed) ============
 // GET /api/staff/duty-planner?weekStart=YYYY-MM-DD
 staffRouter.get("/duty-planner", asyncHandler(async (req, res) => {
@@ -150,28 +128,28 @@ staffRouter.post("/duty-planner/auto-assign/preview", asyncHandler(async (req, r
 staffRouter.post("/duty-planner/auto-assign/apply", asyncHandler(async (req, res) => {
     const weekStart = typeof req.body?.weekStart === "string" ? req.body.weekStart : new Date().toISOString().slice(0, 10);
     const plan = req.body?.plan ?? undefined;
-    const changedBy = typeof req.body?.changedBy === "string" ? req.body.changedBy : "user";
+    const changedBy = undefined;
     res.json(await dutyPlannerService.autoAssignApply(weekStart, plan, changedBy));
 }));
 // POST /api/staff/duty-planner/assign  (manual; server-validated)
 staffRouter.post("/duty-planner/assign", asyncHandler(async (req, res) => {
-    const changedBy = typeof req.body?.changedBy === "string" ? req.body.changedBy : "user";
+    const changedBy = undefined;
     res.status(201).json(await dutyPlannerService.upsertDuty(req.body ?? {}, changedBy));
 }));
 // PUT /api/staff/duty-planner/:id  (manual edit; server-validated)
 staffRouter.put("/duty-planner/:id", asyncHandler(async (req, res) => {
-    const changedBy = typeof req.body?.changedBy === "string" ? req.body.changedBy : "user";
+    const changedBy = undefined;
     res.json(await dutyPlannerService.upsertDuty({ ...(req.body ?? {}), id: req.params.id }, changedBy));
 }));
 // DELETE /api/staff/duty-planner/:id
 staffRouter.delete("/duty-planner/:id", asyncHandler(async (req, res) => {
-    const changedBy = typeof req.body?.changedBy === "string" ? req.body.changedBy : "user";
+    const changedBy = undefined;
     res.json(await dutyPlannerService.deleteDuty(req.params.id, changedBy));
 }));
 // POST /api/staff/duty-planner/submit  { weekStart, submittedBy }
 staffRouter.post("/duty-planner/submit", asyncHandler(async (req, res) => {
     const weekStart = typeof req.body?.weekStart === "string" ? req.body.weekStart : new Date().toISOString().slice(0, 10);
-    const submittedBy = typeof req.body?.submittedBy === "string" ? req.body.submittedBy : "user";
+    const submittedBy = undefined;
     res.json(await dutyPlannerService.submitWeek(weekStart, submittedBy));
 }));
 // GET /api/staff/attendance/summary?month=YYYY-MM

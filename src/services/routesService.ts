@@ -4,7 +4,7 @@ import type { Route } from "../types/models.js";
 import { num, str } from "../utils/coerce.js";
 import { validateRouteFields } from "../utils/masterValidation.js";
 
-function mapRoute(row: Record<string, unknown>): Route {
+export function mapRoute(row: Record<string, unknown>): Route {
   return {
     id: num(row.id),
     routeNo: num(row.route_no),
@@ -19,6 +19,12 @@ export const routesService = {
   async listRoutes() {
     const result = await query(`SELECT * FROM routes ORDER BY route_name`);
     return result.rows.map(mapRoute);
+  },
+
+  async getRoute(id: number) {
+    const result = await query("SELECT * FROM routes WHERE id = $1", [id]);
+    if (!result.rowCount) throw new AppError(404, "Route not found");
+    return mapRoute(result.rows[0]);
   },
 
   async assertUniqueName(routeName: string, excludeId?: number) {
@@ -42,7 +48,7 @@ export const routesService = {
       await this.assertUniqueName(body.routeName, body.id);
       const result = await query(
         `UPDATE routes SET
-          route_no=$2, route_name=$3, route_code=$4, description=$5, status=$6
+          route_no=COALESCE($2,route_no), route_name=$3, route_code=$4, description=$5, status=$6
          WHERE id=$1 RETURNING *`,
         [
           body.id,
@@ -59,7 +65,7 @@ export const routesService = {
 
     await this.assertUniqueName(body.routeName);
     const nextNo = await query<{ n: number }>(
-      `SELECT COALESCE(MAX(route_no), 0) + 1 AS n FROM routes`
+      `SELECT next_master_number('routes') AS n`
     );
     const result = await query(
       `INSERT INTO routes (

@@ -474,6 +474,14 @@ export const fleetMaintenanceService = {
 
     return withTransaction(async (client) => {
       try {
+        if (data.idempotencyKey) {
+          await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [data.idempotencyKey]);
+          const replay = await client.query(
+            `${MAINT_SELECT} WHERE fm.request_id = $1::uuid`,
+            [data.idempotencyKey]
+          );
+          if (replay.rowCount) return mapMaintenance(replay.rows[0]);
+        }
         await assertVehicleExists(data.vehicleId, client);
         await assertEmployeeExists(data.driverId, "Driver", client);
 
@@ -504,9 +512,9 @@ export const fleetMaintenanceService = {
           `INSERT INTO fleet_maintenance (
              bill_no, maintenance_date, vehicle_id, vehicle_no, driver_id, driver_name,
              current_km, next_service_km, maintenance_type, service_type, garage, mechanic,
-             total_cost, parts, remarks, status, created_by
+             total_cost, parts, remarks, status, created_by, request_id
            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-             'Pending Approval'::ops_record_status, $16)
+             'Pending Approval'::ops_record_status, $16, $17)
            RETURNING id`,
           [
             billNo,
@@ -514,7 +522,7 @@ export const fleetMaintenanceService = {
             data.vehicleId,
             vehicleNo,
             data.driverId ?? null,
-            driverName,
+            driverName ?? "",
             num(data.currentKM),
             data.nextServiceKM ?? null,
             maintenanceType,
@@ -525,6 +533,7 @@ export const fleetMaintenanceService = {
             JSON.stringify(parts),
             data.remarks ?? null,
             data.createdBy ?? "",
+            data.idempotencyKey ?? null,
           ]
         );
 

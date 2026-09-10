@@ -51,13 +51,8 @@ export interface ShopSale {
     birdType: string;
     tripId: number | null;
     tripNo: string;
-    shopNo: string;
     vehicleNo: string | null;
     farmName: string | null;
-    pickupBirds?: number;
-    pickupWeight?: number;
-    mortalityWeight?: number;
-    weightLoss?: number;
     birds: number;
     weight: number;
     rate: number;
@@ -143,75 +138,6 @@ export interface CollectionEntry {
     createdAt?: string | null;
     updatedAt?: string | null;
 }
-/** Pending Collection main-table row. Derived from Collection Entry accounting. */
-export interface PendingCollectionSummaryRow {
-    shopId: number;
-    shopName: string;
-    weekStart: string;
-    weekEnd: string;
-    /** Previous week's closing (shops.opening_balance + ledger before week start). NOT shops.opening_balance. */
-    openingBalance: number;
-    /** Weekly outstanding (opening + sales − approved). May be negative. */
-    balance: number;
-    weeklySales: number;
-    weeklyApprovedCollections: number;
-    weeklyPendingCollections: number;
-    recoveryPercentage: number;
-    /** Reserved. Always null until an overdue rule is defined. */
-    overdueDays: null;
-    hasPendingCollections: boolean;
-    /** Latest non-deleted collection_date for display. Not a financial total. */
-    lastCollectionDate: string | null;
-}
-/** GET /collection-entry/pending-summary envelope. `totals` is the official all-shop week aggregate. */
-export interface PendingCollectionSummaryTotals {
-    weeklySales: number;
-    weeklyApprovedCollections: number;
-    weeklyPendingCollections: number;
-    balance: number;
-    recoveryPercentage: number;
-}
-export interface PendingCollectionSummaryResponse {
-    weekStart: string;
-    weekEnd: string;
-    shops: PendingCollectionSummaryRow[];
-    totals: PendingCollectionSummaryTotals;
-}
-/** Collection row for the Pending Collection detail (latest 10). */
-export interface PendingCollectionRecentEntry extends CollectionEntry {
-    /** Backend-enforced: CURRENT_DATE <= collection_date + 7. */
-    canDelete: boolean;
-}
-/** Collection Report — official financial breakdown for GET /collection-entry/report.
- * Aggregated server-side over Approved, non-deleted collections in [fromDate, toDate]. */
-export interface CollectionReportPaymentModeRow {
-    paymentMode: string;
-    count: number;
-    amount: number;
-    /** Share of totalAmount, 0–100 (uncapped, 0 when totalAmount is 0). */
-    percentage: number;
-}
-export interface CollectionReportCollectorRow {
-    collector: string;
-    /** Amount collected per payment mode, keyed by the exact payment_mode value. */
-    amounts: Record<string, number>;
-    total: number;
-}
-export interface CollectionReportSummary {
-    fromDate: string;
-    toDate: string;
-    totalAmount: number;
-    totalCount: number;
-    /** Distinct collectors across the full filtered set. */
-    totalCollectors: number;
-    paymentModeSummary: CollectionReportPaymentModeRow[];
-    /** Distinct collector count per payment mode (for headcount widgets — not a financial total). */
-    collectorsByPaymentMode: {
-        paymentMode: string;
-        collectorCount: number;
-    }[];
-    collectorSummary: CollectionReportCollectorRow[];
-}
 export type FuelSourceType = "TRIP" | "MANUAL";
 export interface FuelExpense {
     id: string;
@@ -225,7 +151,6 @@ export interface FuelExpense {
     supervisorId: number | null;
     supervisorName: string | null;
     tripId: number | null;
-    sourceTripId?: number | null;
     tripNo?: string | null;
     tripFuelEntryIndex: number | null;
     currentMeter: number;
@@ -235,10 +160,6 @@ export interface FuelExpense {
     pumpName: string;
     bunkAddress?: string | null;
     remarks?: string | null;
-    gpsLat?: number | null;
-    gpsLon?: number | null;
-    gpsAccuracy?: number | null;
-    gpsCapturedAt?: string | null;
     status: OpsRecordStatus;
     imageData?: string | null;
     imageName?: string | null;
@@ -262,53 +183,11 @@ export interface RunningBalanceRow {
     pendingAmount: number;
     runningBalance: number;
 }
-/** One Market Rate Master row (read-only reference) for a business date. */
-export interface RateEntryMarketRateWindowRow {
-    businessDate: string;
-    entered: boolean;
-    vij: number | null;
-    gun: number | null;
-    rp: number | null;
-    sneha: number | null;
-    vencobRate: number | null;
-    vencobVii: number | null;
-    vencobGun: number | null;
-    associationVii: number | null;
-    sizeColumns: Record<string, number | null>;
-}
-export interface RateEntryMarketRateMaster {
-    tripDate: string;
-    fromDate: string;
-    toDate: string;
-    additionalMetrics: Array<{
-        date: string;
-        entered: boolean;
-        vij: number | null;
-        gun: number | null;
-        rp: number | null;
-    }>;
-    companyRates: Array<{
-        date: string;
-        entered: boolean;
-        sneha: number | null;
-        vencobRate: number | null;
-        vencobVii: number | null;
-        vencobGun: number | null;
-        associationVii: number | null;
-    }>;
-    sizeCategoryBreakdown: Array<{
-        date: string;
-        entered: boolean;
-        columns: Record<string, number | null>;
-    }>;
-    sizeColumnKeys: string[];
-}
 export interface RateEntryMarketRate {
     shopId: number | null;
     shopName: string;
     birdTypeId: number | null;
     birdType: string;
-    /** VenCob R. from Market Rate Master for the trip date (read-only). */
     masterRate: number | null;
     lastTripRate: number | null;
     lastTripDate: string | null;
@@ -353,7 +232,4 @@ export interface RateEntryTrip {
     deliveriesCount: number;
     totalAmount: number;
     deliveries: RateEntryDelivery[];
-    /** Market Rate Master rows for tripDate-1, tripDate, tripDate+1 only. */
-    marketRatesWindow: RateEntryMarketRateWindowRow[];
-    marketRateMaster: RateEntryMarketRateMaster | null;
 }

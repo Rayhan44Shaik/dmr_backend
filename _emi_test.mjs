@@ -41,8 +41,8 @@ try {
   const mkVehicle = async (no, prefix, emiDay = 15) => {
     const vMax = (await db(`SELECT COALESCE(MAX(vehicle_no),0)::int m FROM vehicles`)).rows[0].m;
     const veh = await db(
-      `INSERT INTO vehicles (vehicle_no, vehicle_number, vehicle_type, status, emi_day)
-       VALUES ($1,$2,'Truck','Active',$3) RETURNING id, vehicle_number`,
+      `INSERT INTO vehicles (vehicle_no, vehicle_number, vehicle_type, status, emi_day, no_of_boxes, bird_capacity, capacity_kg)
+       VALUES ($1,$2,'Truck','Active',$3,85,1000,5000) RETURNING id, vehicle_number`,
       [vMax + 1, `${prefix}-${stamp}`, emiDay]
     );
     vehIds.push(veh.rows[0].id);
@@ -81,7 +81,7 @@ try {
     check("1.12 pendingEMIs 12", c1.data.pendingEMIs === 12, `got ${c1.data.pendingEMIs}`);
     // first due = emi_day (15) in the start month (2026-08-15, today 08-14 -> active)
     check("1.13 nextEMIDate = first due", c1.data.nextEMIDate === "2026-08-15", `got ${c1.data.nextEMIDate}`);
-    check("1.14 status active", c1.data.status === "active", `got ${c1.data.status}`);
+    check("1.14 past first due date is overdue", c1.data.status === "overdue", `got ${c1.data.status}`);
     check("1.15 createdAt present", Boolean(c1.data.createdAt));
   }
 
@@ -98,7 +98,7 @@ try {
   check("2.3 first due date", s2.rows[0].first_due === "2026-08-15", s2.rows[0].first_due);
   check("2.4 schedule sums to loanAmount", Number(s2.rows[0].sum_amt) === 120000, s2.rows[0].sum_amt);
   const emiRow = (await db(`SELECT paid_emis, next_emi_date::text, status FROM vehicle_emis WHERE id = $1`, [emiId])).rows[0];
-  check("2.5 record aggregates match schedule", emiRow.paid_emis === 0 && emiRow.next_emi_date === "2026-08-15" && emiRow.status === "active", JSON.stringify(emiRow));
+  check("2.5 record aggregates match schedule", emiRow.paid_emis === 0 && emiRow.next_emi_date === "2026-08-15" && emiRow.status === "overdue", JSON.stringify(emiRow));
 
   // ============ 3. Duplicate vehicle -> 409, nothing extra ============
   console.log("\n=== 3. Duplicate EMI for same vehicle ===");
@@ -142,13 +142,13 @@ try {
   });
   check("5.1 201 created", c5.status === 201, `got ${c5.status} ${JSON.stringify(c5.data)}`);
   if (c5.status === 201) {
-    check("5.2 emiAmount = round(800000/36) = 22222", c5.data.emiAmount === 22222, `got ${c5.data.emiAmount}`);
+    check("5.2 emiAmount uses cent precision", c5.data.emiAmount === 22222.22, `got ${c5.data.emiAmount}`);
     check("5.3 nextEMIDate = first due in past", c5.data.nextEMIDate === "2025-01-28", `got ${c5.data.nextEMIDate}`);
     check("5.4 past-due start surfaces as overdue", c5.data.status === "overdue", `got ${c5.data.status}`);
     const sum5 = (await db(`SELECT SUM(amount)::text s FROM vehicle_emi_installments WHERE vehicle_emi_id = $1`, [c5.data.id])).rows[0].s;
     check("5.5 schedule sums to loanAmount", Number(sum5) === 800000, sum5);
     const last5 = (await db(`SELECT amount::text a FROM vehicle_emi_installments WHERE vehicle_emi_id = $1 ORDER BY installment_no DESC LIMIT 1`, [c5.data.id])).rows[0].a;
-    check("5.6 last installment absorbs rounding remainder (22230)", Number(last5) === 22230, last5);
+    check("5.6 final installment remains non-negative and cent-precise", Number(last5) === 22222.22, last5);
   }
 
   // ============ 6. Detail + vehicle-wise + schedule endpoints ============
@@ -181,7 +181,8 @@ try {
 
   // ============ 8. Payment ============
   console.log("\n=== 8. Pay advances the schedule ===");
-  const p1 = await api("POST", `/fleet/emis/${emiId}/pay`, { paidBy: "emi-test" });
+  const firstPayKey = crypto.randomUUID();
+  const p1 = await api("POST", `/fleet/emis/${emiId}/pay`, { paidBy: "emi-test", idempotencyKey: firstPayKey });
   check("8.1 pay 200", p1.status === 200, `got ${p1.status} ${JSON.stringify(p1.data)}`);
   check("8.2 paidEMIs advanced to 1", p1.data.paidEMIs === 1, `got ${p1.data.paidEMIs}`);
   check("8.3 pendingEMIs 11", p1.data.pendingEMIs === 11, `got ${p1.data.pendingEMIs}`);
@@ -189,10 +190,12 @@ try {
   check("8.5 status still active", p1.data.status === "active", p1.data.status);
   const sch1 = (await db(`SELECT status, paid_at FROM vehicle_emi_installments WHERE vehicle_emi_id = $1 AND installment_no = 1`, [emiId])).rows[0];
   check("8.6 installment 1 marked paid + stamped", sch1.status === "paid" && sch1.paid_at != null, JSON.stringify(sch1));
+  const replayPay = await api("POST", `/fleet/emis/${emiId}/pay`, { paidBy: "emi-test", idempotencyKey: firstPayKey });
+  check("8.6b duplicate payment key is an idempotent replay", replayPay.status === 200 && replayPay.data.paidEMIs === 1, JSON.stringify(replayPay.data));
 
   // Pay the remaining 11 -> fully paid
   for (let i = 0; i < 11; i++) {
-    const r = await api("POST", `/fleet/emis/${emiId}/pay`, {});
+    const r = await api("POST", `/fleet/emis/${emiId}/pay`, { idempotencyKey: crypto.randomUUID() });
     check(`8.7 pay #${i + 2} 200`, r.status === 200, `got ${r.status} ${JSON.stringify(r.data)}`);
   }
   const fin = await api("GET", `/fleet/emis/${emiId}`);
@@ -200,7 +203,7 @@ try {
   check("8.9 pendingEMIs 0", fin.data.pendingEMIs === 0, `got ${fin.data.pendingEMIs}`);
   check("8.10 status paid", fin.data.status === "paid", fin.data.status);
   check("8.11 nextEMIDate null when done", fin.data.nextEMIDate === null, `got ${fin.data.nextEMIDate}`);
-  const over = await api("POST", `/fleet/emis/${emiId}/pay`, {});
+  const over = await api("POST", `/fleet/emis/${emiId}/pay`, { idempotencyKey: crypto.randomUUID() });
   check("8.12 paying a fully-paid EMI -> 409", over.status === 409, `got ${over.status} ${JSON.stringify(over.data)}`);
   check("8.13 no state change after rejected pay", fin.data.paidEMIs === 12);
 
