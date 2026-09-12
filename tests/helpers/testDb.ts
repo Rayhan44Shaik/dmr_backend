@@ -82,11 +82,19 @@ export async function applySchema(): Promise<void> {
   }
 }
 
-/** Wipes all master data between tests (also resets serial sequences). */
+/** Wipes master rows without TRUNCATE CASCADE, which would also erase the
+ * application_users table solely because it has an optional employee FK. */
 export async function resetMasters(): Promise<void> {
   const { pool } = await import("../../src/config/db.js");
   await pool.query(
-    `TRUNCATE employees, vehicles, farms, shops, banks, bird_types, routes, master_number_counters RESTART IDENTITY CASCADE`
+    `DELETE FROM routes;
+     DELETE FROM employees;
+     DELETE FROM vehicles;
+     DELETE FROM farms;
+     DELETE FROM shops;
+     DELETE FROM banks;
+     DELETE FROM bird_types;
+     DELETE FROM master_number_counters;`
   );
 }
 

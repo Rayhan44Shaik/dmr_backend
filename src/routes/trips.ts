@@ -2,8 +2,17 @@ import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
+import { validateStepSubmit } from "../validation/trips.js";
 
 export const tripsRouter = Router();
+
+function positiveId(value: string, label = "Trip id"): number {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new AppError(400, `${label} must be a positive integer`);
+  }
+  return id;
+}
 
 function tripListFilters(req: {
   query: Record<string, unknown>;
@@ -25,14 +34,15 @@ function tripListFilters(req: {
 tripsRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    res.json(await tripsService.list(tripListFilters(req)));
+    const filters = tripListFilters(req);
+    res.json(await tripsService.list(filters));
   })
 );
 
 tripsRouter.get(
   "/vehicle/:vehicleId/last-meter",
   asyncHandler(async (req, res) => {
-    res.json(await tripsService.lastClosingMeter(Number(req.params.vehicleId)));
+    res.json(await tripsService.lastClosingMeter(positiveId(req.params.vehicleId, "Vehicle id")));
   })
 );
 
@@ -45,6 +55,7 @@ tripsRouter.get(
 tripsRouter.post(
   "/steps/start",
   asyncHandler(async (req, res) => {
+    validateStepSubmit("start", req.body);
     const payload = {
       ...req.body,
       status: "Draft" as const,
@@ -52,7 +63,8 @@ tripsRouter.post(
       startTime: req.body?.startTime || new Date().toISOString(),
     };
 
-    res.status(201).json(await tripsService.save(null, payload));
+    const trip = await tripsService.save(null, payload);
+    res.status(201).json(trip);
   })
 );
 
@@ -73,7 +85,8 @@ tripsRouter.get(
 tripsRouter.get(
   "/:id",
   asyncHandler(async (req, res) => {
-    res.json(await tripsService.getById(Number(req.params.id)));
+    const id = positiveId(req.params.id);
+    res.json(await tripsService.getById(id));
   })
 );
 
@@ -82,9 +95,12 @@ tripsRouter.post(
   asyncHandler(async (req, res) => {
     // Create draft or full save without id
     if (req.body?.startStepSubmitted || req.body?.vehicleId || req.body?.helpers) {
-      res.status(201).json(await tripsService.save(null, req.body));
+      validateStepSubmit("start", req.body);
+      const trip = await tripsService.save(null, req.body);
+      res.status(201).json(trip);
     } else {
-      res.status(201).json(await tripsService.createDraft(req.body));
+      const trip = await tripsService.createDraft(req.body);
+      res.status(201).json(trip);
     }
   })
 );
@@ -92,7 +108,9 @@ tripsRouter.post(
 tripsRouter.put(
   "/:id",
   asyncHandler(async (req, res) => {
-    res.json(await tripsService.save(Number(req.params.id), req.body));
+    const id = positiveId(req.params.id);
+    const trip = await tripsService.save(id, req.body);
+    res.json(trip);
   })
 );
 
@@ -103,13 +121,13 @@ tripsRouter.post(
     if (!["start", "farm", "pickup", "deliveries", "expenses"].includes(step)) {
       throw new AppError(400, "Invalid step. Use start|farm|pickup|deliveries|expenses");
     }
-    res.json(
-      await tripsService.submitStep(
-        Number(req.params.id),
+    const id = positiveId(req.params.id);
+    const trip = await tripsService.submitStep(
+        id,
         step as "start" | "farm" | "pickup" | "deliveries" | "expenses",
         req.body
-      )
-    );
+      );
+    res.json(trip);
   })
 );
 
@@ -123,28 +141,32 @@ tripsRouter.post(
 tripsRouter.put(
   "/:id/deliveries",
   asyncHandler(async (req, res) => {
-    res.json(await tripsService.saveDeliveries(Number(req.params.id), req.body));
+    const id = positiveId(req.params.id);
+    const trip = await tripsService.saveDeliveries(id, req.body);
+    res.json(trip);
   })
 );
 
 tripsRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
+    const id = positiveId(req.params.id);
     const reason =
       typeof req.body?.reason === "string"
         ? req.body.reason
         : typeof req.query.reason === "string"
           ? req.query.reason
           : undefined;
-    res.json(
-      await tripsService.softDelete(Number(req.params.id), reason)
-    );
+    const result = await tripsService.softDelete(id, reason);
+    res.json(result);
   })
 );
 
 tripsRouter.patch(
   "/:id/status",
   asyncHandler(async (req, res) => {
-    res.json(await tripsService.updateStatus(Number(req.params.id), req.body));
+    const id = positiveId(req.params.id);
+    const trip = await tripsService.updateStatus(id, req.body);
+    res.json(trip);
   })
 );

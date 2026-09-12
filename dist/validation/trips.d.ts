@@ -11,8 +11,8 @@ export declare const tripAutosaveSchema: z.ZodObject<{
     supervisorId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     sourceFarmId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     farmBirdTypeId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
-    helpers: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
-    loaders: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    helpers: z.ZodOptional<z.ZodEffects<z.ZodArray<z.ZodString, "many">, string[], string[]>>;
+    loaders: z.ZodOptional<z.ZodEffects<z.ZodArray<z.ZodString, "many">, string[], string[]>>;
     boxDetails: z.ZodOptional<z.ZodArray<z.ZodObject<{
         boxNo: z.ZodNumber;
         birds: z.ZodOptional<z.ZodNumber>;
@@ -149,8 +149,8 @@ export declare const tripAutosaveSchema: z.ZodObject<{
     supervisorId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     sourceFarmId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     farmBirdTypeId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
-    helpers: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
-    loaders: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    helpers: z.ZodOptional<z.ZodEffects<z.ZodArray<z.ZodString, "many">, string[], string[]>>;
+    loaders: z.ZodOptional<z.ZodEffects<z.ZodArray<z.ZodString, "many">, string[], string[]>>;
     boxDetails: z.ZodOptional<z.ZodArray<z.ZodObject<{
         boxNo: z.ZodNumber;
         birds: z.ZodOptional<z.ZodNumber>;
@@ -287,8 +287,8 @@ export declare const tripAutosaveSchema: z.ZodObject<{
     supervisorId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     sourceFarmId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     farmBirdTypeId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
-    helpers: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
-    loaders: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    helpers: z.ZodOptional<z.ZodEffects<z.ZodArray<z.ZodString, "many">, string[], string[]>>;
+    loaders: z.ZodOptional<z.ZodEffects<z.ZodArray<z.ZodString, "many">, string[], string[]>>;
     boxDetails: z.ZodOptional<z.ZodArray<z.ZodObject<{
         boxNo: z.ZodNumber;
         birds: z.ZodOptional<z.ZodNumber>;
@@ -426,8 +426,8 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
     supervisorId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     sourceFarmId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     farmBirdTypeId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
-    helpers: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
-    loaders: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    helpers: z.ZodOptional<z.ZodEffects<z.ZodArray<z.ZodString, "many">, string[], string[]>>;
+    loaders: z.ZodOptional<z.ZodEffects<z.ZodArray<z.ZodString, "many">, string[], string[]>>;
     boxDetails: z.ZodOptional<z.ZodArray<z.ZodObject<{
         boxNo: z.ZodNumber;
         birds: z.ZodOptional<z.ZodNumber>;

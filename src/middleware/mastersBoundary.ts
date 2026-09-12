@@ -24,7 +24,9 @@ export const mastersBoundary: RequestHandler = (req, res, next) => {
   // until authenticated identity exists; created_by/updated_by must never use a fake user.
   res.locals.mastersAccess = access;
   const authorize = req.app.locals.authorizeMasters as MastersAuthorizer | undefined;
-  Promise.resolve().then(() => authorize?.(req, access)).then(() => next(), next);
+  Promise.resolve()
+    .then(() => authorize?.(req, access))
+    .then(() => next(), next);
 };
 
 /** Keep database internals out of Masters responses without changing other modules. */

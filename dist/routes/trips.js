@@ -2,7 +2,17 @@ import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
+import { validateStepSubmit } from "../validation/trips.js";
+import { query } from "../config/db.js";
+import { enforceSupervisorAssignment, requireTripAccess, requireTripPermission } from "../middleware/tripAuthorization.js";
 export const tripsRouter = Router();
+function positiveId(value, label = "Trip id") {
+    const id = Number(value);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+        throw new AppError(400, `${label} must be a positive integer`);
+    }
+    return id;
+}
 function tripListFilters(req) {
     const { params: pagination, enabled } = parsePagination(req.query);
     return {
@@ -18,10 +28,15 @@ function tripListFilters(req) {
     };
 }
 tripsRouter.get("/", asyncHandler(async (req, res) => {
-    res.json(await tripsService.list(tripListFilters(req)));
+    const user = requireTripPermission(res, "trip.view");
+    const filters = tripListFilters(req);
+    if (user.role === "SUPERVISOR")
+        filters.supervisorId = user.employeeId ?? -1;
+    res.json(await tripsService.list(filters));
 }));
 tripsRouter.get("/vehicle/:vehicleId/last-meter", asyncHandler(async (req, res) => {
-    res.json(await tripsService.lastClosingMeter(Number(req.params.vehicleId)));
+    requireTripPermission(res, "trip.view");
+    res.json(await tripsService.lastClosingMeter(positiveId(req.params.vehicleId, "Vehicle id")));
 }));
 /**
  * Final Step 1 submission.
@@ -30,13 +45,18 @@ tripsRouter.get("/vehicle/:vehicleId/last-meter", asyncHandler(async (req, res) 
  * Keep this route before GET /:id so "steps" is not interpreted as an id.
  */
 tripsRouter.post("/steps/start", asyncHandler(async (req, res) => {
+    const user = requireTripPermission(res, "trip.create");
+    enforceSupervisorAssignment(user, req.body?.supervisorId);
+    validateStepSubmit("start", req.body);
     const payload = {
         ...req.body,
         status: "Draft",
         startStepSubmitted: true,
         startTime: req.body?.startTime || new Date().toISOString(),
     };
-    res.status(201).json(await tripsService.save(null, payload));
+    const trip = await tripsService.save(null, payload);
+    await query(`UPDATE trips SET created_by_user_id=$2, updated_by_user_id=$2 WHERE id=$1`, [trip.id, user.id]);
+    res.status(201).json(trip);
 }));
 /**
  * Available masters for Step 1 dropdowns (vehicles/drivers/supervisors/
@@ -45,30 +65,54 @@ tripsRouter.post("/steps/start", asyncHandler(async (req, res) => {
  * "available-resources" is not interpreted as an id.
  */
 tripsRouter.get("/available-resources", asyncHandler(async (req, res) => {
+    requireTripPermission(res, "trip.create");
     const tripId = req.query.tripId ? Number(req.query.tripId) : undefined;
+    if (tripId)
+        await requireTripAccess(res, tripId, "trip.edit");
     res.json(await tripsService.availableResources(tripId));
 }));
 tripsRouter.get("/:id", asyncHandler(async (req, res) => {
-    res.json(await tripsService.getById(Number(req.params.id)));
+    const id = positiveId(req.params.id);
+    await requireTripAccess(res, id, "trip.view");
+    res.json(await tripsService.getById(id));
 }));
 tripsRouter.post("/", asyncHandler(async (req, res) => {
+    const user = requireTripPermission(res, "trip.create");
+    enforceSupervisorAssignment(user, req.body?.supervisorId);
     // Create draft or full save without id
     if (req.body?.startStepSubmitted || req.body?.vehicleId || req.body?.helpers) {
-        res.status(201).json(await tripsService.save(null, req.body));
+        validateStepSubmit("start", req.body);
+        const trip = await tripsService.save(null, req.body);
+        await query(`UPDATE trips SET created_by_user_id=$2, updated_by_user_id=$2 WHERE id=$1`, [trip.id, user.id]);
+        res.status(201).json(trip);
     }
     else {
-        res.status(201).json(await tripsService.createDraft(req.body));
+        const trip = await tripsService.createDraft(req.body);
+        await query(`UPDATE trips SET created_by_user_id=$2, updated_by_user_id=$2 WHERE id=$1`, [trip.id, user.id]);
+        res.status(201).json(trip);
     }
 }));
 tripsRouter.put("/:id", asyncHandler(async (req, res) => {
-    res.json(await tripsService.save(Number(req.params.id), req.body));
+    const id = positiveId(req.params.id);
+    const user = await requireTripAccess(res, id, "trip.edit");
+    if (req.body?.supervisorId != null)
+        enforceSupervisorAssignment(user, req.body.supervisorId);
+    const trip = await tripsService.save(id, req.body);
+    await query(`UPDATE trips SET updated_by_user_id=$2 WHERE id=$1`, [id, user.id]);
+    res.json(trip);
 }));
 tripsRouter.post("/:id/steps/:step", asyncHandler(async (req, res) => {
     const step = req.params.step;
     if (!["start", "farm", "pickup", "deliveries", "expenses"].includes(step)) {
         throw new AppError(400, "Invalid step. Use start|farm|pickup|deliveries|expenses");
     }
-    res.json(await tripsService.submitStep(Number(req.params.id), step, req.body));
+    const id = positiveId(req.params.id);
+    const user = await requireTripAccess(res, id, "trip.submit");
+    if (req.body?.supervisorId != null)
+        enforceSupervisorAssignment(user, req.body.supervisorId);
+    const trip = await tripsService.submitStep(id, step, req.body);
+    await query(`UPDATE trips SET updated_by_user_id=$2, submitted_by_user_id=CASE WHEN $3='expenses' THEN $2 ELSE submitted_by_user_id END WHERE id=$1`, [id, user.id, step]);
+    res.json(trip);
 }));
 /**
  * Step 4 per-shop persistence — idempotent Save Progress / single-shop save.
@@ -78,17 +122,30 @@ tripsRouter.post("/:id/steps/:step", asyncHandler(async (req, res) => {
  * endpoint above.
  */
 tripsRouter.put("/:id/deliveries", asyncHandler(async (req, res) => {
-    res.json(await tripsService.saveDeliveries(Number(req.params.id), req.body));
+    const id = positiveId(req.params.id);
+    const user = await requireTripAccess(res, id, "trip.edit");
+    const trip = await tripsService.saveDeliveries(id, req.body);
+    await query(`UPDATE trips SET updated_by_user_id=$2 WHERE id=$1`, [id, user.id]);
+    res.json(trip);
 }));
 tripsRouter.delete("/:id", asyncHandler(async (req, res) => {
+    const id = positiveId(req.params.id);
+    const user = await requireTripAccess(res, id, "trip.delete");
     const reason = typeof req.body?.reason === "string"
         ? req.body.reason
         : typeof req.query.reason === "string"
             ? req.query.reason
             : undefined;
-    res.json(await tripsService.softDelete(Number(req.params.id), reason));
+    const result = await tripsService.softDelete(id, reason);
+    await query(`UPDATE trips SET deleted_by_user_id=$2, updated_by_user_id=$2 WHERE id=$1`, [id, user.id]);
+    res.json(result);
 }));
 tripsRouter.patch("/:id/status", asyncHandler(async (req, res) => {
-    res.json(await tripsService.updateStatus(Number(req.params.id), req.body));
+    const id = positiveId(req.params.id);
+    const permission = req.body?.status === "Completed" ? "trip.approve" : "trip.status_change";
+    const user = await requireTripAccess(res, id, permission);
+    const trip = await tripsService.updateStatus(id, req.body);
+    await query(`UPDATE trips SET updated_by_user_id=$2, approved_by_user_id=CASE WHEN $3='Completed' THEN $2 ELSE approved_by_user_id END WHERE id=$1`, [id, user.id, req.body?.status]);
+    res.json(trip);
 }));
 //# sourceMappingURL=trips.js.map

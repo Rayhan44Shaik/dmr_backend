@@ -5,7 +5,7 @@ import { resolveEmployeeNames, validateTripForeignKeys, } from "../utils/fkValid
 import { computeTripExpense } from "../utils/operationsHelpers.js";
 import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
-import { computeFarmAmount, computeTotalKm, computeTripKpis, sumDieselFuel, } from "../utils/tripCalculations.js";
+import { computeDeliveryAmount, computeFarmAmount, computeTotalKm, computeTripKpis, sumDieselFuel, } from "../utils/tripCalculations.js";
 import { loadDcPhoto, syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
 import { assertWithinCapacity, generateSaleNo, recalcTripDeliveryTotals, sumActiveDeliveries } from "../utils/tripDeliverySync.js";
 import { getLatestVehicleMeter, lockVehicleForMeterWrite, preciseIsoOrUndefined, validateVehicleMeter, } from "../utils/vehicleMeterLedger.js";
@@ -501,9 +501,9 @@ async function replaceDeliveries(client, tripId, deliveries = []) {
     const tripRow = await client.query(`SELECT trip_no FROM trips WHERE id = $1`, [tripId]);
     const tripNo = tripRow.rows[0]?.trip_no ?? `TR-${tripId}`;
     for (const [index, d] of deliveries.entries()) {
-        const amount = d.amount != null && d.amount > 0
-            ? d.amount
-            : Number((Number(d.weight ?? 0) * Number(d.rate ?? 0)).toFixed(2));
+        // Financial values are authoritative on the server. Never persist a
+        // browser-supplied amount that can be derived from weight and rate.
+        const amount = computeDeliveryAmount(Number(d.weight ?? 0), d.rate);
         const saleNo = await generateSaleNo(client, tripId, tripNo);
         const inserted = await client.query(`INSERT INTO trip_deliveries (
          trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
@@ -1645,9 +1645,9 @@ export const tripsService = {
                 totalWeight += weight + mortKg;
                 assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
                 assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
-                const amount = d.amount != null && Number(d.amount) > 0
-                    ? Number(d.amount)
-                    : Number((weight * Number(d.rate ?? 0)).toFixed(2));
+                // Ignore client-calculated totals; this prevents tampering and keeps
+                // retries/edits consistent with the persisted weight and rate.
+                const amount = computeDeliveryAmount(weight, d.rate);
                 const autoCaptureTime = normalizeTripTimestamp(d.autoCaptureTime);
                 let deliveryId;
                 if (match) {

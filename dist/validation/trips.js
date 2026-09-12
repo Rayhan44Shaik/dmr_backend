@@ -1,26 +1,33 @@
 import { z } from "zod";
 import { AppError } from "../middleware/errorHandler.js";
 const boxDetailSchema = z.object({
-    boxNo: z.coerce.number().int().positive(),
-    birds: z.coerce.number().int().nonnegative().optional(),
-    weight: z.coerce.number().nonnegative().optional(),
+    boxNo: z.coerce.number().int().positive().max(10_000),
+    birds: z.coerce.number().int().nonnegative().max(1_000_000).optional(),
+    weight: z.coerce.number().nonnegative().max(10_000_000).optional(),
 });
+const idSchema = z.coerce.number().int().positive();
+const shortText = z.string().trim().max(200);
+const crewNames = z.array(z.string().trim().min(1).max(120)).min(1).max(50)
+    .refine((values) => new Set(values.map((value) => value.toLocaleLowerCase())).size === values.length, {
+    message: "Crew members must not be duplicated",
+});
+const dateOnlySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must use YYYY-MM-DD format");
 // Used for autosave (very permissive)
 const deliverySchema = z.object({
     id: z.coerce.number().int().optional(),
     serialNo: z.coerce.number().int().nullable().optional(),
     boxNo: z.coerce.number().int().nullable().optional(),
-    shopId: z.coerce.number().int().nullable().optional(),
-    shopName: z.string().optional(),
-    birdTypeId: z.coerce.number().int().nullable().optional(),
-    birdType: z.string().optional(),
-    birds: z.coerce.number().int().nonnegative("Bird count cannot be negative").optional(),
-    weight: z.coerce.number().nonnegative("Weight cannot be negative").optional(),
-    mortality: z.coerce.number().int().nonnegative("Mortality cannot be negative").optional(),
-    mortKg: z.coerce.number().nonnegative("Mortality weight cannot be negative").nullable().optional(),
-    rate: z.coerce.number().nonnegative().nullable().optional(),
-    amount: z.coerce.number().nonnegative().optional(),
-    remarks: z.string().optional(),
+    shopId: idSchema.nullable().optional(),
+    shopName: shortText.optional(),
+    birdTypeId: idSchema.nullable().optional(),
+    birdType: shortText.optional(),
+    birds: z.coerce.number().int().nonnegative("Bird count cannot be negative").max(1_000_000).optional(),
+    weight: z.coerce.number().nonnegative("Weight cannot be negative").max(10_000_000).optional(),
+    mortality: z.coerce.number().int().nonnegative("Mortality cannot be negative").max(1_000_000).optional(),
+    mortKg: z.coerce.number().nonnegative("Mortality weight cannot be negative").max(10_000_000).nullable().optional(),
+    rate: z.coerce.number().nonnegative().max(1_000_000).nullable().optional(),
+    amount: z.coerce.number().nonnegative().max(1_000_000_000).optional(),
+    remarks: z.string().trim().max(1000).optional(),
     deliveryMode: z.enum(["box", "weight"]).optional(),
     selectedBoxIds: z.array(z.coerce.number().int()).optional(),
     farmBirds: z.coerce.number().int().nullable().optional(),
@@ -54,8 +61,8 @@ const dieselEntrySchema = z.object({
 });
 export const tripAutosaveSchema = z
     .object({
-    tripDate: z.string().optional(),
-    tripNo: z.string().optional(),
+    tripDate: dateOnlySchema.optional(),
+    tripNo: z.string().trim().max(50).optional(),
     status: z.enum(["Draft", "Pending", "Completed", "Deleted"]).optional(),
     updatedAt: z.string().optional(),
     expectedUpdatedAt: z.string().optional(),
@@ -64,8 +71,8 @@ export const tripAutosaveSchema = z
     supervisorId: z.coerce.number().int().nullable().optional(),
     sourceFarmId: z.coerce.number().int().nullable().optional(),
     farmBirdTypeId: z.coerce.number().int().nullable().optional(),
-    helpers: z.array(z.string()).optional(),
-    loaders: z.array(z.string()).optional(),
+    helpers: crewNames.optional(),
+    loaders: crewNames.optional(),
     boxDetails: z.array(boxDetailSchema).optional(),
     deliveries: z.array(deliverySchema).optional(),
     dieselEntries: z.array(dieselEntrySchema).optional(),
@@ -75,11 +82,13 @@ export const tripAutosaveSchema = z
 const stepValidators = {
     start: z
         .object({
-        tripDate: z.string().min(1),
+        tripDate: dateOnlySchema,
         // FIXED: Moved required_error inside z.coerce.number() instead of .int()
-        vehicleId: z.coerce.number({ required_error: "Vehicle is required" }).int(),
-        driverId: z.coerce.number({ required_error: "Driver is required" }).int(),
-        supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int(),
+        vehicleId: z.coerce.number({ required_error: "Vehicle is required" }).int().positive(),
+        driverId: z.coerce.number({ required_error: "Driver is required" }).int().positive(),
+        supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int().positive(),
+        helpers: crewNames,
+        loaders: crewNames,
         // Starting Meter / Advance are OPTIONAL. Empty/blank/null must pass through
         // as null so the backend meter validator is skipped (and the value is
         // persisted as NULL). A non-null value is still checked as a number.
@@ -90,7 +99,8 @@ const stepValidators = {
         .passthrough(),
     farm: z
         .object({
-        sourceFarmId: z.coerce.number().int(),
+        sourceFarmId: idSchema,
+        farmAddress: z.string().trim().min(1, "Farm address is required.").max(500),
         destMeter: z.coerce.number().nonnegative(),
         // reached_time is never sent by the frontend (backend captures it) — but
         // tolerate a null in case a legacy client sends one.
@@ -99,7 +109,7 @@ const stepValidators = {
         pickupTolls: z.preprocess((v) => (v == null || v === "" ? undefined : Math.max(0, Number(v))), z.coerce.number().nonnegative().optional()),
         // Avg Bird Weight is a Step 2 mandatory submit field (matches the UI).
         avgBirdWeight: z.coerce.number().positive(),
-        farmBirdTypeId: z.coerce.number().int().optional(),
+        farmBirdTypeId: idSchema,
         farmBirdCount: z.coerce.number().int().nonnegative().nullable().optional(),
         farmLoadWeight: z.coerce.number().nonnegative().nullable().optional(),
         // GPS — optional capture; ranges validated below when supplied.
@@ -110,11 +120,13 @@ const stepValidators = {
     })
         .passthrough()
         .refine((data) => {
-        if (data.farmGpsLat != null && (data.farmGpsLat < -90 || data.farmGpsLat > 90))
+        if (data.farmGpsLat == null || data.farmGpsLon == null)
             return false;
-        if (data.farmGpsLon != null && (data.farmGpsLon < -180 || data.farmGpsLon > 180))
+        if (data.farmGpsLat < -90 || data.farmGpsLat > 90)
             return false;
-        return true;
+        if (data.farmGpsLon < -180 || data.farmGpsLon > 180)
+            return false;
+        return data.farmGpsLat !== 0 || data.farmGpsLon !== 0;
     }, { message: "Invalid GPS coordinates", path: ["farmGpsLat"] }),
     pickup: z
         .object({
@@ -139,8 +151,8 @@ const stepValidators = {
         .object({
         deliveries: z.array(deliverySchema.extend({
             // FIXED: Moved required_error inside z.coerce.number()
-            shopId: z.coerce.number({ required_error: "Shop is required for a delivery" }).int(),
-            amount: z.coerce.number({ required_error: "Amount is required" }).nonnegative(),
+            shopId: z.coerce.number({ required_error: "Shop is required for a delivery" }).int().positive(),
+            birdTypeId: z.coerce.number({ required_error: "Bird type is required for a delivery" }).int().positive(),
         })).min(1, "At least one delivery is required"),
     })
         .passthrough()

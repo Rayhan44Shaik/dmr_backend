@@ -12,9 +12,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
+const testAuth = new Map<string, Record<string, string>>();
 
 export interface TestApp {
   baseUrl: string;
+  authHeaders: Record<string, string>;
   close: () => Promise<void>;
 }
 
@@ -36,6 +38,11 @@ function getFreePort(): Promise<number> {
 
 export async function startApp(env: Record<string, string>): Promise<TestApp> {
   const port = await getFreePort();
+  const { pool } = await import("../../src/config/db.js");
+  const { hashPassword } = await import("../../src/utils/passwordHash.js");
+  const username = `test-owner-${port}`;
+  const password = "Test-only-password-123!";
+  await pool.query(`INSERT INTO application_users (username,display_name,password_hash,role) VALUES ($1,'Test Owner',$2,'OWNER')`, [username, await hashPassword(password)]);
 
   // Test sources normally run through tsx. A precompiled test run is also
   // supported so CI can use Node directly when a platform-level tsx bootstrap
@@ -45,7 +52,9 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
 
   const child: ChildProcess = spawn(
     process.execPath,
-    isCompiledRun ? [compiledEntry] : ["--import", "tsx", "src/index.ts"],
+    isCompiledRun
+      ? [compiledEntry]
+      : ["-r", path.join(repoRoot, "tests", "helpers", "osUserInfoShim.cjs"), "--import", "tsx", "src/index.ts"],
     {
       cwd: repoRoot,
       env: {
@@ -86,9 +95,18 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
 
+  const login = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, password }) });
+  if (!login.ok) throw new Error(`test login failed: ${login.status}`);
+  const cookie = login.headers.get("set-cookie")?.split(";")[0];
+  if (!cookie) throw new Error("test login did not return a session cookie");
+  const authHeaders = { cookie };
+  testAuth.set(baseUrl, authHeaders);
+
   return {
     baseUrl,
+    authHeaders,
     close: async () => {
+      testAuth.delete(baseUrl);
       if (child.exitCode === null) {
         child.kill("SIGTERM");
         await Promise.race([
@@ -110,7 +128,7 @@ export async function postJson(
 ): Promise<{ status: number; body: any }> {
   const res = await fetch(`${baseUrl}${apiPath}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(testAuth.get(baseUrl) ?? {}) },
     body: JSON.stringify(body),
   });
   return { status: res.status, body: await res.json() };
@@ -123,7 +141,7 @@ export async function putJson(
 ): Promise<{ status: number; body: any }> {
   const res = await fetch(`${baseUrl}${apiPath}`, {
     method: "PUT",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(testAuth.get(baseUrl) ?? {}) },
     body: JSON.stringify(body),
   });
   return { status: res.status, body: await res.json() };
@@ -136,7 +154,7 @@ export async function patchJson(
 ): Promise<{ status: number; body: any }> {
   const res = await fetch(`${baseUrl}${apiPath}`, {
     method: "PATCH",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(testAuth.get(baseUrl) ?? {}) },
     body: JSON.stringify(body),
   });
   return { status: res.status, body: await res.json() };
@@ -146,6 +164,6 @@ export async function getJson(
   baseUrl: string,
   apiPath: string
 ): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${baseUrl}${apiPath}`);
+  const res = await fetch(`${baseUrl}${apiPath}`, { headers: testAuth.get(baseUrl) ?? {} });
   return { status: res.status, body: await res.json() };
 }

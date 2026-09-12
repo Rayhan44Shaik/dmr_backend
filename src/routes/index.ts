@@ -11,10 +11,10 @@ import { accountsRouter } from "./accounts.js";
 export const apiRouter = Router();
 
 apiRouter.use("/health", healthRouter);
+apiRouter.use("/docs", docsRouter);
 apiRouter.use("/masters", mastersRouter);
 apiRouter.use("/trips", tripsRouter);
 apiRouter.use("/staff", staffRouter);
 apiRouter.use("/operations", operationsRouter);
 apiRouter.use("/fleet", fleetRouter);
 apiRouter.use("/accounts", accountsRouter);
-apiRouter.use("/docs", docsRouter);

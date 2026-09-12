@@ -20,5 +20,7 @@ export const staffBoundary: RequestHandler = (req, res, next) => {
   const access: StaffAccess = { resource, action, resourceId: parts.find((part) => /^[0-9a-f-]{36}$/i.test(part)) };
   res.locals.staffAccess = access;
   const authorize = req.app.locals.authorizeStaff as StaffAuthorizer | undefined;
-  Promise.resolve().then(() => authorize?.(req, access)).then(() => next(), next);
+  Promise.resolve()
+    .then(() => authorize?.(req, access))
+    .then(() => next(), next);
 };

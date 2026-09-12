@@ -61,6 +61,13 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     currentKM: number;
     maintenanceType: string | string[];
     serviceType: string;
+    parts?: {
+        name: string;
+        rate: number;
+        quantity: number;
+        amount?: number | undefined;
+        specification?: string | undefined;
+    }[] | undefined;
     vehicleNo?: string | null | undefined;
     driverId?: number | null | undefined;
     remarks?: string | null | undefined;
@@ -69,13 +76,6 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
-    parts?: {
-        name: string;
-        rate: number;
-        quantity: number;
-        amount?: number | undefined;
-        specification?: string | undefined;
-    }[] | undefined;
     totalCost?: number | undefined;
     idempotencyKey?: string | undefined;
 }, {
@@ -84,6 +84,13 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     currentKM: number;
     maintenanceType: string | string[];
     serviceType: string;
+    parts?: {
+        name: string;
+        rate?: number | undefined;
+        amount?: number | undefined;
+        specification?: string | undefined;
+        quantity?: number | undefined;
+    }[] | undefined;
     vehicleNo?: string | null | undefined;
     driverId?: number | null | undefined;
     remarks?: string | null | undefined;
@@ -92,13 +99,6 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
-    parts?: {
-        name: string;
-        rate?: number | undefined;
-        amount?: number | undefined;
-        specification?: string | undefined;
-        quantity?: number | undefined;
-    }[] | undefined;
     totalCost?: number | undefined;
     idempotencyKey?: string | undefined;
 }>;
@@ -142,19 +142,6 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
 } & {
     removeDocumentIds: z.ZodOptional<z.ZodArray<z.ZodNumber, "many">>;
 }, "strip", z.ZodTypeAny, {
-    date?: string | undefined;
-    vehicleNo?: string | null | undefined;
-    vehicleId?: number | undefined;
-    driverId?: number | null | undefined;
-    remarks?: string | null | undefined;
-    createdBy?: string | undefined;
-    driverName?: string | null | undefined;
-    currentKM?: number | undefined;
-    nextServiceKM?: number | null | undefined;
-    maintenanceType?: string | string[] | undefined;
-    serviceType?: string | undefined;
-    garage?: string | undefined;
-    mechanic?: string | undefined;
     parts?: {
         name: string;
         rate: number;
@@ -162,10 +149,6 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
         amount?: number | undefined;
         specification?: string | undefined;
     }[] | undefined;
-    totalCost?: number | undefined;
-    idempotencyKey?: string | undefined;
-    removeDocumentIds?: number[] | undefined;
-}, {
     date?: string | undefined;
     vehicleNo?: string | null | undefined;
     vehicleId?: number | undefined;
@@ -179,6 +162,10 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     serviceType?: string | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
+    totalCost?: number | undefined;
+    idempotencyKey?: string | undefined;
+    removeDocumentIds?: number[] | undefined;
+}, {
     parts?: {
         name: string;
         rate?: number | undefined;
@@ -186,6 +173,19 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
         specification?: string | undefined;
         quantity?: number | undefined;
     }[] | undefined;
+    date?: string | undefined;
+    vehicleNo?: string | null | undefined;
+    vehicleId?: number | undefined;
+    driverId?: number | null | undefined;
+    remarks?: string | null | undefined;
+    createdBy?: string | undefined;
+    driverName?: string | null | undefined;
+    currentKM?: number | undefined;
+    nextServiceKM?: number | null | undefined;
+    maintenanceType?: string | string[] | undefined;
+    serviceType?: string | undefined;
+    garage?: string | undefined;
+    mechanic?: string | undefined;
     totalCost?: number | undefined;
     idempotencyKey?: string | undefined;
     removeDocumentIds?: number[] | undefined;

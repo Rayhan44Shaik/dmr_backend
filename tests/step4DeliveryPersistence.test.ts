@@ -77,6 +77,12 @@ async function seedMasters() {
     capacity: 30000,
     status: "Active",
   });
+  const birdType = await mastersService.upsertBirdType({
+    birdType: `S4 Bird ${vehicleSeq}`,
+    averageWeight: 2.5,
+    description: "Step 4 integration test bird type",
+    status: "Active",
+  });
   const shopA = await mastersService.upsertShop({
     shopName: `Shop Alpha ${vehicleSeq}`,
     ownerName: "Owner A",
@@ -91,7 +97,7 @@ async function seedMasters() {
     village: "Village",
     status: "Active",
   });
-  return { vehicle, driver, supervisor, farm, shopA, shopB };
+  return { vehicle, driver, supervisor, farm, birdType, shopA, shopB };
 }
 
 /** Creates a trip with Steps 1-3 complete and pickup boxes persisted. */
@@ -169,6 +175,8 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
           clientKey: "ck-shop-a",
           shopId: m.shopA.id,
           shopName: m.shopA.shopName,
+          birdTypeId: m.birdType.id,
+          birdType: m.birdType.birdType,
           birds: 90,
           weight: 180,
           mortality: 10,
@@ -256,6 +264,8 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
           clientKey: "ck-legacy",
           shopId: m.shopA.id,
           shopName: m.shopA.shopName,
+          birdTypeId: m.birdType.id,
+          birdType: m.birdType.birdType,
           birds: 50,
           weight: 100,
           selectedBoxIds: [1],
@@ -315,6 +325,8 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
               clientKey: "ck-inactive-new",
               shopId: m.shopA.id,
               shopName: m.shopA.shopName,
+              birdTypeId: m.birdType.id,
+              birdType: m.birdType.birdType,
               birds: 40,
               weight: 80,
               selectedBoxIds: [2],
@@ -709,6 +721,8 @@ describe("Step 4 timestamp semantics", () => {
           clientKey: "ck-ts",
           shopId: m.shopA.id,
           shopName: m.shopA.shopName,
+          birdTypeId: m.birdType.id,
+          birdType: m.birdType.birdType,
           birds: 100,
           weight: 200,
           selectedBoxIds: [1],
@@ -730,17 +744,29 @@ describe("Step 4 timestamp semantics", () => {
           clientKey: "ck-ts",
           shopId: m.shopA.id,
           shopName: m.shopA.shopName,
+          birdTypeId: m.birdType.id,
+          birdType: m.birdType.birdType,
           birds: 100,
           weight: 200,
           selectedBoxIds: [1],
           farmBirds: 100,
           farmWeight: 200,
-          amount: 0,
+          rate: 10,
+          amount: 999999,
         }),
       ],
       deliveryStepSubmitted: true,
     } as Record<string, unknown>);
     assert.equal(submitted.deliveryStepSubmitted, true, "final submit must mark Step 4 submitted");
+    const authoritativeAmount = await pool.query(
+      `SELECT amount FROM trip_deliveries WHERE trip_id = $1`,
+      [trip.id]
+    );
+    assert.equal(
+      Number(authoritativeAmount.rows[0].amount),
+      2000,
+      "server must derive amount from persisted weight and rate"
+    );
     const afterSubmit = await pool.query(
       `SELECT deliveries_step_submitted_at FROM trips WHERE id = $1`,
       [trip.id]
@@ -754,6 +780,8 @@ describe("Step 4 timestamp semantics", () => {
           clientKey: "ck-ts",
           shopId: m.shopA.id,
           shopName: m.shopA.shopName,
+          birdTypeId: m.birdType.id,
+          birdType: m.birdType.birdType,
           birds: 95,
           weight: 190,
           mortality: 5,
@@ -795,6 +823,8 @@ describe("Step 4 timestamp semantics", () => {
               clientKey: "ck-incomplete",
               shopId: m.shopA.id,
               shopName: m.shopA.shopName,
+              birdTypeId: m.birdType.id,
+              birdType: m.birdType.birdType,
               birds: 0,
               weight: 0,
               selectedBoxIds: [1],
@@ -822,7 +852,7 @@ describe("Step 4 API endpoint (PUT /trips/:id/deliveries)", () => {
 
     const res = await fetch(`${app.baseUrl}/api/trips/${trip.id}/deliveries`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...app.authHeaders },
       body: JSON.stringify({
         deliveries: [
           {

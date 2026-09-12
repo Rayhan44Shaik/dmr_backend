@@ -552,7 +552,7 @@ describe("10-day Shop Sales edit window", () => {
     const atDay11 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 150 });
     assert.equal(atDay11.status, 409, "day 11 must be rejected");
 
-    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE", headers: app.authHeaders });
     assert.equal(del.status, 409, "delete must also be rejected past the window");
 
     const row = await pool.query(`SELECT rate FROM trip_deliveries WHERE id = $1`, [dA]);
@@ -600,7 +600,7 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
     const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
     await lockAndAge(trip, dA, 0);
 
-    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE", headers: app.authHeaders });
     assert.equal(del.status, 409, "DELETE inside the correction window must be rejected");
 
     const row = await pool.query(`SELECT deleted FROM trip_deliveries WHERE id = $1`, [dA]);
@@ -627,7 +627,7 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
       "day-10 trip must still be visible/active in Shop Sales"
     );
 
-    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE", headers: app.authHeaders });
     assert.equal(del.status, 409, "DELETE at exactly 10 days must be rejected with 409");
 
     const row = await pool.query(`SELECT deleted FROM trip_deliveries WHERE id = $1`, [dA]);
@@ -645,7 +645,7 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
     const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
     await lockAndAge(trip, dA, 11 * 24 * 60 * 60 * 1000);
 
-    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE", headers: app.authHeaders });
     assert.equal(del.status, 409, "DELETE at 11 days must be rejected with 409");
 
     const row = await pool.query(`SELECT deleted FROM trip_deliveries WHERE id = $1`, [dA]);
@@ -663,7 +663,7 @@ describe("Shop Sales soft-delete is permanently rejected once Rate Entry is lock
     const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
     await lockAndAge(trip, dA, 5 * 24 * 60 * 60 * 1000);
 
-    await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE" });
+    await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE", headers: app.authHeaders });
     const row = await pool.query(
       `SELECT deleted, birds, weight FROM trip_deliveries WHERE id = $1`,
       [dA]

@@ -324,7 +324,8 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     await collectionEntryService.approve(c.id);
 
     const res = await fetch(
-      `${baseUrl}/api/operations/shop-ledger?shopId=${shop.id}&fromDate=2026-08-06&toDate=2026-08-16`
+      `${baseUrl}/api/operations/shop-ledger?shopId=${shop.id}&fromDate=2026-08-06&toDate=2026-08-16`,
+      { headers: app.authHeaders }
     );
     assert.equal(res.status, 200);
     const body = (await res.json()) as {

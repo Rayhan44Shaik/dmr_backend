@@ -23,6 +23,7 @@ import {
 } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import {
+  computeDeliveryAmount,
   computeFarmAmount,
   computeTotalKm,
   computeTripKpis,
@@ -737,10 +738,9 @@ async function replaceDeliveries(
   const tripNo = tripRow.rows[0]?.trip_no ?? `TR-${tripId}`;
 
   for (const [index, d] of deliveries.entries()) {
-    const amount =
-      d.amount != null && d.amount > 0
-        ? d.amount
-        : Number((Number(d.weight ?? 0) * Number(d.rate ?? 0)).toFixed(2));
+    // Financial values are authoritative on the server. Never persist a
+    // browser-supplied amount that can be derived from weight and rate.
+    const amount = computeDeliveryAmount(Number(d.weight ?? 0), d.rate);
 
     const saleNo = await generateSaleNo(client, tripId, tripNo);
 
@@ -2113,10 +2113,9 @@ export const tripsService = {
         assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
         assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
 
-        const amount =
-          d.amount != null && Number(d.amount) > 0
-            ? Number(d.amount)
-            : Number((weight * Number(d.rate ?? 0)).toFixed(2));
+        // Ignore client-calculated totals; this prevents tampering and keeps
+        // retries/edits consistent with the persisted weight and rate.
+        const amount = computeDeliveryAmount(weight, d.rate);
         const autoCaptureTime = normalizeTripTimestamp(d.autoCaptureTime);
 
         let deliveryId: number;

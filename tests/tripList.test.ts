@@ -453,7 +453,7 @@ describe("Deleted trips stay deleted", () => {
   it("status PATCH cannot restore a deleted trip", async () => {
     const res = await fetch(`${baseUrl}/api/operations/trips/${softDeletedTrip.id}/status`, {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...app.authHeaders },
       body: JSON.stringify({ status: "Pending" }),
     });
     assert.equal(res.status, 422, "restoring a deleted trip must be rejected");
@@ -464,7 +464,7 @@ describe("Deleted trips stay deleted", () => {
       `${baseUrl}/api/operations/trips/${flagDeletedCompletedId}/status`,
       {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...app.authHeaders },
         body: JSON.stringify({ status: "Pending" }),
       }
     );
@@ -474,7 +474,7 @@ describe("Deleted trips stay deleted", () => {
   it("autosave cannot modify a deleted trip", async () => {
     const res = await fetch(`${baseUrl}/api/operations/trips/${softDeletedTrip.id}`, {
       method: "PUT",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...app.authHeaders },
       body: JSON.stringify({ status: "Draft" }),
     });
     assert.equal(res.status, 422, "autosave on a deleted trip must be rejected");

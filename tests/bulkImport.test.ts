@@ -487,7 +487,7 @@ describe("existing singular master CRUD regression", () => {
       const updatedRow = { ...s.makeValid(2), [s.noField]: created.body[s.noField] };
       const updatedRes = await fetch(`${baseUrl}${s.singularPath}/${id}`, {
         method: "PUT",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...app.authHeaders },
         body: JSON.stringify(updatedRow),
       });
       assert.equal(updatedRes.status, 200);
@@ -501,7 +501,7 @@ describe("existing singular master CRUD regression", () => {
       // historical/referential integrity rather than removing it. The row
       // count therefore stays 1, not 0; the delete is verified by re-reading
       // the row's status.
-      const deleted = await fetch(`${baseUrl}${s.singularPath}/${id}`, { method: "DELETE" });
+      const deleted = await fetch(`${baseUrl}${s.singularPath}/${id}`, { method: "DELETE", headers: app.authHeaders });
       assert.equal(deleted.status, 200);
       assert.equal(await countRows(s.table), 1, "soft-delete preserves the row");
       const statusCheck = await pool.query(
