@@ -124,6 +124,44 @@ export declare const staffService: {
         id: string;
         deleted: boolean;
     }>;
+    salaryMonthSummary(month: string): Promise<{
+        month: string;
+        employees: number;
+        pending: number;
+        submitted: number;
+        paid: number;
+        closed: boolean;
+    }>;
+    submitSalaryMonth(month: string, submittedBy: string): Promise<{
+        month: string;
+        submittedCount: number;
+        alreadySubmittedCount: number;
+        paidCount: number;
+        emailQueuedCount: number;
+        emailSentCount: number;
+        emailFailedCount: number;
+        emailSkippedCount: number;
+    }>;
+    bulkSalaryStatus(ids: string[], status: "Paid" | "Pending", input: {
+        paymentDate?: string;
+        paymentMode?: string;
+        paidBy: string;
+    }): Promise<{
+        updated: SalaryRecord[];
+        skipped: Array<{
+            id: string;
+            reason: string;
+        }>;
+    }>;
+    queuePayslipDelivery(channel: "email" | "whatsapp", ids: string[], payload: {
+        language: string;
+        subject?: string;
+        body: string;
+    }, queuedBy: string): Promise<{
+        sent: number;
+        failed: number;
+    }>;
+    getSalaryById(id: string): Promise<SalaryRecord>;
     /** Applicable active advances for a salary month, keyed by employee. Only
      *  advances active by the last day of the salary month with a positive
      *  monthly deduction are considered. Recovery is capped at remaining_balance

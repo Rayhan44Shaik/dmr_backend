@@ -13,7 +13,7 @@ export class AppError extends Error {
 }
 
 export function notFound(_req: Request, res: Response) {
-  res.status(404).json({ error: "Not found" });
+  res.status(404).json({ error: "Not found", message: "The requested resource was not found." });
 }
 
 export function errorHandler(

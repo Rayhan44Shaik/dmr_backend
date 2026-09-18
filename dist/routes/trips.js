@@ -141,6 +141,27 @@ tripsRouter.put("/:id/deliveries", asyncHandler(async (req, res) => {
     const trip = await tripsService.saveDeliveries(id, req.body);
     res.json(trip);
 }));
+/** Step 5 per-row diesel bill submit (idempotent on clientKey / rowIndex). */
+tripsRouter.post("/:id/diesel", asyncHandler(async (req, res) => {
+    const id = positiveId(req.params.id);
+    await requireTripAccess(res, id, "trip.edit");
+    const trip = await tripsService.upsertDieselEntry(id, req.body ?? {});
+    res.status(201).json(trip);
+}));
+tripsRouter.patch("/:id/diesel/:entryId", asyncHandler(async (req, res) => {
+    const id = positiveId(req.params.id);
+    const entryId = positiveId(req.params.entryId, "Diesel entry id");
+    await requireTripAccess(res, id, "trip.edit");
+    const trip = await tripsService.updateDieselEntry(id, entryId, req.body ?? {});
+    res.json(trip);
+}));
+tripsRouter.delete("/:id/diesel/:entryId", asyncHandler(async (req, res) => {
+    const id = positiveId(req.params.id);
+    const entryId = positiveId(req.params.entryId, "Diesel entry id");
+    await requireTripAccess(res, id, "trip.edit");
+    const trip = await tripsService.deleteDieselEntry(id, entryId);
+    res.json(trip);
+}));
 tripsRouter.delete("/:id", asyncHandler(async (req, res) => {
     const id = positiveId(req.params.id);
     await requireTripAccess(res, id, "trip.delete");

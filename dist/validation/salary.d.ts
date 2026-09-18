@@ -53,8 +53,8 @@ export declare const salaryCreateSchema: z.ZodObject<{
     latePenalty: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
     otherDeductions: z.ZodOptional<z.ZodEffects<z.ZodNumber, number, number>>;
 }, "strip", z.ZodTypeAny, {
-    month: string;
     employeeId: number;
+    month: string;
     basicSalary?: number | undefined;
     overtime?: number | undefined;
     incentives?: number | undefined;
@@ -190,5 +190,54 @@ export declare const salaryListQuerySchema: z.ZodObject<{
 }, {
     month?: unknown;
     department?: unknown;
+}>;
+export declare const salaryMonthSchema: z.ZodObject<{
+    month: z.ZodEffects<z.ZodEffects<z.ZodString, string, string>, string, unknown>;
+}, "strip", z.ZodTypeAny, {
+    month: string;
+}, {
+    month?: unknown;
+}>;
+export declare const salaryBulkStatusSchema: z.ZodEffects<z.ZodObject<{
+    ids: z.ZodArray<z.ZodString, "many">;
+    status: z.ZodEnum<["Paid", "Pending"]>;
+    paymentDate: z.ZodOptional<z.ZodEffects<z.ZodEffects<z.ZodString, string, string>, string, unknown>>;
+    paymentMode: z.ZodOptional<z.ZodEnum<["Cash", "Bank Transfer", "UPI", "NEFT", "RTGS", "IMPS", "Cheque"]>>;
+}, "strip", z.ZodTypeAny, {
+    status: "Pending" | "Paid";
+    ids: string[];
+    paymentMode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
+    paymentDate?: string | undefined;
+}, {
+    status: "Pending" | "Paid";
+    ids: string[];
+    paymentMode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
+    paymentDate?: unknown;
+}>, {
+    status: "Pending" | "Paid";
+    ids: string[];
+    paymentMode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
+    paymentDate?: string | undefined;
+}, {
+    status: "Pending" | "Paid";
+    ids: string[];
+    paymentMode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
+    paymentDate?: unknown;
+}>;
+export declare const salaryDeliverySchema: z.ZodObject<{
+    ids: z.ZodArray<z.ZodString, "many">;
+    language: z.ZodDefault<z.ZodOptional<z.ZodEnum<["en", "te"]>>>;
+    subject: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
+    body: z.ZodEffects<z.ZodString, string, unknown>;
+}, "strip", z.ZodTypeAny, {
+    ids: string[];
+    language: "en" | "te";
+    body: string;
+    subject?: string | undefined;
+}, {
+    ids: string[];
+    language?: "en" | "te" | undefined;
+    subject?: unknown;
+    body?: unknown;
 }>;
 export { parseBody };

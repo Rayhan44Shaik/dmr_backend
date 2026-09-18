@@ -12,14 +12,30 @@ const crewNames = z.array(z.string().trim().min(1).max(120)).min(1).max(50)
     message: "Crew members must not be duplicated",
 });
 const dateOnlySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must use YYYY-MM-DD format");
+/**
+ * Rows that count toward Step 4 submit validation.
+ * Pending `[ORDER]` assignment plan stubs (Shops N) are reference-only and
+ * must never fail submit for missing bird type / zero birds.
+ */
+function isCountedDeliveryRow(d) {
+    if (d.autoCaptureTime || d.deliveredAt || d.deliveryTime)
+        return true;
+    const boxes = Array.isArray(d.selectedBoxIds) ? d.selectedBoxIds.length : 0;
+    if (boxes > 0)
+        return true;
+    const remarks = String(d.remarks ?? "").trim();
+    if (remarks.startsWith("[ORDER]"))
+        return false;
+    return Number(d.birds) > 0 || Number(d.weight) > 0;
+}
 // Used for autosave (very permissive)
 const deliverySchema = z.object({
     id: z.coerce.number().int().optional(),
     serialNo: z.coerce.number().int().nullable().optional(),
     boxNo: z.coerce.number().int().nullable().optional(),
-    shopId: idSchema.nullable().optional(),
+    shopId: z.coerce.number().int().nonnegative().nullable().optional(),
     shopName: shortText.optional(),
-    birdTypeId: idSchema.nullable().optional(),
+    birdTypeId: z.coerce.number().int().nonnegative().nullable().optional(),
     birdType: shortText.optional(),
     birds: z.coerce.number().int().nonnegative("Bird count cannot be negative").max(1_000_000).optional(),
     weight: z.coerce.number().nonnegative("Weight cannot be negative").max(10_000_000).optional(),
@@ -149,19 +165,48 @@ const stepValidators = {
     }),
     deliveries: z
         .object({
-        deliveries: z.array(deliverySchema.extend({
-            // FIXED: Moved required_error inside z.coerce.number()
-            shopId: z.coerce.number({ required_error: "Shop is required for a delivery" }).int().positive(),
-            birdTypeId: z.coerce.number({ required_error: "Bird type is required for a delivery" }).int().positive(),
-        })).min(1, "At least one delivery is required"),
+        // Permissive element schema: pending `[ORDER]` plan stubs may lack
+        // birdTypeId / delivered birds. Counted rows are enforced in superRefine.
+        deliveries: z.array(deliverySchema),
     })
         .passthrough()
-        .refine((data) => Array.isArray(data.deliveries) &&
-        data.deliveries.every((d) => Number(d.birds) > 0 &&
-            Number(d.weight) > 0 &&
-            Number(d.mortality) >= 0), {
-        message: "Every shop delivery must have delivered birds and delivered weight greater than zero before submitting.",
-        path: ["deliveries"],
+        .superRefine((data, ctx) => {
+        const rows = Array.isArray(data.deliveries) ? data.deliveries : [];
+        const counted = rows.filter((d) => isCountedDeliveryRow(d));
+        if (counted.length === 0) {
+            ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: "At least one delivery is required",
+                path: ["deliveries"],
+            });
+            return;
+        }
+        for (let i = 0; i < rows.length; i++) {
+            const d = rows[i];
+            if (!isCountedDeliveryRow(d))
+                continue;
+            if (!(Number(d.shopId) > 0)) {
+                ctx.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: "Shop is required for a delivery",
+                    path: ["deliveries", i, "shopId"],
+                });
+            }
+            if (!(Number(d.birdTypeId) > 0)) {
+                ctx.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: "Bird type is required for a delivery",
+                    path: ["deliveries", i, "birdTypeId"],
+                });
+            }
+            if (!(Number(d.birds) > 0) || !(Number(d.weight) > 0) || !(Number(d.mortality) >= 0)) {
+                ctx.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: "Every shop delivery must have delivered birds and delivered weight greater than zero before submitting.",
+                    path: ["deliveries", i],
+                });
+            }
+        }
     }),
     expenses: z
         .object({

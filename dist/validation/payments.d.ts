@@ -125,23 +125,23 @@ export declare const paymentListQuerySchema: z.ZodObject<{
     limit: z.ZodEffects<z.ZodOptional<z.ZodNumber>, number | undefined, unknown>;
     includeDeleted: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
 }, "strip", z.ZodTypeAny, {
+    search?: string | undefined;
+    mode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
     status?: "Draft" | "Approved" | "Cancelled" | "Paid" | undefined;
     fromDate?: string | undefined;
     toDate?: string | undefined;
     page?: number | undefined;
-    search?: string | undefined;
     limit?: number | undefined;
-    mode?: "Cash" | "Bank Transfer" | "UPI" | "NEFT" | "RTGS" | "IMPS" | "Cheque" | undefined;
     includeDeleted?: string | undefined;
     paymentType?: "Farmer Payment" | "Fuel Payment" | "Vehicle Maintenance" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense" | undefined;
 }, {
+    search?: unknown;
+    mode?: unknown;
     status?: unknown;
     fromDate?: unknown;
     toDate?: unknown;
     page?: unknown;
-    search?: unknown;
     limit?: unknown;
-    mode?: unknown;
     includeDeleted?: unknown;
     paymentType?: unknown;
 }>;

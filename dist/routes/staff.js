@@ -3,7 +3,8 @@ import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { staffService } from "../services/staffService.js";
 import { dutyPlannerService } from "../services/dutyPlannerService.js";
 import { staffPerformanceService } from "../services/staffPerformanceService.js";
-import { parseBody, salaryGenerateSchema, salaryListQuerySchema, salaryStatusPatchSchema, salarySubmitSchema, } from "../validation/salary.js";
+import { parseBody, salaryGenerateSchema, salaryListQuerySchema, salaryStatusPatchSchema, salarySubmitSchema, salaryMonthSchema, salaryBulkStatusSchema, salaryDeliverySchema, } from "../validation/salary.js";
+import { textPdf } from "../utils/simplePdf.js";
 import { leaveCreateSchema, leaveListQuerySchema, leaveReportQuerySchema, leaveStatusSchema, } from "../validation/leave.js";
 import { staffBoundary } from "../middleware/staffBoundary.js";
 import { authUser } from "../middleware/auth.js";
@@ -70,6 +71,40 @@ staffRouter.get("/salaries", asyncHandler(async (req, res) => {
 staffRouter.post("/salaries/generate", asyncHandler(async (req, res) => {
     const body = parseBody(salaryGenerateSchema, req.body);
     res.json(await staffService.generateForMonth(body.month, body.department));
+}));
+staffRouter.get("/salaries/month-summary", asyncHandler(async (req, res) => {
+    const { month } = parseBody(salaryMonthSchema, req.query);
+    res.json(await staffService.salaryMonthSummary(month));
+}));
+staffRouter.post("/salaries/submit-month", asyncHandler(async (req, res) => {
+    const { month } = parseBody(salaryMonthSchema, req.body);
+    res.json(await staffService.submitSalaryMonth(month, authUser(res).displayName));
+}));
+staffRouter.post("/salaries/bulk-status", asyncHandler(async (req, res) => {
+    const body = parseBody(salaryBulkStatusSchema, req.body);
+    res.json(await staffService.bulkSalaryStatus(body.ids, body.status, { paymentDate: body.paymentDate, paymentMode: body.paymentMode, paidBy: authUser(res).displayName }));
+}));
+for (const channel of ["email", "whatsapp"]) {
+    staffRouter.post(`/salaries/${channel}`, asyncHandler(async (req, res) => {
+        const body = parseBody(salaryDeliverySchema, req.body);
+        res.status(202).json(await staffService.queuePayslipDelivery(channel, body.ids, body, authUser(res).displayName));
+    }));
+}
+staffRouter.get("/salaries/:id/payslip.pdf", asyncHandler(async (req, res) => {
+    const salary = await staffService.getSalaryById(req.params.id);
+    const pdf = textPdf([
+        "DMR POULTRIES - SALARY PAYSLIP", `Month: ${salary.month}`, `Employee: ${salary.employeeName}`,
+        `Department: ${salary.department}`, `Basic Salary: INR ${salary.basicSalary.toFixed(2)}`,
+        `Overtime: INR ${salary.overtime.toFixed(2)}`, `Incentives: INR ${salary.incentives.toFixed(2)}`,
+        `Total Gross: INR ${salary.totalGross.toFixed(2)}`, `Total Deductions: INR ${salary.totalDeductions.toFixed(2)}`,
+        `NET SALARY: INR ${salary.netSalary.toFixed(2)}`, `Status: ${salary.status}`,
+        salary.paymentRef ? `Payment Reference: ${salary.paymentRef}` : "",
+    ].filter(Boolean));
+    const safeName = salary.employeeName.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-|-$/g, "") || "employee";
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="DMR-Poultries-Payslip-${safeName}-${salary.month}.pdf"`);
+    res.setHeader("Content-Length", String(pdf.length));
+    res.send(pdf);
 }));
 staffRouter.post("/salaries", asyncHandler(async (req, res) => {
     res.status(201).json(await staffService.createSalary(req.body));

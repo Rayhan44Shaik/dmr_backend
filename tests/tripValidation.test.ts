@@ -53,4 +53,40 @@ describe("Trip step boundary validation", () => {
     assert.throws(() => validateStepSubmit("deliveries", { deliveries: [{ ...delivery, shopId: 0 }] }));
     assert.throws(() => validateStepSubmit("deliveries", { deliveries: [{ ...delivery, birdTypeId: null }] }));
   });
+
+  it("ignores pending [ORDER] plan stubs when submitting Step 4", () => {
+    const captured = {
+      shopId: 1,
+      birdTypeId: 2,
+      birds: 10,
+      weight: 20,
+      mortality: 0,
+      amount: 100,
+      autoCaptureTime: "2026-09-18T10:00:00+05:30",
+    };
+    const planStub = {
+      shopId: 9,
+      birdTypeId: null,
+      birds: 12,
+      weight: 200,
+      mortality: 0,
+      remarks: "[ORDER] O:TR-20260918-002",
+    };
+    assert.doesNotThrow(() =>
+      validateStepSubmit("deliveries", { deliveries: [captured, planStub] })
+    );
+    assert.throws(() => validateStepSubmit("deliveries", { deliveries: [planStub] }));
+  });
+
+  it("allows Step 5 expenses submit without client endTime (server stamps it)", () => {
+    assert.doesNotThrow(() =>
+      validateStepSubmit("expenses", {
+        endMeter: 204817,
+        closingMeter: 204817,
+        destinationTolls: 1,
+        mode: "submit",
+      })
+    );
+    assert.throws(() => validateStepSubmit("expenses", { destinationTolls: 1 }));
+  });
 });

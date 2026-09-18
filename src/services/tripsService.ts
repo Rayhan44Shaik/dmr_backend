@@ -69,6 +69,8 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     startTime: isoOrNull(row.start_time),
     vehicleId: numOrNull(row.vehicle_id),
     vehicleNo: row.vehicle_no == null ? null : str(row.vehicle_no),
+    vehicleBoxCapacity:
+      numOrNull(row.vehicle_box_capacity) ?? numOrNull(row.no_of_boxes) ?? null,
     driverId: numOrNull(row.driver_id),
     driverName: row.driver_name == null ? null : str(row.driver_name),
     supervisorId: numOrNull(row.supervisor_id),
@@ -198,6 +200,19 @@ function normalizeTripTimestamp(value: unknown): string | null {
   // Already ISO-compatible.
   if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
     const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+
+  // Frontend display stamp: "18-09-2026 19:12:05 IST" (dd-MM-yyyy HH:mm:ss IST).
+  const istMatch = raw.match(
+    /^(\d{1,2})-(\d{1,2})-(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*IST$/i
+  );
+  if (istMatch) {
+    const [, day, month, year, hour, minute, second = "0"] = istMatch;
+    const normalized =
+      `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}` +
+      `T${String(hour).padStart(2, "0")}:${minute}:${String(second).padStart(2, "0")}+05:30`;
+    const parsed = new Date(normalized);
     return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
   }
 
@@ -482,6 +497,7 @@ async function loadTripExtras(client: Client, tripId: number) {
   });
 
   const dieselEntries: DieselEntry[] = diesel.rows.map((r) => ({
+    id: num(r.id),
     rowIndex: num(r.row_index),
     litres: numOrNull(r.litres),
     rate: numOrNull(r.rate),
@@ -490,6 +506,13 @@ async function loadTripExtras(client: Client, tripId: number) {
     bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
     imageData: r.image_data == null ? null : str(r.image_data),
     imageName: r.image_name == null ? null : str(r.image_name),
+    clientKey: r.client_key == null ? null : str(r.client_key),
+    gpsLat: numOrNull(r.gps_lat),
+    gpsLon: numOrNull(r.gps_lon),
+    gpsAccuracy: numOrNull(r.gps_accuracy),
+    gpsCapturedAt: isoOrNull(r.gps_captured_at),
+    submitted: true,
+    submittedAt: isoOrNull(r.submitted_at),
   }));
 
   return { helpers, loaders, boxDetails, deliveries: mappedDeliveries, dieselEntries };
@@ -510,6 +533,18 @@ async function hydrateTrip(
 > {
   const base = mapTripBase(row);
   const extras = await loadTripExtras(client, base.id);
+
+  // Resolve box capacity from Vehicle Master when not already joined onto the row.
+  let vehicleBoxCapacity = base.vehicleBoxCapacity ?? null;
+  if ((vehicleBoxCapacity == null || vehicleBoxCapacity <= 0) && base.vehicleId) {
+    const veh = await client.query(`SELECT no_of_boxes FROM vehicles WHERE id = $1`, [
+      base.vehicleId,
+    ]);
+    if (veh.rowCount) {
+      vehicleBoxCapacity = numOrNull(veh.rows[0].no_of_boxes);
+    }
+  }
+
   let dcPhoto: {
     dcPhotoKey: string | null;
     dcPhotoMime: string | null;
@@ -528,7 +563,7 @@ async function hydrateTrip(
   if (options.includeDcPhoto) {
     dcPhoto = await loadDcPhoto(client, base.id, base.dcPhotoKey ?? null);
   }
-  return { ...base, ...extras, ...dcPhoto };
+  return { ...base, vehicleBoxCapacity, ...extras, ...dcPhoto };
 }
 
 async function generateTripNo(client: Client, tripDate: string): Promise<string> {
@@ -676,13 +711,54 @@ async function assertDeliveriesWithinCapacity(
     farm_load_weight: string | null;
     total_birds: number | null;
     dc_weight: string | null;
+    vehicle_id: number | null;
+    remarks: string | null;
   }>(
-    `SELECT farm_bird_count, farm_load_weight, total_birds, dc_weight
+    `SELECT farm_bird_count, farm_load_weight, total_birds, dc_weight, vehicle_id, remarks
        FROM trips WHERE id = $1 FOR UPDATE`,
     [tripId]
   );
   if (!tripRow.rowCount) return; // caller already guarantees the trip exists
   const row = tripRow.rows[0];
+  const isOrdersCollection =
+    row.vehicle_id == null && String(row.remarks ?? "").trim() === "[ORDER_COLLECTION]";
+
+  if (isOrdersCollection) {
+    const shopIds = new Set<number>();
+    for (const delivery of deliveries) {
+      const shopId = Number(delivery.shopId);
+      const boxes = Number(delivery.boxNo);
+      const birds = Number(delivery.birds ?? 0);
+      const weight = Number(delivery.weight ?? 0);
+      if (!Number.isSafeInteger(shopId) || shopId <= 0) {
+        throw new AppError(422, "Order collection shop id must be a positive integer.");
+      }
+      if (shopIds.has(shopId)) throw new AppError(409, "Duplicate shop in order collection.");
+      shopIds.add(shopId);
+      if (!Number.isSafeInteger(boxes) || boxes <= 0 || boxes > 9999) {
+        throw new AppError(422, "Order collection boxes must be a whole number from 1 to 9999.");
+      }
+      if (!Number.isSafeInteger(birds) || birds < 0 || birds > 9999) {
+        throw new AppError(422, "Order collection birds must be a whole number from 0 to 9999.");
+      }
+      if (!Number.isFinite(weight) || weight < 0 || weight > 999999 || Number(weight.toFixed(2)) !== weight) {
+        throw new AppError(422, "Order collection weight must be a non-negative number with at most 2 decimals.");
+      }
+      if (weight > 0 && birds === 0) {
+        throw new AppError(422, "Order collection birds are required when weight is supplied.");
+      }
+    }
+    if (shopIds.size > 0) {
+      const active = await client.query<{ id: number }>(
+        `SELECT id FROM shops WHERE id = ANY($1::int[]) AND status='Active'`,
+        [[...shopIds]],
+      );
+      if (active.rowCount !== shopIds.size) {
+        throw new AppError(422, "One or more selected shops are inactive or no longer available.");
+      }
+    }
+    return;
+  }
   const farmBirdCount = num(row.farm_bird_count);
   const farmLoadWeight = num(row.farm_load_weight);
   const capacityBirds = farmBirdCount > 0 ? farmBirdCount : num(row.total_birds);
@@ -806,10 +882,16 @@ async function replaceDiesel(
 ) {
   await client.query(`DELETE FROM trip_diesel_entries WHERE trip_id = $1`, [tripId]);
   for (const e of entries) {
+    const bunkGps =
+      e.bunkGps ??
+      (e.gpsLat != null && e.gpsLon != null
+        ? `${Number(e.gpsLat).toFixed(6)},${Number(e.gpsLon).toFixed(6)}`
+        : null);
     await client.query(
       `INSERT INTO trip_diesel_entries (
-         trip_id, row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+         trip_id, row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name,
+         client_key, gps_lat, gps_lon, gps_accuracy, gps_captured_at, submitted_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15::timestamptz, NOW()))`,
       [
         tripId,
         e.rowIndex,
@@ -817,9 +899,15 @@ async function replaceDiesel(
         e.rate ?? null,
         e.meter ?? null,
         e.bunkName ?? null,
-        e.bunkGps ?? null,
+        bunkGps,
         e.imageData ?? null,
         e.imageName ?? null,
+        e.clientKey ?? null,
+        e.gpsLat ?? null,
+        e.gpsLon ?? null,
+        e.gpsAccuracy ?? null,
+        e.gpsCapturedAt ?? null,
+        e.submittedAt ?? null,
       ]
     );
   }
@@ -855,18 +943,35 @@ function extractDieselFromBody(body: Record<string, unknown>): DieselEntry[] {
       imageName: body[`dieselImageName${rowIndex}`]
         ? str(body[`dieselImageName${rowIndex}`])
         : null,
+      clientKey: body[`dieselClientKey${rowIndex}`]
+        ? str(body[`dieselClientKey${rowIndex}`])
+        : null,
+      gpsLat: numOrNull(body[`dieselGpsLat${rowIndex}`]),
+      gpsLon: numOrNull(body[`dieselGpsLon${rowIndex}`]),
+      gpsAccuracy: numOrNull(body[`dieselGpsAccuracy${rowIndex}`]),
+      gpsCapturedAt: body[`dieselGpsCapturedAt${rowIndex}`]
+        ? str(body[`dieselGpsCapturedAt${rowIndex}`])
+        : null,
     }));
 }
 
 function flattenDiesel(entries: DieselEntry[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const e of entries) {
+    out[`dieselId${e.rowIndex}`] = e.id ?? null;
     out[`dieselLtr${e.rowIndex}`] = e.litres;
     out[`dieselRate${e.rowIndex}`] = e.rate;
     out[`dieselMeter${e.rowIndex}`] = e.meter;
     out[`dieselBunk${e.rowIndex}`] = e.bunkName;
     out[`dieselImage${e.rowIndex}`] = e.imageData;
     out[`dieselImageName${e.rowIndex}`] = e.imageName;
+    out[`dieselClientKey${e.rowIndex}`] = e.clientKey ?? null;
+    out[`dieselGpsLat${e.rowIndex}`] = e.gpsLat ?? null;
+    out[`dieselGpsLon${e.rowIndex}`] = e.gpsLon ?? null;
+    out[`dieselGpsAccuracy${e.rowIndex}`] = e.gpsAccuracy ?? null;
+    out[`dieselGpsCapturedAt${e.rowIndex}`] = e.gpsCapturedAt ?? null;
+    out[`dieselSubmitted${e.rowIndex}`] = e.submitted !== false;
+    out[`dieselSubmittedAt${e.rowIndex}`] = e.submittedAt ?? null;
   }
   return out;
 }
@@ -1232,9 +1337,11 @@ export const tripsService = {
         // Server-only numbering on create (see save()).
         const tripNo = await generateTripNo(client, tripDate);
 
+        const remarks = body.remarks == null ? null : str(body.remarks).trim() || null;
         const inserted = await client.query(
-          `INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,'Draft') RETURNING *`,
-          [tripNo, tripDate]
+          `INSERT INTO trips (trip_no, trip_date, status, remarks)
+           VALUES ($1,$2,'Draft',$3) RETURNING *`,
+          [tripNo, tripDate, remarks]
         );
         const trip = await hydrateTrip(client, inserted.rows[0]);
         const flags = {
@@ -2031,6 +2138,12 @@ export const tripsService = {
           ? [...new Set((d.selectedBoxIds as number[]).map(Number))]
           : [];
         const perBoxData = Array.isArray(d.perBoxData) ? (d.perBoxData as BoxDetail[]) : [];
+        const remarks = String(d.remarks ?? "").trim();
+        const isUncapturedOrderPlan =
+          remarks.startsWith("[ORDER]") &&
+          !d.autoCaptureTime &&
+          !(d as { deliveredAt?: string }).deliveredAt &&
+          !(d as { deliveryTime?: string }).deliveryTime;
 
         // Basic type/safety (Save Progress): non-negative whole birds,
         // non-negative weight. Never accept impossible negative values.
@@ -2064,6 +2177,11 @@ export const tripsService = {
           throw new AppError(422, "Shop is no longer available for new selection.");
         }
 
+        // Pending `[ORDER]` plan stubs are reference-only (may carry assigned
+        // boxes + planned birds/weight from Order Assignment). Skip
+        // delivery-vs-box capacity checks until Step 4 actually captures.
+        const enforceBoxCapacity = !isUncapturedOrderPlan;
+
         // Box availability: every selected box must be a Step 3 pickup box and
         // must not already be assigned to another (not-being-overwritten) shop.
         for (const boxNo of selectedBoxIds) {
@@ -2083,10 +2201,12 @@ export const tripsService = {
         // Shop-level bounds: delivery + mortality can never exceed what the
         // selected pickup boxes represent (a box may hold MORE weight than the
         // delivery — that is allowed; the reverse is not).
-        if (farmBirds > 0 && birds + mortality > farmBirds) {
+        // Allow 0.05 kg tolerance for 2-decimal rounding of weight + mortKg.
+        const WEIGHT_TOLERANCE_KG = 0.05;
+        if (enforceBoxCapacity && farmBirds > 0 && birds + mortality > farmBirds) {
           throw new AppError(422, `Delivered birds plus mortality cannot exceed available birds (${farmBirds}).`);
         }
-        if (farmWeight > 0 && weight + mortKg > farmWeight) {
+        if (enforceBoxCapacity && farmWeight > 0 && weight + mortKg > farmWeight + WEIGHT_TOLERANCE_KG) {
           throw new AppError(
             422,
             `Delivery weight cannot exceed the selected box available weight (${farmWeight.toFixed(2)} kg).`
@@ -2094,7 +2214,7 @@ export const tripsService = {
         }
 
         // Weight-mode per-box breakdown must stay within each box's capacity.
-        if (mode === "weight") {
+        if (enforceBoxCapacity && mode === "weight") {
           for (const pb of perBoxData) {
             const box = boxesByNo.get(Number(pb.boxNo));
             if (!box) {
@@ -2112,12 +2232,13 @@ export const tripsService = {
           }
         }
 
-        // Cross-shop totals (live persisted rows + this payload).
-        totalBirds += birds + mortality;
-        totalWeight += weight + mortKg;
-        assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
-        assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
-
+        // Cross-shop totals — only real captures count against pickup capacity.
+        if (enforceBoxCapacity) {
+          totalBirds += birds + mortality;
+          totalWeight += weight + mortKg;
+          assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
+          assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
+        }
         // Ignore client-calculated totals; this prevents tampering and keeps
         // retries/edits consistent with the persisted weight and rate.
         const amount = computeDeliveryAmount(weight, d.rate);
@@ -2527,7 +2648,7 @@ export const tripsService = {
         AND id <> $1`;
 
     const vehicles = await query(
-      `SELECT id, vehicle_number
+      `SELECT id, vehicle_number, no_of_boxes
          FROM vehicles
         WHERE id NOT IN (
           SELECT vehicle_id FROM trips
@@ -2561,38 +2682,49 @@ export const tripsService = {
       [excludeId]
     );
 
-    // Helpers/loaders are persisted by NAME in trip_crew; exclude by name so the
-    // available list stays aligned with the name-based resource lock.
+    // Helpers/loaders are persisted by NAME in trip_crew. Return every master
+    // row so the Step 1 dropdown can still *show* occupied names (disabled),
+    // with lockedByTripNo explaining why they cannot be selected again.
     const helpers = await query(
-      `SELECT e.id, e.employee_name, e.department
+      `SELECT e.id, e.employee_name, e.department,
+              occ.trip_no AS locked_by_trip_no
          FROM employees e
-        WHERE e.department IN ('Helper', 'Labor')
-          AND e.employee_name NOT IN (
-            SELECT tc.employee_name FROM trip_crew tc
-            JOIN trips t ON t.id = tc.trip_id
-            WHERE t.status = 'Draft'
+         LEFT JOIN LATERAL (
+           SELECT t.trip_no
+             FROM trip_crew tc
+             JOIN trips t ON t.id = tc.trip_id
+            WHERE tc.employee_name = e.employee_name
+              AND tc.role = 'helper'
+              AND t.status = 'Draft'
               AND t.start_step_submitted = TRUE
               AND t.deleted = FALSE
               AND t.id <> $1
-              AND tc.role = 'helper'
-          )
+            ORDER BY t.id DESC
+            LIMIT 1
+         ) occ ON TRUE
+        WHERE e.department IN ('Helper', 'Labor')
         ORDER BY e.employee_name`,
       [excludeId]
     );
 
     const loaders = await query(
-      `SELECT e.id, e.employee_name, e.department
+      `SELECT e.id, e.employee_name, e.department,
+              occ.trip_no AS locked_by_trip_no
          FROM employees e
-        WHERE e.department = 'Loader'
-          AND e.employee_name NOT IN (
-            SELECT tc.employee_name FROM trip_crew tc
-            JOIN trips t ON t.id = tc.trip_id
-            WHERE t.status = 'Draft'
+         LEFT JOIN LATERAL (
+           SELECT t.trip_no
+             FROM trip_crew tc
+             JOIN trips t ON t.id = tc.trip_id
+            WHERE tc.employee_name = e.employee_name
+              AND tc.role = 'loader'
+              AND t.status = 'Draft'
               AND t.start_step_submitted = TRUE
               AND t.deleted = FALSE
               AND t.id <> $1
-              AND tc.role = 'loader'
-          )
+            ORDER BY t.id DESC
+            LIMIT 1
+         ) occ ON TRUE
+        WHERE e.department = 'Loader'
         ORDER BY e.employee_name`,
       [excludeId]
     );
@@ -2601,6 +2733,7 @@ export const tripsService = {
       vehicles: vehicles.rows.map((r) => ({
         id: num(r.id),
         vehicleNumber: str(r.vehicle_number),
+        noOfBoxes: num(r.no_of_boxes),
       })),
       drivers: drivers.rows.map((r) => ({
         id: num(r.id),
@@ -2616,12 +2749,224 @@ export const tripsService = {
         id: num(r.id),
         employeeName: str(r.employee_name),
         department: str(r.department),
+        lockedByTripNo: r.locked_by_trip_no == null ? null : str(r.locked_by_trip_no),
       })),
       loaders: loaders.rows.map((r) => ({
         id: num(r.id),
         employeeName: str(r.employee_name),
         department: str(r.department),
+        lockedByTripNo: r.locked_by_trip_no == null ? null : str(r.locked_by_trip_no),
       })),
     };
+  },
+
+  /**
+   * Upsert one Step 5 diesel bill (POST /trips/:id/diesel).
+   * Idempotent on (trip_id, client_key) when clientKey is provided.
+   */
+  async upsertDieselEntry(tripId: number, body: Record<string, unknown>) {
+    return withTransaction(async (client) => {
+      const existing = await client.query(`SELECT id, trip_date FROM trips WHERE id = $1 AND deleted = FALSE`, [
+        tripId,
+      ]);
+      if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
+
+      const litres = numOrNull(body.litres);
+      const rate = numOrNull(body.rate);
+      const meter = numOrNull(body.meter);
+      const gpsLat = numOrNull(body.gpsLat);
+      const gpsLon = numOrNull(body.gpsLon);
+      if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
+      if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
+      if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
+      if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
+        throw new AppError(422, "Diesel bunk GPS is required");
+      }
+      const imageData = body.imageData != null ? str(body.imageData) : "";
+      if (!imageData || imageData.length < 40) {
+        throw new AppError(422, "Diesel bill image is required");
+      }
+
+      let rowIndex = numOrNull(body.rowIndex);
+      const clientKey = body.clientKey != null && String(body.clientKey).trim()
+        ? str(body.clientKey).trim()
+        : null;
+
+      if (clientKey) {
+        const byKey = await client.query(
+          `SELECT id, row_index FROM trip_diesel_entries WHERE trip_id = $1 AND client_key = $2`,
+          [tripId, clientKey]
+        );
+        if (byKey.rowCount) {
+          rowIndex = num(byKey.rows[0].row_index);
+        }
+      }
+
+      if (rowIndex == null || rowIndex < 1) {
+        const maxRow = await client.query(
+          `SELECT COALESCE(MAX(row_index), 0) AS m FROM trip_diesel_entries WHERE trip_id = $1`,
+          [tripId]
+        );
+        rowIndex = num(maxRow.rows[0].m) + 1;
+      }
+
+      const bunkName = body.bunkName != null ? str(body.bunkName) : null;
+      const bunkGps = `${gpsLat.toFixed(6)},${gpsLon.toFixed(6)}`;
+      const gpsAccuracy = numOrNull(body.gpsAccuracy);
+      const gpsCapturedAt = body.gpsCapturedAt != null ? str(body.gpsCapturedAt) : null;
+      const imageName = body.imageName != null ? str(body.imageName) : null;
+
+      await client.query(
+        `INSERT INTO trip_diesel_entries (
+           trip_id, row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name,
+           client_key, gps_lat, gps_lon, gps_accuracy, gps_captured_at, submitted_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+         ON CONFLICT (trip_id, row_index) DO UPDATE SET
+           litres = EXCLUDED.litres,
+           rate = EXCLUDED.rate,
+           meter = EXCLUDED.meter,
+           bunk_name = EXCLUDED.bunk_name,
+           bunk_gps = EXCLUDED.bunk_gps,
+           image_data = EXCLUDED.image_data,
+           image_name = EXCLUDED.image_name,
+           client_key = COALESCE(EXCLUDED.client_key, trip_diesel_entries.client_key),
+           gps_lat = EXCLUDED.gps_lat,
+           gps_lon = EXCLUDED.gps_lon,
+           gps_accuracy = EXCLUDED.gps_accuracy,
+           gps_captured_at = EXCLUDED.gps_captured_at,
+           submitted_at = NOW()`,
+        [
+          tripId,
+          rowIndex,
+          litres,
+          rate,
+          meter,
+          bunkName,
+          bunkGps,
+          imageData,
+          imageName,
+          clientKey,
+          gpsLat,
+          gpsLon,
+          gpsAccuracy,
+          gpsCapturedAt,
+        ]
+      );
+
+      const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+      const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
+      return {
+        ...trip,
+        ...flattenDiesel(trip.dieselEntries ?? []),
+      };
+    });
+  },
+
+  async updateDieselEntry(tripId: number, entryId: number, body: Record<string, unknown>) {
+    return withTransaction(async (client) => {
+      const existing = await client.query(
+        `SELECT id, row_index FROM trip_diesel_entries WHERE id = $1 AND trip_id = $2`,
+        [entryId, tripId]
+      );
+      if (!existing.rowCount) throw new AppError(404, `Diesel entry ${entryId} not found`);
+
+      const litres = numOrNull(body.litres);
+      const rate = numOrNull(body.rate);
+      const meter = numOrNull(body.meter);
+      const gpsLat = numOrNull(body.gpsLat);
+      const gpsLon = numOrNull(body.gpsLon);
+      if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
+      if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
+      if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
+      if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
+        throw new AppError(422, "Diesel bunk GPS is required");
+      }
+      const imageData = body.imageData != null ? str(body.imageData) : "";
+      if (!imageData || imageData.length < 40) {
+        throw new AppError(422, "Diesel bill image is required");
+      }
+
+      const bunkName = body.bunkName != null ? str(body.bunkName) : null;
+      const bunkGps = `${gpsLat.toFixed(6)},${gpsLon.toFixed(6)}`;
+      const gpsAccuracy = numOrNull(body.gpsAccuracy);
+      const gpsCapturedAt = body.gpsCapturedAt != null ? str(body.gpsCapturedAt) : null;
+      const imageName = body.imageName != null ? str(body.imageName) : null;
+      const clientKey = body.clientKey != null && String(body.clientKey).trim()
+        ? str(body.clientKey).trim()
+        : null;
+
+      await client.query(
+        `UPDATE trip_diesel_entries SET
+           litres = $3,
+           rate = $4,
+           meter = $5,
+           bunk_name = $6,
+           bunk_gps = $7,
+           image_data = $8,
+           image_name = $9,
+           client_key = COALESCE($10, client_key),
+           gps_lat = $11,
+           gps_lon = $12,
+           gps_accuracy = $13,
+           gps_captured_at = $14,
+           submitted_at = NOW()
+         WHERE id = $1 AND trip_id = $2`,
+        [
+          entryId,
+          tripId,
+          litres,
+          rate,
+          meter,
+          bunkName,
+          bunkGps,
+          imageData,
+          imageName,
+          clientKey,
+          gpsLat,
+          gpsLon,
+          gpsAccuracy,
+          gpsCapturedAt,
+        ]
+      );
+
+      const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+      const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
+      return {
+        ...trip,
+        ...flattenDiesel(trip.dieselEntries ?? []),
+      };
+    });
+  },
+
+  async deleteDieselEntry(tripId: number, entryId: number) {
+    return withTransaction(async (client) => {
+      const existing = await client.query(
+        `SELECT id, row_index FROM trip_diesel_entries WHERE id = $1 AND trip_id = $2`,
+        [entryId, tripId]
+      );
+      if (!existing.rowCount) throw new AppError(404, `Diesel entry ${entryId} not found`);
+      const rowIndex = num(existing.rows[0].row_index);
+
+      await client.query(`DELETE FROM trip_diesel_entries WHERE id = $1 AND trip_id = $2`, [
+        entryId,
+        tripId,
+      ]);
+
+      // Drop matching Pending trip-synced fuel bill if present.
+      await client.query(
+        `DELETE FROM fuel_expenses
+          WHERE trip_id = $1 AND source_type = 'TRIP' AND status = 'Pending' AND deleted = FALSE
+            AND trip_fuel_entry_index = $2`,
+        [tripId, rowIndex]
+      );
+
+      const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
+      if (!tripRow.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
+      const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
+      return {
+        ...trip,
+        ...flattenDiesel(trip.dieselEntries ?? []),
+      };
+    });
   },
 };

@@ -36,8 +36,8 @@ function getFreePort(): Promise<number> {
   });
 }
 
-export async function startApp(env: Record<string, string>): Promise<TestApp> {
-  const port = await getFreePort();
+export async function startApp(env: Record<string, string>, requestedPort?: number): Promise<TestApp> {
+  const port = requestedPort ?? await getFreePort();
   const { pool } = await import("../../src/config/db.js");
   const { hashPassword } = await import("../../src/utils/passwordHash.js");
   const username = `test-owner-${port}`;
@@ -96,7 +96,7 @@ export async function startApp(env: Record<string, string>): Promise<TestApp> {
   }
 
   const login = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, password }) });
-  if (!login.ok) throw new Error(`test login failed: ${login.status}`);
+  if (!login.ok) throw new Error(`test login failed: ${login.status} ${await login.text()}`);
   const cookie = login.headers.get("set-cookie")?.split(";")[0];
   if (!cookie) throw new Error("test login did not return a session cookie");
   const authHeaders = { cookie };

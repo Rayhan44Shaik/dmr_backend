@@ -165,6 +165,7 @@ export interface ShopDelivery {
 }
 
 export interface DieselEntry {
+  id?: number;
   rowIndex: number;
   litres?: number | null;
   rate?: number | null;
@@ -173,6 +174,13 @@ export interface DieselEntry {
   bunkGps?: string | null;
   imageData?: string | null;
   imageName?: string | null;
+  clientKey?: string | null;
+  gpsLat?: number | null;
+  gpsLon?: number | null;
+  gpsAccuracy?: number | null;
+  gpsCapturedAt?: string | null;
+  submitted?: boolean;
+  submittedAt?: string | null;
 }
 
 export interface Trip {
@@ -184,6 +192,8 @@ export interface Trip {
   startTime: string | null;
   vehicleId: number | null;
   vehicleNo: string | null;
+  /** From Vehicle Master `no_of_boxes` — used by Pickup Step 3 capacity UI. */
+  vehicleBoxCapacity?: number | null;
   driverId: number | null;
   driverName: string | null;
   supervisorId: number | null;

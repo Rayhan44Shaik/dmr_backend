@@ -32,29 +32,29 @@ export declare const leaveCreateSchema: z.ZodEffects<z.ZodObject<{
     days: z.ZodOptional<z.ZodNumber>;
     reason: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
 }, "strip", z.ZodTypeAny, {
+    employeeId: number;
     type: "Casual" | "Sick" | "Emergency" | "Annual";
     fromDate: string;
     toDate: string;
-    employeeId: number;
     reason?: string | undefined;
     days?: number | undefined;
 }, {
-    type: "Casual" | "Sick" | "Emergency" | "Annual";
     employeeId: number;
+    type: "Casual" | "Sick" | "Emergency" | "Annual";
     fromDate?: unknown;
     toDate?: unknown;
     reason?: unknown;
     days?: number | undefined;
 }>, {
+    employeeId: number;
     type: "Casual" | "Sick" | "Emergency" | "Annual";
     fromDate: string;
     toDate: string;
-    employeeId: number;
     reason?: string | undefined;
     days?: number | undefined;
 }, {
-    type: "Casual" | "Sick" | "Emergency" | "Annual";
     employeeId: number;
+    type: "Casual" | "Sick" | "Emergency" | "Annual";
     fromDate?: unknown;
     toDate?: unknown;
     reason?: unknown;
@@ -106,24 +106,24 @@ export declare const leaveListQuerySchema: z.ZodObject<{
 }, "strip", z.ZodTypeAny, {
     page: number;
     limit: number;
+    search?: string | undefined;
+    employeeId?: number | undefined;
     status?: "Pending" | "Approved" | "Rejected" | "Cancelled" | "All" | undefined;
     month?: string | undefined;
     department?: string | undefined;
     fromDate?: string | undefined;
     toDate?: string | undefined;
-    search?: string | undefined;
-    employeeId?: number | undefined;
     leaveType?: "Casual" | "Sick" | "Emergency" | "Annual" | undefined;
 }, {
+    search?: unknown;
+    employeeId?: unknown;
     status?: unknown;
     month?: unknown;
     department?: unknown;
     fromDate?: unknown;
     toDate?: unknown;
     page?: unknown;
-    search?: unknown;
     limit?: unknown;
-    employeeId?: unknown;
     leaveType?: unknown;
 }>;
 export interface LeaveReportQuery {
@@ -137,11 +137,11 @@ export declare const leaveReportQuerySchema: z.ZodObject<{
     employeeId: z.ZodEffects<z.ZodOptional<z.ZodNumber>, number | undefined, unknown>;
 }, "strip", z.ZodTypeAny, {
     month: string;
-    department?: string | undefined;
     employeeId?: number | undefined;
+    department?: string | undefined;
 }, {
+    employeeId?: unknown;
     month?: unknown;
     department?: unknown;
-    employeeId?: unknown;
 }>;
 export { parseBody };

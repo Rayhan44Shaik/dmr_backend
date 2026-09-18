@@ -72,10 +72,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
+        autoCaptureTime?: string | null | undefined;
+        selectedBoxIds?: number[] | undefined;
         serialNo?: number | null | undefined;
         mortKg?: number | null | undefined;
         deliveryMode?: "box" | "weight" | undefined;
-        selectedBoxIds?: number[] | undefined;
         farmBirds?: number | null | undefined;
         farmWeight?: number | null | undefined;
         perBoxData?: {
@@ -83,7 +84,6 @@ export declare const tripAutosaveSchema: z.ZodObject<{
             weight?: number | undefined;
             birds?: number | undefined;
         }[] | undefined;
-        autoCaptureTime?: string | null | undefined;
     }, {
         id?: number | undefined;
         shopName?: string | undefined;
@@ -97,10 +97,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
+        autoCaptureTime?: string | null | undefined;
+        selectedBoxIds?: number[] | undefined;
         serialNo?: number | null | undefined;
         mortKg?: number | null | undefined;
         deliveryMode?: "box" | "weight" | undefined;
-        selectedBoxIds?: number[] | undefined;
         farmBirds?: number | null | undefined;
         farmWeight?: number | null | undefined;
         perBoxData?: {
@@ -108,7 +109,6 @@ export declare const tripAutosaveSchema: z.ZodObject<{
             weight?: number | undefined;
             birds?: number | undefined;
         }[] | undefined;
-        autoCaptureTime?: string | null | undefined;
     }>, "many">>;
     dieselEntries: z.ZodOptional<z.ZodArray<z.ZodObject<{
         rowIndex: z.ZodNumber;
@@ -210,10 +210,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
+        autoCaptureTime?: string | null | undefined;
+        selectedBoxIds?: number[] | undefined;
         serialNo?: number | null | undefined;
         mortKg?: number | null | undefined;
         deliveryMode?: "box" | "weight" | undefined;
-        selectedBoxIds?: number[] | undefined;
         farmBirds?: number | null | undefined;
         farmWeight?: number | null | undefined;
         perBoxData?: {
@@ -221,7 +222,6 @@ export declare const tripAutosaveSchema: z.ZodObject<{
             weight?: number | undefined;
             birds?: number | undefined;
         }[] | undefined;
-        autoCaptureTime?: string | null | undefined;
     }, {
         id?: number | undefined;
         shopName?: string | undefined;
@@ -235,10 +235,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
+        autoCaptureTime?: string | null | undefined;
+        selectedBoxIds?: number[] | undefined;
         serialNo?: number | null | undefined;
         mortKg?: number | null | undefined;
         deliveryMode?: "box" | "weight" | undefined;
-        selectedBoxIds?: number[] | undefined;
         farmBirds?: number | null | undefined;
         farmWeight?: number | null | undefined;
         perBoxData?: {
@@ -246,7 +247,6 @@ export declare const tripAutosaveSchema: z.ZodObject<{
             weight?: number | undefined;
             birds?: number | undefined;
         }[] | undefined;
-        autoCaptureTime?: string | null | undefined;
     }>, "many">>;
     dieselEntries: z.ZodOptional<z.ZodArray<z.ZodObject<{
         rowIndex: z.ZodNumber;
@@ -348,10 +348,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
+        autoCaptureTime?: string | null | undefined;
+        selectedBoxIds?: number[] | undefined;
         serialNo?: number | null | undefined;
         mortKg?: number | null | undefined;
         deliveryMode?: "box" | "weight" | undefined;
-        selectedBoxIds?: number[] | undefined;
         farmBirds?: number | null | undefined;
         farmWeight?: number | null | undefined;
         perBoxData?: {
@@ -359,7 +360,6 @@ export declare const tripAutosaveSchema: z.ZodObject<{
             weight?: number | undefined;
             birds?: number | undefined;
         }[] | undefined;
-        autoCaptureTime?: string | null | undefined;
     }, {
         id?: number | undefined;
         shopName?: string | undefined;
@@ -373,10 +373,11 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
+        autoCaptureTime?: string | null | undefined;
+        selectedBoxIds?: number[] | undefined;
         serialNo?: number | null | undefined;
         mortKg?: number | null | undefined;
         deliveryMode?: "box" | "weight" | undefined;
-        selectedBoxIds?: number[] | undefined;
         farmBirds?: number | null | undefined;
         farmWeight?: number | null | undefined;
         perBoxData?: {
@@ -384,7 +385,6 @@ export declare const tripAutosaveSchema: z.ZodObject<{
             weight?: number | undefined;
             birds?: number | undefined;
         }[] | undefined;
-        autoCaptureTime?: string | null | undefined;
     }>, "many">>;
     dieselEntries: z.ZodOptional<z.ZodArray<z.ZodObject<{
         rowIndex: z.ZodNumber;
@@ -487,10 +487,11 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
+        autoCaptureTime?: string | null | undefined;
+        selectedBoxIds?: number[] | undefined;
         serialNo?: number | null | undefined;
         mortKg?: number | null | undefined;
         deliveryMode?: "box" | "weight" | undefined;
-        selectedBoxIds?: number[] | undefined;
         farmBirds?: number | null | undefined;
         farmWeight?: number | null | undefined;
         perBoxData?: {
@@ -498,7 +499,6 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
             weight?: number | undefined;
             birds?: number | undefined;
         }[] | undefined;
-        autoCaptureTime?: string | null | undefined;
     }, {
         id?: number | undefined;
         shopName?: string | undefined;
@@ -512,10 +512,11 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
+        autoCaptureTime?: string | null | undefined;
+        selectedBoxIds?: number[] | undefined;
         serialNo?: number | null | undefined;
         mortKg?: number | null | undefined;
         deliveryMode?: "box" | "weight" | undefined;
-        selectedBoxIds?: number[] | undefined;
         farmBirds?: number | null | undefined;
         farmWeight?: number | null | undefined;
         perBoxData?: {
@@ -523,7 +524,6 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
             weight?: number | undefined;
             birds?: number | undefined;
         }[] | undefined;
-        autoCaptureTime?: string | null | undefined;
     }>, "many">>;
     dieselEntries: z.ZodOptional<z.ZodArray<z.ZodObject<{
         rowIndex: z.ZodNumber;
