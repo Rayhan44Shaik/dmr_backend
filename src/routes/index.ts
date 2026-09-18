@@ -7,11 +7,15 @@ import { operationsRouter } from "./operations.js";
 import { docsRouter } from "./docs.js";
 import { fleetRouter } from "./fleet.js";
 import { accountsRouter } from "./accounts.js";
+import { authRouter } from "./auth.js";
+import { requireAuth } from "../middleware/auth.js";
 
 export const apiRouter = Router();
 
 apiRouter.use("/health", healthRouter);
 apiRouter.use("/docs", docsRouter);
+apiRouter.use("/auth", authRouter);
+apiRouter.use(requireAuth);
 apiRouter.use("/masters", mastersRouter);
 apiRouter.use("/trips", tripsRouter);
 apiRouter.use("/staff", staffRouter);

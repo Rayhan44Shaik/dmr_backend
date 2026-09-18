@@ -31,10 +31,14 @@ export function isValidDateInput(value) {
     if (isMissing(value))
         return true;
     const s = String(value).trim();
-    if (/^\d{4}-\d{2}-\d{2}/.test(s))
-        return true;
-    const parsed = new Date(s);
-    return !Number.isNaN(parsed.getTime());
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!iso)
+        return false;
+    const [, year, month, day] = iso;
+    const parsed = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+    return parsed.getUTCFullYear() === Number(year)
+        && parsed.getUTCMonth() === Number(month) - 1
+        && parsed.getUTCDate() === Number(day);
 }
 export function aadharNumberOrNull(raw) {
     const value = str(raw.aadharNumber ?? raw.aadhar_number ?? "").replace(/\s/g, "");
@@ -142,7 +146,7 @@ export function validateVehicleFields(raw) {
     }
     if (!isMissing(totalEMIs)) {
         const count = Number(totalEMIs);
-        if (!Number.isFinite(count) || count <= 0) {
+        if (!Number.isInteger(count) || count <= 0 || count > 1200) {
             errors.push({ field: "totalEMIs", message: "Total EMIs must be greater than zero." });
         }
     }

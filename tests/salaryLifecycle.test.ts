@@ -390,7 +390,9 @@ describe("Salary lifecycle HTTP surface", () => {
     });
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.equal(res.body.status, "Submitted");
-    assert.equal(res.body.submittedBy, "http-tester");
+    // Audit identity is server-derived from the authenticated session; the
+    // client-supplied submittedBy value must never be trusted.
+    assert.equal(res.body.submittedBy, "Test Owner");
   });
 
   it("the GET week-status endpoint agrees with the service", async () => {

@@ -47,3 +47,27 @@ test("50 concurrent duplicate shop creates yield one success and safe conflicts"
   assert.equal(responses.filter((response) => response.status === 409).length, 49);
   assert.ok(responses.filter((response) => response.status === 409).every((response) => !JSON.stringify(response.body).match(/postgres|constraint|stack/i)));
 });
+
+test("authenticated non-owner cannot mutate Vehicle Master", async () => {
+  const { hashPassword } = await import("../src/utils/passwordHash.js");
+  const username = "vehicle-supervisor";
+  await pool.query(
+    `INSERT INTO application_users (username,display_name,password_hash,role)
+     VALUES ($1,'Vehicle Accountant',$2,'SENIOR_ACCOUNT')`,
+    [username, await hashPassword("Supervisor-test-password-123!")],
+  );
+  const login = await fetch(`${app.baseUrl}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username, password: "Supervisor-test-password-123!" }),
+  });
+  const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+  const response = await fetch(`${app.baseUrl}/api/masters/vehicles`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify(entities.find((entity) => entity.name === "vehicles")!.body(900)),
+  });
+  assert.equal(response.status, 403);
+  assert.match(JSON.stringify(await response.json()), /owner access/i);
+  assert.equal((await pool.query("SELECT COUNT(*)::int total FROM vehicles")).rows[0].total, 0);
+});

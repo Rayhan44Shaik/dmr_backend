@@ -107,22 +107,22 @@ export declare const leaveListQuerySchema: z.ZodObject<{
     page: number;
     limit: number;
     status?: "Pending" | "Approved" | "Rejected" | "Cancelled" | "All" | undefined;
+    month?: string | undefined;
     department?: string | undefined;
     fromDate?: string | undefined;
     toDate?: string | undefined;
     search?: string | undefined;
-    month?: string | undefined;
     employeeId?: number | undefined;
     leaveType?: "Casual" | "Sick" | "Emergency" | "Annual" | undefined;
 }, {
     status?: unknown;
+    month?: unknown;
     department?: unknown;
     fromDate?: unknown;
     toDate?: unknown;
     page?: unknown;
     search?: unknown;
     limit?: unknown;
-    month?: unknown;
     employeeId?: unknown;
     leaveType?: unknown;
 }>;
@@ -140,8 +140,8 @@ export declare const leaveReportQuerySchema: z.ZodObject<{
     department?: string | undefined;
     employeeId?: number | undefined;
 }, {
-    department?: unknown;
     month?: unknown;
+    department?: unknown;
     employeeId?: unknown;
 }>;
 export { parseBody };

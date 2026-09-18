@@ -40,6 +40,21 @@ test("vehicle validation enforces capacities, dates, and EMI bounds", () => {
   assert.equal(result.success, false);
 });
 
+test("vehicle validation rejects impossible calendar dates and fractional EMI terms", () => {
+  const base = {
+    vehicleNumber: "AP 01 AB 1234",
+    vehicleType: "Truck",
+    noOfBoxes: 50,
+    birdCapacity: 2000,
+    capacityKg: 5000,
+    engineNumber: "ENG-1",
+    chassisNumber: "CH-1",
+  };
+  assert.equal(vehicleSchema.safeParse({ ...base, purchaseDate: "2026-02-30" }).success, false);
+  assert.equal(vehicleSchema.safeParse({ ...base, totalEMIs: 12.5 }).success, false);
+  assert.equal(vehicleSchema.safeParse({ ...base, totalEMIs: 1201 }).success, false);
+});
+
 test("shop validation accepts the complete API contract including WhatsApp", () => {
   const result = shopSchema.safeParse({
     shopNumber: "S-10",

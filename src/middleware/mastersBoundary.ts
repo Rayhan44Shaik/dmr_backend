@@ -1,6 +1,7 @@
 import type { RequestHandler, ErrorRequestHandler, Request } from "express";
 import { AppError } from "./errorHandler.js";
 import { isPgError } from "../utils/pgErrors.js";
+import { authUser } from "./auth.js";
 
 export type MastersAction = "read" | "create" | "update" | "deactivate" | "bulk-import";
 export interface MastersAccess {
@@ -23,6 +24,13 @@ export const mastersBoundary: RequestHandler = (req, res, next) => {
   // Also available to the eventual application audit middleware. Actor remains absent
   // until authenticated identity exists; created_by/updated_by must never use a fake user.
   res.locals.mastersAccess = access;
+  // Master mutations change reference data used across operations and finance.
+  // They are owner-only unless an installation provides a stricter/custom
+  // server-side authorizer below. Read access remains available to authenticated
+  // operational roles because selectors depend on these registers.
+  if (action !== "read" && authUser(res).role !== "OWNER") {
+    throw new AppError(403, "Owner access is required to change master data");
+  }
   const authorize = req.app.locals.authorizeMasters as MastersAuthorizer | undefined;
   Promise.resolve()
     .then(() => authorize?.(req, access))

@@ -135,6 +135,7 @@ const UNIQUE_CHECK: Record<
   employee: { table: "employees", column: "employee_no", label: "Employee No", numeric: true },
   vehicle: { table: "vehicles", column: "vehicle_number", label: "Vehicle number" },
   farm: { table: "farms", column: "farm_name", label: "Farm" },
+  farmPhone: { table: "farms", column: "phone_number", label: "Farm phone number" },
   shop: { table: "shops", column: "shop_name", label: "Shop" },
   bank: { table: "banks", column: "bank_name", label: "Bank" },
   birdType: { table: "bird_types", column: "bird_type", label: "Bird type" },
@@ -470,6 +471,7 @@ export const mastersService = {
 
     if (body.id) {
       await assertUnique("farm", body.farmName, body.id);
+      await assertUnique("farmPhone", body.phoneNumber ?? "", body.id);
       const result = await query(
         `UPDATE farms SET
           farm_no=COALESCE($2,farm_no), farm_name=$3, owner_name=$4, supervisor_name=$5,
@@ -496,6 +498,7 @@ export const mastersService = {
       `SELECT next_master_number('farms') AS n`
     );
     await assertUnique("farm", body.farmName);
+    await assertUnique("farmPhone", body.phoneNumber ?? "");
     const result = await query(
       `INSERT INTO farms (
          farm_no, farm_name, owner_name, supervisor_name, phone_number,

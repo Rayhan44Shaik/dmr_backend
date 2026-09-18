@@ -1,4 +1,6 @@
 import type { Request, RequestHandler } from "express";
+import { authUser } from "./auth.js";
+import { AppError } from "./errorHandler.js";
 
 export type StaffAction = "read" | "create" | "update" | "delete" | "approve" | "reject" | "cancel" | "submit";
 export interface StaffAccess { resource: "duty-planner" | "leave" | "staff"; action: StaffAction; resourceId?: string }
@@ -19,6 +21,9 @@ export const staffBoundary: RequestHandler = (req, res, next) => {
     : req.method === "POST" ? "create" : "update";
   const access: StaffAccess = { resource, action, resourceId: parts.find((part) => /^[0-9a-f-]{36}$/i.test(part)) };
   res.locals.staffAccess = access;
+  if (action !== "read" && authUser(res).role !== "OWNER") {
+    throw new AppError(403, "Owner access is required to change staff, leave, duty, or payroll data");
+  }
   const authorize = req.app.locals.authorizeStaff as StaffAuthorizer | undefined;
   Promise.resolve()
     .then(() => authorize?.(req, access))
