@@ -2,6 +2,11 @@
 .env
 .env.*
 !.env.example
+.auth-local.credentials.json
+_auth_inspect.mjs
+_bootstrap_accounts.mjs
+_auth_e2e_check.mjs
+_auth_proxy_check.mjs
 
 # Dependencies
 node_modules/

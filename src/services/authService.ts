@@ -2,7 +2,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { isPgError } from "../utils/pgErrors.js";
-import { verifyPassword } from "../utils/passwordHash.js";
+import { verifyPassword, hashPassword } from "../utils/passwordHash.js";
+import { syncLocalCredentialsPassword } from "../utils/localCredentials.js";
 
 export type AppRole = "OWNER" | "SENIOR_ACCOUNT" | "SUPERVISOR";
 export type AuthUser = { id: number; username: string; displayName: string; role: AppRole; employeeId: number | null };
@@ -47,11 +48,30 @@ export const authService = {
       }
       const token = randomBytes(32).toString("base64url");
       const expiresAt = new Date(Date.now() + SESSION_MS);
+      // One active session per account: signing in ends every other session
+      // everywhere, so leftover / forgotten logins never lock the user out.
+      let previousSessionsEnded = 0;
       await withTransaction(async (client) => {
-        await client.query(`INSERT INTO application_sessions (id,user_id,token_hash,expires_at) VALUES ($1,$2,$3,$4)`, [randomUUID(), row.id, tokenHash(token), expiresAt]);
+        const revoked = await client.query(
+          `UPDATE application_sessions
+           SET revoked_at = COALESCE(revoked_at, NOW())
+           WHERE user_id = $1 AND revoked_at IS NULL
+           RETURNING id`,
+          [row.id],
+        );
+        previousSessionsEnded = revoked.rowCount ?? 0;
+        await client.query(
+          `INSERT INTO application_sessions (id,user_id,token_hash,expires_at) VALUES ($1,$2,$3,$4)`,
+          [randomUUID(), row.id, tokenHash(token), expiresAt],
+        );
         await client.query(`UPDATE application_users SET last_login_at=NOW() WHERE id=$1`, [row.id]);
       });
-      return { token, expiresAt: expiresAt.toISOString(), user: mapUser(row) };
+      return {
+        token,
+        expiresAt: expiresAt.toISOString(),
+        user: mapUser(row),
+        previousSessionsEnded,
+      };
     } catch (error) {
       rethrowAuthStorageError(error);
     }
@@ -70,6 +90,59 @@ export const authService = {
   async logout(token: string) {
     try {
       await query(`UPDATE application_sessions SET revoked_at=COALESCE(revoked_at,NOW()) WHERE token_hash=$1`, [tokenHash(token)]);
+    } catch (error) {
+      rethrowAuthStorageError(error);
+    }
+  },
+  async changePassword(userId: number, currentPassword: string, newPassword: string) {
+    try {
+      const found = await query(
+        `SELECT id, username, display_name, role, employee_id, password_hash
+         FROM application_users WHERE id=$1 AND active=TRUE`,
+        [userId],
+      );
+      const row = found.rows[0];
+      if (!row) throw new AppError(401, "Authentication required");
+      const matches = await verifyPassword(currentPassword, String(row.password_hash));
+      if (!matches) throw new AppError(401, "Current password is incorrect");
+      if (currentPassword === newPassword) {
+        throw new AppError(400, "New password must be different from the current password");
+      }
+      let passwordHash: string;
+      try {
+        passwordHash = await hashPassword(newPassword);
+      } catch {
+        throw new AppError(400, "Password must contain between 12 and 1024 characters");
+      }
+      await withTransaction(async (client) => {
+        const updated = await client.query(
+          `UPDATE application_users SET password_hash=$2, updated_at=NOW() WHERE id=$1
+           RETURNING id, password_hash`,
+          [userId, passwordHash],
+        );
+        if (!updated.rowCount) {
+          throw new AppError(500, "Password could not be updated");
+        }
+        // Confirm the NEW hash is what was stored (old password must fail).
+        const stored = String(updated.rows[0].password_hash);
+        const newOk = await verifyPassword(newPassword, stored);
+        const oldStillWorks = await verifyPassword(currentPassword, stored);
+        if (!newOk || oldStillWorks) {
+          throw new AppError(500, "Password update verification failed");
+        }
+        // Password change ends every session — caller must sign in again.
+        await client.query(
+          `UPDATE application_sessions SET revoked_at=COALESCE(revoked_at,NOW())
+           WHERE user_id=$1 AND revoked_at IS NULL`,
+          [userId],
+        );
+      });
+      // Keep the local operator credentials file in sync with the NEW password.
+      syncLocalCredentialsPassword(String(row.username), newPassword, {
+        role: String(row.role),
+        employeeId: row.employee_id == null ? null : Number(row.employee_id),
+        employeeName: String(row.display_name),
+      });
     } catch (error) {
       rethrowAuthStorageError(error);
     }

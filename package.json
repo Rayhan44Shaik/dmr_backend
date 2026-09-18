@@ -12,6 +12,7 @@
     "db:reset": "tsx src/scripts/migrate.ts --reset",
     "db:seed": "tsx src/scripts/seed.ts",
     "account:create": "tsx src/scripts/createAppUser.ts",
+    "account:password": "tsx src/scripts/changeAppUserPassword.ts",
     "e2e:db:setup": "node -r ./tests/helpers/osUserInfoShim.cjs --import tsx src/scripts/setupE2eDatabase.ts --reset",
     "seed:demo": "tsx src/scripts/seed-demo-data.ts",
     "fuel:reconcile": "tsx src/scripts/reconcileTripFuel.ts",

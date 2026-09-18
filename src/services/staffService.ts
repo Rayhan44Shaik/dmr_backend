@@ -1,4 +1,5 @@
 import { query, withTransaction } from "../config/db.js";
+import { createHash } from "node:crypto";
 import { AppError } from "../middleware/errorHandler.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import type {
@@ -927,17 +928,20 @@ const data = parseBody(salaryCreateSchema, body);
           "Correction window expired — paid salaries are permanently locked 7 calendar days after payment"
         );
       }
-      const updated = await query(
-        `UPDATE salary_records SET
-           status = 'Pending', payment_ref = NULL, payment_date = NULL, paid_at = NULL
-         WHERE id = $1 AND status = 'Paid' AND paid_at = $2::timestamptz
-         RETURNING *`,
-        [id, row.paid_at]
-      );
-      if (!updated.rowCount) {
-        throw new AppError(409, "Paid salary could not be reverted for correction (state changed unexpectedly)");
-      }
-      const records = await this.enrichAttendance([mapSalary(updated.rows[0])], [month]);
+      const corrected = await withTransaction(async (client) => {
+        const current = await client.query("SELECT * FROM salary_records WHERE id=$1 FOR UPDATE", [id]);
+        const locked = current.rows[0];
+        if (!locked || locked.status !== "Paid" || correctionWindowExpired(locked.paid_at == null ? null : String(locked.paid_at))) {
+          throw new AppError(409, "Paid salary could not be reverted for correction (state changed unexpectedly)");
+        }
+        await client.query("UPDATE payments SET status='Cancelled',updated_at=NOW() WHERE payment_no=$1 AND payment_type='Salary Payment' AND status='Paid'", [locked.payment_ref]);
+        const updated = await client.query(
+          `UPDATE salary_records SET status='Pending',payment_ref=NULL,payment_date=NULL,paid_at=NULL
+            WHERE id=$1 AND status='Paid' RETURNING *`, [id]
+        );
+        return mapSalary(updated.rows[0]);
+      });
+      const records = await this.enrichAttendance([corrected], [month]);
       return records[0];
     }
 
@@ -964,6 +968,91 @@ const data = parseBody(salaryCreateSchema, body);
       throw new AppError(409, "Salary record is not in a Pending state and cannot be deleted");
     }
     return { id, deleted: true };
+  },
+
+  async salaryMonthSummary(month: string) {
+    const result = await query(
+      `SELECT COUNT(*)::int employees,
+              COUNT(*) FILTER (WHERE status='Pending')::int pending,
+              COUNT(*) FILTER (WHERE status='Submitted')::int submitted,
+              COUNT(*) FILTER (WHERE status='Paid')::int paid
+         FROM salary_records WHERE month=$1`, [month]
+    );
+    const row = result.rows[0];
+    return { month, employees: num(row.employees), pending: num(row.pending), submitted: num(row.submitted), paid: num(row.paid), closed: await salaryMonthIsClosed(month) };
+  },
+
+  async submitSalaryMonth(month: string, submittedBy: string) {
+    return withTransaction(async (client) => {
+      const locked = await client.query("SELECT id,status FROM salary_records WHERE month=$1 ORDER BY id FOR UPDATE", [month]);
+      if (!locked.rowCount) throw new AppError(404, "No salary records exist for this month");
+      const paidCount = locked.rows.filter((row) => row.status === "Paid").length;
+      const alreadySubmittedCount = locked.rows.filter((row) => row.status === "Submitted").length;
+      const updated = await client.query(
+        `UPDATE salary_records SET status='Submitted', submitted_at=NOW(), submitted_by=$2
+          WHERE month=$1 AND status='Pending' RETURNING id`, [month, submittedBy]
+      );
+      return { month, submittedCount: updated.rowCount ?? 0, alreadySubmittedCount, paidCount, emailQueuedCount: 0, emailSentCount: 0, emailFailedCount: 0, emailSkippedCount: 0 };
+    });
+  },
+
+  async bulkSalaryStatus(ids: string[], status: "Paid" | "Pending", input: { paymentDate?: string; paymentMode?: string; paidBy: string }) {
+    return withTransaction(async (client) => {
+      const locked = await client.query("SELECT * FROM salary_records WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE", [ids]);
+      if (locked.rowCount !== ids.length) throw new AppError(404, "One or more salary records were not found");
+      const updated: SalaryRecord[] = [];
+      for (const row of locked.rows) {
+        if (await salaryMonthIsClosed(str(row.month))) throw new AppError(409, `Payroll month ${row.month} is closed`);
+        if (status === "Paid") {
+          if (!input.paymentDate || !input.paymentMode) throw new AppError(400, "paymentDate and paymentMode are required");
+          if (!["Pending", "Submitted"].includes(str(row.status)) || row.payment_ref != null) throw new AppError(409, `Salary ${row.id} cannot be paid from its current state`);
+          if (num(row.net_salary) <= 0) throw new AppError(422, `Salary ${row.id} has no positive net amount`);
+          const payment = await paymentsService.create({ paymentDate: input.paymentDate, paymentType: "Salary Payment", paidTo: str(row.employee_name), amount: num(row.net_salary), paymentMode: input.paymentMode, category: "Salary", status: "Paid", createdBy: input.paidBy }, client);
+          const result = await client.query(`UPDATE salary_records SET status='Paid',payment_ref=$2,payment_date=$3,paid_at=NOW() WHERE id=$1 RETURNING *`, [row.id, payment.paymentNo, input.paymentDate]);
+          updated.push(mapSalary(result.rows[0]));
+        } else if (row.status === "Submitted") {
+          const result = await client.query("UPDATE salary_records SET status='Pending',submitted_at=NULL,submitted_by=NULL WHERE id=$1 RETURNING *", [row.id]);
+          updated.push(mapSalary(result.rows[0]));
+        } else if (row.status === "Paid") {
+          if (correctionWindowExpired(row.paid_at == null ? null : String(row.paid_at))) throw new AppError(409, `Salary ${row.id} correction window expired`);
+          await client.query("UPDATE payments SET status='Cancelled',updated_at=NOW() WHERE payment_no=$1 AND payment_type='Salary Payment' AND status='Paid'", [row.payment_ref]);
+          const result = await client.query("UPDATE salary_records SET status='Pending',payment_ref=NULL,payment_date=NULL,paid_at=NULL WHERE id=$1 RETURNING *", [row.id]);
+          updated.push(mapSalary(result.rows[0]));
+        } else {
+          updated.push(mapSalary(row));
+        }
+      }
+      return { updated, skipped: [] as Array<{ id: string; reason: string }> };
+    });
+  },
+
+  async queuePayslipDelivery(channel: "email" | "whatsapp", ids: string[], payload: { language: string; subject?: string; body: string }, queuedBy: string) {
+    return withTransaction(async (client) => {
+      const rows = await client.query(
+        `SELECT s.id,s.status,e.email,e.phone_number FROM salary_records s JOIN employees e ON e.id=s.employee_id
+          WHERE s.id=ANY($1::uuid[]) ORDER BY s.id FOR UPDATE`, [ids]
+      );
+      if (rows.rowCount !== ids.length) throw new AppError(404, "One or more salary records were not found");
+      let sent = 0, failed = 0;
+      for (const row of rows.rows) {
+        const recipient = channel === "email" ? str(row.email).trim() : str(row.phone_number).trim();
+        if (!["Submitted", "Paid"].includes(str(row.status)) || !recipient) { failed++; continue; }
+        const hash = createHash("sha256").update(JSON.stringify({ channel, recipient, language: payload.language, subject: payload.subject ?? "", body: payload.body })).digest("hex");
+        const inserted = await client.query(
+          `INSERT INTO salary_payslip_deliveries(salary_id,channel,recipient,language,subject,message_body,payload_hash,queued_by)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(salary_id,channel,payload_hash) DO NOTHING RETURNING id`,
+          [row.id, channel, recipient, payload.language, payload.subject ?? null, payload.body, hash, queuedBy]
+        );
+        if (inserted.rowCount) sent++; else sent++; // idempotent retry counts the already queued request as accepted
+      }
+      return { sent, failed };
+    });
+  },
+
+  async getSalaryById(id: string) {
+    const result = await query("SELECT * FROM salary_records WHERE id=$1", [id]);
+    if (!result.rowCount) throw new AppError(404, "Salary record not found");
+    return mapSalary(result.rows[0]);
   },
 
   /** Applicable active advances for a salary month, keyed by employee. Only

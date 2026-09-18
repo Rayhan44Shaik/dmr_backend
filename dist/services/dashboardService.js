@@ -3,15 +3,29 @@ import { query } from "../config/db.js";
  * Dashboard KPIs from existing tables only:
  * trips, trip_deliveries, fuel_expenses, trip_diesel_entries
  * (vehicles/farms/shops available via FKs on those rows)
+ *
+ * fromDate/toDate (optional, inclusive) scope totals derived from completed
+ * trips. todays/weekly/monthly stay relative to asOf (else toDate, else today).
  */
 export const dashboardService = {
-    async getSummary(asOf) {
-        const day = asOf ?? new Date().toISOString().slice(0, 10);
+    async getSummary(params = {}) {
+        // Back-compat: older callers passed a single asOf string.
+        const opts = typeof params === "string" ? { asOf: params } : params ?? {};
+        const day = opts.asOf ?? opts.toDate ?? new Date().toISOString().slice(0, 10);
+        const fromDate = opts.fromDate ?? null;
+        const toDate = opts.toDate ?? null;
         const result = await query(`WITH completed_trips AS (
          SELECT *
          FROM trips t
          WHERE t.status = 'Completed'
            AND COALESCE(t.deleted, FALSE) = FALSE
+       ),
+       ranged_trips AS (
+         -- Inclusive fromDate/toDate window for totals; unbound when both null.
+         SELECT ct.*
+         FROM completed_trips ct
+         WHERE ($2::date IS NULL OR ct.trip_date >= $2::date)
+           AND ($3::date IS NULL OR ct.trip_date <= $3::date)
        ),
        delivery_totals AS (
          -- Authoritative "is this trip's rate locked" signal is
@@ -25,13 +39,14 @@ export const dashboardService = {
              AS pending_collections,
            COALESCE(SUM(d.weight), 0) AS delivery_weight
          FROM trip_deliveries d
-         INNER JOIN completed_trips ct ON ct.id = d.trip_id
-         LEFT JOIN rate_entry re ON re.trip_id = ct.id
+         INNER JOIN ranged_trips rt ON rt.id = d.trip_id
+         LEFT JOIN rate_entry re ON re.trip_id = rt.id
        ),
        trip_kpis AS (
          SELECT
-           COUNT(*)::text AS total_trips,
-           COALESCE(SUM(COALESCE(ct.total_weight, 0)), 0) AS weight_sum,
+           (SELECT COUNT(*)::text FROM ranged_trips) AS total_trips,
+           (SELECT COALESCE(SUM(COALESCE(rt.total_weight, 0)), 0) FROM ranged_trips rt)
+             AS weight_sum,
            COUNT(*) FILTER (WHERE ct.trip_date = $1::date)::text AS todays_trips,
            COUNT(*) FILTER (
              WHERE ct.trip_date >= ($1::date - INTERVAL '6 days')
@@ -46,13 +61,25 @@ export const dashboardService = {
          SELECT COALESCE(SUM(f.amount), 0) AS amount
          FROM fuel_expenses f
          WHERE f.status = 'Approved'
+           AND (
+             -- No range: preserve all-time approved bills (prior behaviour).
+             ($2::date IS NULL AND $3::date IS NULL)
+             OR EXISTS (
+               SELECT 1 FROM ranged_trips rt WHERE rt.id = f.trip_id
+             )
+             OR (
+               f.trip_id IS NULL
+               AND ($2::date IS NULL OR f.expense_date >= $2::date)
+               AND ($3::date IS NULL OR f.expense_date <= $3::date)
+             )
+           )
        ),
        fuel_from_diesel AS (
          SELECT COALESCE(SUM(COALESCE(d.litres, 0) * COALESCE(d.rate, 0)), 0) AS amount
          FROM trip_diesel_entries d
-         INNER JOIN completed_trips ct ON ct.id = d.trip_id
+         INNER JOIN ranged_trips rt ON rt.id = d.trip_id
          WHERE NOT EXISTS (
-           SELECT 1 FROM fuel_expenses f WHERE f.trip_id = ct.id AND f.status = 'Approved'
+           SELECT 1 FROM fuel_expenses f WHERE f.trip_id = rt.id AND f.status = 'Approved'
          )
        )
        SELECT
@@ -68,7 +95,7 @@ export const dashboardService = {
        FROM trip_kpis tk
        CROSS JOIN delivery_totals dt
        CROSS JOIN fuel_from_bills fb
-       CROSS JOIN fuel_from_diesel fd`, [day]);
+       CROSS JOIN fuel_from_diesel fd`, [day, fromDate, toDate]);
         const row = result.rows[0] ?? {
             total_trips: "0",
             total_weight: "0",

@@ -284,6 +284,8 @@ describe("Salary lifecycle — Mark-Unpaid correction window", () => {
     assert.equal(db.rows[0].status, "Pending");
     assert.equal(db.rows[0].payment_ref, null);
     assert.equal(db.rows[0].paid_at, null);
+    const cancelled = await pool.query("SELECT status FROM payments WHERE paid_to=$1 AND payment_type='Salary Payment' ORDER BY id DESC LIMIT 1", [empB.employeeName]);
+    assert.equal(cancelled.rows[0].status, "Cancelled");
 
     // And it can be paid again with a fresh reference.
     const repaid = await staffService.paySalary(paidId, {
@@ -398,5 +400,47 @@ describe("Salary lifecycle HTTP surface", () => {
   it("the GET week-status endpoint agrees with the service", async () => {
     const res = await getJson(baseUrl, `/api/staff/salaries/${empA.id}?month=2026-03`);
     assert.equal(res.status, 200);
+  });
+
+  it("submits and summarizes a whole month transactionally", async () => {
+    await staffService.createSalary({ employeeId: empA.id, month: "2026-02", basicSalary: 12000 });
+    await staffService.createSalary({ employeeId: empB.id, month: "2026-02", basicSalary: 12500 });
+    const submitted = await postJson(baseUrl, "/api/staff/salaries/submit-month", { month: "2026-02", submittedBy: "spoofed" });
+    assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
+    assert.equal(submitted.body.submittedCount, 2);
+    const summary = await getJson(baseUrl, "/api/staff/salaries/month-summary?month=2026-02");
+    assert.equal(summary.status, 200, JSON.stringify(summary.body));
+    assert.deepEqual({ employees: summary.body.employees, pending: summary.body.pending, submitted: summary.body.submitted, paid: summary.body.paid }, { employees: 2, pending: 0, submitted: 2, paid: 0 });
+  });
+
+  it("bulk-pays all selected records atomically and creates unique Accounts payments", async () => {
+    const a = await staffService.createSalary({ employeeId: empA.id, month: "2026-01", basicSalary: 11000 });
+    const b = await staffService.createSalary({ employeeId: empB.id, month: "2026-01", basicSalary: 11500 });
+    const result = await postJson(baseUrl, "/api/staff/salaries/bulk-status", { ids: [a.id, b.id], status: "Paid", paymentDate: "2026-01-31", paymentMode: "Bank Transfer", paidBy: "spoofed" });
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.equal(result.body.updated.length, 2);
+    assert.ok(result.body.updated.every((row: any) => row.status === "Paid" && row.paymentRef));
+    assert.equal(new Set(result.body.updated.map((row: any) => row.paymentRef)).size, 2);
+    const payments = await pool.query("SELECT created_by FROM payments WHERE payment_no=ANY($1::text[])", [result.body.updated.map((row: any) => row.paymentRef)]);
+    assert.equal(payments.rowCount, 2);
+    assert.ok(payments.rows.every((row) => row.created_by === "Test Owner"));
+  });
+
+  it("queues payslip email/WhatsApp idempotently and serves a valid canonical PDF", async () => {
+    await pool.query("UPDATE employees SET email='salary@example.test',phone_number='9999999999' WHERE id=$1", [empA.id]);
+    const rec = await staffService.createSalary({ employeeId: empA.id, month: "2025-12", basicSalary: 10000 });
+    await staffService.submitSalary(rec.id, "Test Owner");
+    const email = await postJson(baseUrl, "/api/staff/salaries/email", { ids: [rec.id], language: "en", subject: "Payslip", body: "Attached payslip" });
+    assert.equal(email.status, 202, JSON.stringify(email.body));
+    assert.deepEqual(email.body, { sent: 1, failed: 0 });
+    const retry = await postJson(baseUrl, "/api/staff/salaries/email", { ids: [rec.id], language: "en", subject: "Payslip", body: "Attached payslip" });
+    assert.equal(retry.status, 202);
+    assert.equal((await pool.query("SELECT COUNT(*)::int count FROM salary_payslip_deliveries WHERE salary_id=$1 AND channel='email'", [rec.id])).rows[0].count, 1);
+    const pdf = await fetch(`${baseUrl}/api/staff/salaries/${rec.id}/payslip.pdf`, { headers: app.authHeaders });
+    assert.equal(pdf.status, 200);
+    assert.equal(pdf.headers.get("content-type"), "application/pdf");
+    const bytes = Buffer.from(await pdf.arrayBuffer());
+    assert.equal(bytes.subarray(0, 5).toString(), "%PDF-");
+    assert.ok(bytes.length > 500);
   });
 });

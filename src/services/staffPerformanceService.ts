@@ -8,6 +8,9 @@ type TripRow = Record<string, unknown>;
 const n = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : 0;
 const s = (value: unknown) => value == null ? "" : String(value);
 const round = (value: number, digits = 2) => Number(value.toFixed(digits));
+const dateOnly = (value: unknown) => value instanceof Date
+  ? value.toISOString().slice(0, 10)
+  : s(value).slice(0, 10);
 
 function validate(params: Params) {
   const iso = /^\d{4}-\d{2}-\d{2}$/;
@@ -28,7 +31,7 @@ function monday(date: string): string {
 
 function recent(row: TripRow) {
   return {
-    tripNo: s(row.trip_no), tripDate: s(row.trip_date).slice(0, 10), vehicleNo: s(row.vehicle_no),
+    tripNo: s(row.trip_no), tripDate: dateOnly(row.trip_date), vehicleNo: s(row.vehicle_no),
     totalShops: n(row.total_shops), totalBirdsDelivered: n(row.total_birds_delivered),
     totalDeliveredWeight: n(row.total_delivered_weight), totalMortality: n(row.total_mortality_count),
     weightLoss: n(row.weight_loss), totalKm: n(row.total_km),
@@ -79,7 +82,7 @@ export const staffPerformanceService = {
     const sum=(key:keyof typeof rows[number])=>rows.reduce((a,r)=>a+n(r[key]),0);
     const distance=sum("distance"), fuelLitres=sum("fuelLitres"), totalCost=sum("totalCost");
     const weeklyMap=new Map<string,{week:string;trips:number;distance:number;fuelLitres:number}>();
-    for(const trip of trips){const week=monday(s(trip.trip_date).slice(0,10));const x=weeklyMap.get(week)??{week,trips:0,distance:0,fuelLitres:0};x.trips++;x.distance+=n(trip.total_km);x.fuelLitres+=n(trip.fuel_litres);weeklyMap.set(week,x);}
+    for(const trip of trips){const week=monday(dateOnly(trip.trip_date));const x=weeklyMap.get(week)??{week,trips:0,distance:0,fuelLitres:0};x.trips++;x.distance+=n(trip.total_km);x.fuelLitres+=n(trip.fuel_litres);weeklyMap.set(week,x);}
     let detail=null;
     if(params.personId!=null){const items=groups.get(params.personId)??[];const vehicleGroups=new Map<string,TripRow[]>();for(const t of items){const key=s(t.vehicle_no)||"Unassigned";vehicleGroups.set(key,[...(vehicleGroups.get(key)??[]),t]);}
       detail={avgDistancePerTrip:items.length?round(items.reduce((a,r)=>a+n(r.total_km),0)/items.length):0,vehicles:[...vehicleGroups.entries()].map(([vehicleNo,vs])=>{const d=vs.reduce((a,r)=>a+n(r.total_km),0),l=vs.reduce((a,r)=>a+n(r.fuel_litres),0),f=vs.reduce((a,r)=>a+n(r.fuel_cost),0),m=vs.reduce((a,r)=>a+n(r.vehicle_maintenance),0);return{vehicleNo,trips:vs.length,distance:round(d),avgDistancePerTrip:round(d/vs.length),fuelLitres:round(l,3),fuelCost:round(f),maintenanceCost:round(m),totalCost:round(f+m),mileage:l?round(d/l):0};}),recentTrips:items.slice(0,10).map(recent)};}
@@ -90,7 +93,7 @@ export const staffPerformanceService = {
     const trips=await load("supervisors",params);const groups=new Map<number,TripRow[]>();for(const t of trips){const id=n(t.supervisor_id);groups.set(id,[...(groups.get(id)??[]),t]);}
     const rows=[...groups.entries()].map(([supervisorId,items])=>{const birds=items.reduce((a,r)=>a+n(r.total_birds_delivered),0),mortality=items.reduce((a,r)=>a+n(r.total_mortality_count),0);return{supervisorId,supervisorName:s(items[0].supervisor_name),employeeStatus:s(items[0].employee_status),trips:items.length,shops:items.reduce((a,r)=>a+n(r.total_shops),0),birds,weight:round(items.reduce((a,r)=>a+n(r.total_delivered_weight),0),3),mortality,mortalityRate:birds?round(mortality/birds*100):0,weightLoss:round(items.reduce((a,r)=>a+n(r.weight_loss),0),3)};});
     const sum=(key:keyof typeof rows[number])=>rows.reduce((a,r)=>a+n(r[key]),0);const birds=sum("birds"),mortality=sum("mortality");
-    const weeklyMap=new Map<string,{week:string;trips:number;birds:number;weight:number;mortality:number;weightLoss:number}>();for(const t of trips){const week=monday(s(t.trip_date).slice(0,10));const x=weeklyMap.get(week)??{week,trips:0,birds:0,weight:0,mortality:0,weightLoss:0};x.trips++;x.birds+=n(t.total_birds_delivered);x.weight+=n(t.total_delivered_weight);x.mortality+=n(t.total_mortality_count);x.weightLoss+=n(t.weight_loss);weeklyMap.set(week,x);}
+    const weeklyMap=new Map<string,{week:string;trips:number;birds:number;weight:number;mortality:number;weightLoss:number}>();for(const t of trips){const week=monday(dateOnly(t.trip_date));const x=weeklyMap.get(week)??{week,trips:0,birds:0,weight:0,mortality:0,weightLoss:0};x.trips++;x.birds+=n(t.total_birds_delivered);x.weight+=n(t.total_delivered_weight);x.mortality+=n(t.total_mortality_count);x.weightLoss+=n(t.weight_loss);weeklyMap.set(week,x);}
     return{fromDate:params.fromDate,toDate:params.toDate,kpis:{supervisors:rows.length,trips:trips.length,shops:sum("shops"),birds,weight:round(sum("weight"),3),mortality,mortalityRate:birds?round(mortality/birds*100):0,weightLoss:round(sum("weightLoss"),3)},weekly:[...weeklyMap.values()].sort((a,b)=>a.week.localeCompare(b.week)).map(x=>({...x,weight:round(x.weight,3),weightLoss:round(x.weightLoss,3)})),rows,detail:params.personId!=null?{recentTrips:(groups.get(params.personId)??[]).slice(0,10).map(recent)}:null};
   }
 };

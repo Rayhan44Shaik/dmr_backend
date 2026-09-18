@@ -49,6 +49,7 @@ app.get("/", (_req, res) => {
             },
             accounts: {
                 payments: "GET|POST /api/accounts/payments  PUT|DELETE /api/accounts/payments/:id",
+                farmPayments: "GET|PUT /api/accounts/farm-payments",
             },
         },
     });
@@ -66,8 +67,10 @@ async function start() {
         }
         throw err;
     });
-    server.listen(env.port, () => {
-        console.log(`DMR backend listening on http://localhost:${env.port}`);
+    // Bind IPv4 explicitly so Vite's 127.0.0.1:4000 proxy always reaches this
+    // process (avoids dual-stack races with leftover sample servers on Windows).
+    server.listen(env.port, "0.0.0.0", () => {
+        console.log(`DMR backend listening on http://0.0.0.0:${env.port}`);
         console.log(`PostgreSQL: ${env.databaseUrl.replace(/:[^:@]+@/, ":***@")}`);
     });
 }

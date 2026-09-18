@@ -68,6 +68,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmPaidAmount?: number | null;
+        farmPaymentDate?: string | null;
+        farmPaymentMode?: string | null;
+        farmPaymentReference?: string | null;
         farmCompletedTrips?: number | null;
         farmGpsLat?: number | null;
         farmGpsLon?: number | null;
@@ -177,6 +181,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmPaidAmount?: number | null;
+        farmPaymentDate?: string | null;
+        farmPaymentMode?: string | null;
+        farmPaymentReference?: string | null;
         farmCompletedTrips?: number | null;
         farmGpsLat?: number | null;
         farmGpsLon?: number | null;
@@ -285,6 +293,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmPaidAmount?: number | null;
+        farmPaymentDate?: string | null;
+        farmPaymentMode?: string | null;
+        farmPaymentReference?: string | null;
         farmCompletedTrips?: number | null;
         farmGpsLat?: number | null;
         farmGpsLon?: number | null;
@@ -394,6 +406,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmPaidAmount?: number | null;
+        farmPaymentDate?: string | null;
+        farmPaymentMode?: string | null;
+        farmPaymentReference?: string | null;
         farmCompletedTrips?: number | null;
         farmGpsLat?: number | null;
         farmGpsLon?: number | null;
@@ -527,6 +543,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmPaidAmount?: number | null;
+        farmPaymentDate?: string | null;
+        farmPaymentMode?: string | null;
+        farmPaymentReference?: string | null;
         farmCompletedTrips?: number | null;
         farmGpsLat?: number | null;
         farmGpsLon?: number | null;
@@ -635,6 +655,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmPaidAmount?: number | null;
+        farmPaymentDate?: string | null;
+        farmPaymentMode?: string | null;
+        farmPaymentReference?: string | null;
         farmCompletedTrips?: number | null;
         farmGpsLat?: number | null;
         farmGpsLon?: number | null;
@@ -749,6 +773,10 @@ export declare const tripsService: {
         farmLoadWeight?: number | null;
         farmRate?: number | null;
         farmAmount?: number | null;
+        farmPaidAmount?: number | null;
+        farmPaymentDate?: string | null;
+        farmPaymentMode?: string | null;
+        farmPaymentReference?: string | null;
         farmCompletedTrips?: number | null;
         farmGpsLat?: number | null;
         farmGpsLon?: number | null;

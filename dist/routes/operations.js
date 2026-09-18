@@ -32,7 +32,9 @@ function opsListPagination(req) {
 // ── Dashboard ────────────────────────────────────────────────────
 operationsRouter.get("/dashboard", asyncHandler(async (req, res) => {
     const asOf = typeof req.query.asOf === "string" ? req.query.asOf : undefined;
-    res.json(await dashboardService.getSummary(asOf));
+    const fromDate = typeof req.query.fromDate === "string" ? req.query.fromDate : undefined;
+    const toDate = typeof req.query.toDate === "string" ? req.query.toDate : undefined;
+    res.json(await dashboardService.getSummary({ asOf, fromDate, toDate }));
 }));
 // ── Vehicle Trips / Trip List ────────────────────────────────────
 operationsRouter.get("/trips", asyncHandler(async (req, res) => {

@@ -209,6 +209,11 @@ export interface Trip {
   farmLoadWeight?: number | null;
   farmRate?: number | null;
   farmAmount?: number | null;
+  /** Settlement fields from Accounts → Farmer Payments (read-only for trip wizard). */
+  farmPaidAmount?: number | null;
+  farmPaymentDate?: string | null;
+  farmPaymentMode?: string | null;
+  farmPaymentReference?: string | null;
   farmCompletedTrips?: number | null;
   farmGpsLat?: number | null;
   farmGpsLon?: number | null;

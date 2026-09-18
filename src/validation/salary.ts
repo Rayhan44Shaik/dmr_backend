@@ -198,4 +198,24 @@ export const salaryListQuerySchema = z.object({
   department: z.preprocess(trimmed, z.string().optional()),
 });
 
+export const salaryMonthSchema = z.object({ month: monthString });
+
+export const salaryBulkStatusSchema = z.object({
+  ids: z.array(z.string().uuid()).min(1).max(200),
+  status: z.enum(["Paid", "Pending"]),
+  paymentDate: dateString.optional(),
+  paymentMode: z.enum(PAYMENT_MODES).optional(),
+}).superRefine((value, ctx) => {
+  if (value.status === "Paid" && (!value.paymentDate || !value.paymentMode)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "paymentDate and paymentMode are required when marking salaries Paid" });
+  }
+});
+
+export const salaryDeliverySchema = z.object({
+  ids: z.array(z.string().uuid()).min(1).max(200),
+  language: z.enum(["en", "te"]).optional().default("en"),
+  subject: z.preprocess(trimmed, z.string().max(300).optional()),
+  body: z.preprocess(trimmed, z.string().min(1).max(10000)),
+});
+
 export { parseBody };

@@ -10,7 +10,7 @@ export type StaffAuthorizer = (request: Request, access: StaffAccess) => Promise
  * No actor or permission is accepted from request payloads or invented here. */
 export const staffBoundary: RequestHandler = (req, res, next) => {
   const parts = req.path.split("/").filter(Boolean);
-  const resource: StaffAccess["resource"] = parts[0] === "duty-planner" ? "duty-planner" : parts[0] === "leaves" ? "leave" : "staff";
+  const resource: StaffAccess["resource"] = parts[0] === "duty-planner" || parts[0] === "duties" ? "duty-planner" : parts[0] === "leaves" ? "leave" : "staff";
   const requestedStatus = typeof req.body?.status === "string" ? req.body.status : "";
   const action: StaffAction = req.method === "GET" ? "read"
     : requestedStatus === "Approved" ? "approve"
@@ -21,8 +21,24 @@ export const staffBoundary: RequestHandler = (req, res, next) => {
     : req.method === "POST" ? "create" : "update";
   const access: StaffAccess = { resource, action, resourceId: parts.find((part) => /^[0-9a-f-]{36}$/i.test(part)) };
   res.locals.staffAccess = access;
-  if (action !== "read" && authUser(res).role !== "OWNER") {
-    throw new AppError(403, "Owner access is required to change staff, leave, duty, or payroll data");
+  const user = authUser(res);
+  if (action === "read" && user.role !== "OWNER" && resource === "staff") {
+    throw new AppError(403, "Owner access is required to view payroll, attendance, advances, or performance data");
+  }
+  if (user.role !== "OWNER" && resource === "leave") {
+    if (user.employeeId == null) throw new AppError(403, "This account is not linked to an employee");
+    if (action === "read") req.query.employeeId = String(user.employeeId);
+    if (action === "create" && Number(req.body?.employeeId) !== user.employeeId) {
+      throw new AppError(403, "Leave requests may only be created for the signed-in employee");
+    }
+  }
+  const isManualDutyWrite = resource === "duty-planner"
+    && (action === "create" || action === "update")
+    && !parts.includes("auto-assign")
+    && !parts.includes("submit");
+  const isLeaveRequestCreate = resource === "leave" && action === "create" && parts.length === 1;
+  if (action !== "read" && user.role !== "OWNER" && !isManualDutyWrite && !isLeaveRequestCreate) {
+    throw new AppError(403, "Owner access is required for this staff operation");
   }
   const authorize = req.app.locals.authorizeStaff as StaffAuthorizer | undefined;
   Promise.resolve()

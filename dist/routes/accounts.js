@@ -5,7 +5,9 @@
  * Outstanding) will register their routers here.
  */
 import { Router } from "express";
+import { farmPaymentsRouter } from "./farmPayments.js";
 import { paymentsRouter } from "./payments.js";
 export const accountsRouter = Router();
 accountsRouter.use("/payments", paymentsRouter);
+accountsRouter.use("/farm-payments", farmPaymentsRouter);
 //# sourceMappingURL=accounts.js.map

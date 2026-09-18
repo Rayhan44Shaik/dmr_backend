@@ -92,6 +92,11 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     farmLoadWeight: numOrNull(row.farm_load_weight),
     farmRate: numOrNull(row.farm_rate),
     farmAmount: numOrNull(row.farm_amount),
+    farmPaidAmount: num(row.farm_paid_amount),
+    farmPaymentDate: dateOnly(row.farm_payment_date),
+    farmPaymentMode: row.farm_payment_mode == null ? null : str(row.farm_payment_mode),
+    farmPaymentReference:
+      row.farm_payment_reference == null ? null : str(row.farm_payment_reference),
     farmCompletedTrips: numOrNull(row.farm_completed_trips),
     farmGpsLat: numOrNull(row.farm_gps_lat),
     farmGpsLon: numOrNull(row.farm_gps_lon),

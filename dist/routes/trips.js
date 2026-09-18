@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
+import { authUser } from "../middleware/auth.js";
+import { enforceSupervisorAssignment, requireTripAccess, requireTripPermission, } from "../middleware/tripAuthorization.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { validateStepSubmit } from "../validation/trips.js";
@@ -11,14 +13,36 @@ function positiveId(value, label = "Trip id") {
     }
     return id;
 }
-function tripListFilters(req) {
+/** Supervisors always act as themselves — never accept another employee id. */
+function applySupervisorScope(res, body) {
+    const user = authUser(res);
+    if (user.role !== "SUPERVISOR")
+        return user;
+    if (!body || typeof body !== "object") {
+        enforceSupervisorAssignment(user, user.employeeId);
+        return user;
+    }
+    if (body.supervisorId == null)
+        body.supervisorId = user.employeeId;
+    enforceSupervisorAssignment(user, body.supervisorId);
+    return user;
+}
+function tripListFilters(req, res) {
+    const user = authUser(res);
     const { params: pagination, enabled } = parsePagination(req.query);
+    const requestedSupervisorId = req.query.supervisorId ? Number(req.query.supervisorId) : undefined;
+    // Supervisors may only list their own trips — never trust a client-supplied
+    // supervisorId that points at another employee.
+    if (user.role === "SUPERVISOR" && user.employeeId == null) {
+        throw new AppError(403, "Supervisor account is not linked to an employee");
+    }
+    const supervisorId = user.role === "SUPERVISOR" ? user.employeeId : requestedSupervisorId;
     return {
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
-        supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
+        supervisorId,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
         includeDeleted: req.query.includeDeleted === "true",
         full: req.query.full === "true",
@@ -26,10 +50,12 @@ function tripListFilters(req) {
     };
 }
 tripsRouter.get("/", asyncHandler(async (req, res) => {
-    const filters = tripListFilters(req);
+    requireTripPermission(res, "trip.view");
+    const filters = tripListFilters(req, res);
     res.json(await tripsService.list(filters));
 }));
 tripsRouter.get("/vehicle/:vehicleId/last-meter", asyncHandler(async (req, res) => {
+    requireTripPermission(res, "trip.view");
     res.json(await tripsService.lastClosingMeter(positiveId(req.params.vehicleId, "Vehicle id")));
 }));
 /**
@@ -39,6 +65,8 @@ tripsRouter.get("/vehicle/:vehicleId/last-meter", asyncHandler(async (req, res) 
  * Keep this route before GET /:id so "steps" is not interpreted as an id.
  */
 tripsRouter.post("/steps/start", asyncHandler(async (req, res) => {
+    requireTripPermission(res, "trip.create");
+    applySupervisorScope(res, req.body);
     validateStepSubmit("start", req.body);
     const payload = {
         ...req.body,
@@ -56,14 +84,20 @@ tripsRouter.post("/steps/start", asyncHandler(async (req, res) => {
  * "available-resources" is not interpreted as an id.
  */
 tripsRouter.get("/available-resources", asyncHandler(async (req, res) => {
+    requireTripPermission(res, "trip.view");
     const tripId = req.query.tripId ? Number(req.query.tripId) : undefined;
+    if (tripId)
+        await requireTripAccess(res, tripId, "trip.view");
     res.json(await tripsService.availableResources(tripId));
 }));
 tripsRouter.get("/:id", asyncHandler(async (req, res) => {
     const id = positiveId(req.params.id);
+    await requireTripAccess(res, id, "trip.view");
     res.json(await tripsService.getById(id));
 }));
 tripsRouter.post("/", asyncHandler(async (req, res) => {
+    requireTripPermission(res, "trip.create");
+    applySupervisorScope(res, req.body);
     // Create draft or full save without id
     if (req.body?.startStepSubmitted || req.body?.vehicleId || req.body?.helpers) {
         validateStepSubmit("start", req.body);
@@ -77,6 +111,8 @@ tripsRouter.post("/", asyncHandler(async (req, res) => {
 }));
 tripsRouter.put("/:id", asyncHandler(async (req, res) => {
     const id = positiveId(req.params.id);
+    await requireTripAccess(res, id, "trip.edit");
+    applySupervisorScope(res, req.body);
     const trip = await tripsService.save(id, req.body);
     res.json(trip);
 }));
@@ -86,6 +122,9 @@ tripsRouter.post("/:id/steps/:step", asyncHandler(async (req, res) => {
         throw new AppError(400, "Invalid step. Use start|farm|pickup|deliveries|expenses");
     }
     const id = positiveId(req.params.id);
+    await requireTripAccess(res, id, "trip.submit");
+    if (step === "start")
+        applySupervisorScope(res, req.body);
     const trip = await tripsService.submitStep(id, step, req.body);
     res.json(trip);
 }));
@@ -98,11 +137,13 @@ tripsRouter.post("/:id/steps/:step", asyncHandler(async (req, res) => {
  */
 tripsRouter.put("/:id/deliveries", asyncHandler(async (req, res) => {
     const id = positiveId(req.params.id);
+    await requireTripAccess(res, id, "trip.edit");
     const trip = await tripsService.saveDeliveries(id, req.body);
     res.json(trip);
 }));
 tripsRouter.delete("/:id", asyncHandler(async (req, res) => {
     const id = positiveId(req.params.id);
+    await requireTripAccess(res, id, "trip.delete");
     const reason = typeof req.body?.reason === "string"
         ? req.body.reason
         : typeof req.query.reason === "string"
@@ -113,6 +154,7 @@ tripsRouter.delete("/:id", asyncHandler(async (req, res) => {
 }));
 tripsRouter.patch("/:id/status", asyncHandler(async (req, res) => {
     const id = positiveId(req.params.id);
+    await requireTripAccess(res, id, "trip.status_change");
     const trip = await tripsService.updateStatus(id, req.body);
     res.json(trip);
 }));

@@ -73,10 +73,10 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
     driverName?: string | null | undefined;
+    totalCost?: number | undefined;
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
-    totalCost?: number | undefined;
     idempotencyKey?: string | undefined;
 }, {
     date: string;
@@ -96,10 +96,10 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
     driverName?: string | null | undefined;
+    totalCost?: number | undefined;
     nextServiceKM?: number | null | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
-    totalCost?: number | undefined;
     idempotencyKey?: string | undefined;
 }>;
 /** Update body — everything optional; removeDocumentIds lets the caller
@@ -156,13 +156,13 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
     driverName?: string | null | undefined;
+    totalCost?: number | undefined;
     currentKM?: number | undefined;
     nextServiceKM?: number | null | undefined;
     maintenanceType?: string | string[] | undefined;
     serviceType?: string | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
-    totalCost?: number | undefined;
     idempotencyKey?: string | undefined;
     removeDocumentIds?: number[] | undefined;
 }, {
@@ -180,13 +180,13 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
     driverName?: string | null | undefined;
+    totalCost?: number | undefined;
     currentKM?: number | undefined;
     nextServiceKM?: number | null | undefined;
     maintenanceType?: string | string[] | undefined;
     serviceType?: string | undefined;
     garage?: string | undefined;
     mechanic?: string | undefined;
-    totalCost?: number | undefined;
     idempotencyKey?: string | undefined;
     removeDocumentIds?: number[] | undefined;
 }>;

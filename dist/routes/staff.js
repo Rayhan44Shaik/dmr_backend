@@ -2,11 +2,28 @@ import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { staffService } from "../services/staffService.js";
 import { dutyPlannerService } from "../services/dutyPlannerService.js";
+import { staffPerformanceService } from "../services/staffPerformanceService.js";
 import { parseBody, salaryGenerateSchema, salaryListQuerySchema, salaryStatusPatchSchema, salarySubmitSchema, } from "../validation/salary.js";
 import { leaveCreateSchema, leaveListQuerySchema, leaveReportQuerySchema, leaveStatusSchema, } from "../validation/leave.js";
 import { staffBoundary } from "../middleware/staffBoundary.js";
+import { authUser } from "../middleware/auth.js";
 export const staffRouter = Router();
 staffRouter.use(staffBoundary);
+function performanceParams(req, key) {
+    const rawId = req.query[key];
+    return {
+        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : "",
+        toDate: typeof req.query.toDate === "string" ? req.query.toDate : "",
+        search: typeof req.query.search === "string" ? req.query.search.slice(0, 200) : undefined,
+        personId: typeof rawId === "string" && rawId !== "" ? Number(rawId) : undefined,
+    };
+}
+staffRouter.get("/performance/drivers", asyncHandler(async (req, res) => {
+    res.json(await staffPerformanceService.drivers(performanceParams(req, "driverId")));
+}));
+staffRouter.get("/performance/supervisors", asyncHandler(async (req, res) => {
+    res.json(await staffPerformanceService.supervisors(performanceParams(req, "supervisorId")));
+}));
 // Duty Planner
 staffRouter.get("/duties", asyncHandler(async (req, res) => {
     res.json(await staffService.listDuties(typeof req.query.fromDate === "string" ? req.query.fromDate : undefined, typeof req.query.toDate === "string" ? req.query.toDate : undefined, typeof req.query.department === "string" ? req.query.department : undefined));
@@ -36,7 +53,7 @@ staffRouter.post("/leaves", asyncHandler(async (req, res) => {
 staffRouter.patch("/leaves/:id/status", asyncHandler(async (req, res) => {
     const body = parseBody(leaveStatusSchema, req.body);
     res.json(await staffService.updateLeaveStatus(req.params.id, body.status, {
-        approvedBy: undefined,
+        approvedBy: authUser(res).displayName,
         rejectionReason: body.rejectionReason,
     }));
 }));
@@ -64,7 +81,7 @@ staffRouter.put("/salaries", asyncHandler(async (req, res) => {
 // /:id PUT route so "submit" is never parsed as a record id.
 staffRouter.post("/salaries/:id/submit", asyncHandler(async (req, res) => {
     parseBody(salarySubmitSchema, req.body);
-    const submittedBy = typeof req.body?.submittedBy === "string" ? req.body.submittedBy : "user";
+    const submittedBy = authUser(res).displayName;
     res.json(await staffService.submitSalary(req.params.id, submittedBy));
 }));
 staffRouter.patch("/salaries/:id/status", asyncHandler(async (req, res) => {
@@ -75,7 +92,7 @@ staffRouter.patch("/salaries/:id/status", asyncHandler(async (req, res) => {
 }));
 // Dedicated payment operation — Pending → Paid + Accounts payment, atomic.
 staffRouter.post("/salaries/:id/pay", asyncHandler(async (req, res) => {
-    res.json(await staffService.paySalary(req.params.id, req.body));
+    res.json(await staffService.paySalary(req.params.id, { ...req.body, paidBy: authUser(res).displayName }));
 }));
 staffRouter.put("/salaries/:id", asyncHandler(async (req, res) => {
     res.json(await staffService.updateSalaryById(req.params.id, req.body));
@@ -128,28 +145,28 @@ staffRouter.post("/duty-planner/auto-assign/preview", asyncHandler(async (req, r
 staffRouter.post("/duty-planner/auto-assign/apply", asyncHandler(async (req, res) => {
     const weekStart = typeof req.body?.weekStart === "string" ? req.body.weekStart : new Date().toISOString().slice(0, 10);
     const plan = req.body?.plan ?? undefined;
-    const changedBy = undefined;
+    const changedBy = authUser(res).displayName;
     res.json(await dutyPlannerService.autoAssignApply(weekStart, plan, changedBy));
 }));
 // POST /api/staff/duty-planner/assign  (manual; server-validated)
 staffRouter.post("/duty-planner/assign", asyncHandler(async (req, res) => {
-    const changedBy = undefined;
+    const changedBy = authUser(res).displayName;
     res.status(201).json(await dutyPlannerService.upsertDuty(req.body ?? {}, changedBy));
 }));
 // PUT /api/staff/duty-planner/:id  (manual edit; server-validated)
 staffRouter.put("/duty-planner/:id", asyncHandler(async (req, res) => {
-    const changedBy = undefined;
+    const changedBy = authUser(res).displayName;
     res.json(await dutyPlannerService.upsertDuty({ ...(req.body ?? {}), id: req.params.id }, changedBy));
 }));
 // DELETE /api/staff/duty-planner/:id
 staffRouter.delete("/duty-planner/:id", asyncHandler(async (req, res) => {
-    const changedBy = undefined;
+    const changedBy = authUser(res).displayName;
     res.json(await dutyPlannerService.deleteDuty(req.params.id, changedBy));
 }));
 // POST /api/staff/duty-planner/submit  { weekStart, submittedBy }
 staffRouter.post("/duty-planner/submit", asyncHandler(async (req, res) => {
     const weekStart = typeof req.body?.weekStart === "string" ? req.body.weekStart : new Date().toISOString().slice(0, 10);
-    const submittedBy = undefined;
+    const submittedBy = authUser(res).displayName;
     res.json(await dutyPlannerService.submitWeek(weekStart, submittedBy));
 }));
 // GET /api/staff/attendance/summary?month=YYYY-MM
