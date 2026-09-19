@@ -1,0 +1,67 @@
+name: Orders production gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/services/tripsService.ts"
+      - "src/routes/trips.ts"
+      - "src/validation/**"
+      - "sql/**"
+      - "tests/ordersCollectionConcurrency*.test.ts"
+      - "package.json"
+      - ".github/workflows/orders-production-gate.yml"
+
+jobs:
+  real-postgres-orders:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dmr_poultries
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dmr_poultries"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dmr_poultries
+      E2E_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dmr_poultries_e2e
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout backend
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create isolated E2E database and apply all migrations
+        run: npm run e2e:db:setup -- --reset
+
+      - name: Backend build
+        run: npm run build
+
+      - name: Backend typecheck
+        run: npm run typecheck
+
+      - name: Orders backend regression suite
+        run: npm run test:orders:backend
+
+      - name: Orders real-PostgreSQL concurrency gate
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dmr_poultries_e2e
+          ORDERS_REAL_PG: "1"
+        run: npm run test:orders:postgres-concurrency
