@@ -57,6 +57,9 @@ jobs:
       - name: Backend typecheck
         run: npm run typecheck
 
+      - name: Orders backend regression suite
+        run: npm run test:orders:backend
+
       - name: Orders real-PostgreSQL concurrency gate
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dmr_poultries_e2e
