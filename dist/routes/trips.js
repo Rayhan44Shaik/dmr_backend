@@ -58,6 +58,11 @@ tripsRouter.get("/vehicle/:vehicleId/last-meter", asyncHandler(async (req, res) 
     requireTripPermission(res, "trip.view");
     res.json(await tripsService.lastClosingMeter(positiveId(req.params.vehicleId, "Vehicle id")));
 }));
+tripsRouter.get("/next-number", asyncHandler(async (req, res) => {
+    requireTripPermission(res, "trip.view");
+    const date = typeof req.query.date === "string" ? req.query.date : "";
+    res.json(await tripsService.previewNextTripNo(date));
+}));
 /**
  * Final Step 1 submission.
  * This is intentionally the only API call made while submitting Step 1.

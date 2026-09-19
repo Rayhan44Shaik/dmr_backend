@@ -152,7 +152,12 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
   farm: z
     .object({
       sourceFarmId: idSchema,
-      farmAddress: z.string().trim().min(1, "Farm address is required.").max(500),
+      farmAddress: z
+        .preprocess(
+          (v) => (v == null ? "" : String(v)),
+          z.string().trim().max(500).optional()
+        )
+        .optional(),
       destMeter: z.coerce.number().nonnegative(),
       // reached_time is never sent by the frontend (backend captures it) — but
       // tolerate a null in case a legacy client sends one.

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { TripWizardStep } from "../utils/tripResume.js";
 export declare const tripAutosaveSchema: z.ZodObject<{
-    tripDate: z.ZodOptional<z.ZodString>;
+    tripDate: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
     tripNo: z.ZodOptional<z.ZodString>;
     status: z.ZodOptional<z.ZodEnum<["Draft", "Pending", "Completed", "Deleted"]>>;
     updatedAt: z.ZodOptional<z.ZodString>;
@@ -139,7 +139,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         bunkGps?: string | null | undefined;
     }>, "many">>;
 }, "passthrough", z.ZodTypeAny, z.objectOutputType<{
-    tripDate: z.ZodOptional<z.ZodString>;
+    tripDate: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
     tripNo: z.ZodOptional<z.ZodString>;
     status: z.ZodOptional<z.ZodEnum<["Draft", "Pending", "Completed", "Deleted"]>>;
     updatedAt: z.ZodOptional<z.ZodString>;
@@ -277,7 +277,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         bunkGps?: string | null | undefined;
     }>, "many">>;
 }, z.ZodTypeAny, "passthrough">, z.objectInputType<{
-    tripDate: z.ZodOptional<z.ZodString>;
+    tripDate: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
     tripNo: z.ZodOptional<z.ZodString>;
     status: z.ZodOptional<z.ZodEnum<["Draft", "Pending", "Completed", "Deleted"]>>;
     updatedAt: z.ZodOptional<z.ZodString>;
@@ -416,7 +416,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
     }>, "many">>;
 }, z.ZodTypeAny, "passthrough">>;
 export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
-    tripDate: z.ZodOptional<z.ZodString>;
+    tripDate: z.ZodOptional<z.ZodEffects<z.ZodString, string, string>>;
     tripNo: z.ZodOptional<z.ZodString>;
     status: z.ZodOptional<z.ZodEnum<["Draft", "Pending", "Completed", "Deleted"]>>;
     updatedAt: z.ZodOptional<z.ZodString>;

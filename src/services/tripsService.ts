@@ -779,7 +779,10 @@ async function assertDeliveriesWithinCapacity(
 
   let totalBirds = 0;
   let totalWeight = 0;
-  const orderBalances = new Map<string, { planned: number; captured: number }>();
+  const orderBalances = new Map<
+    string,
+    { orderRef: string; shopId: number; planned: number; captured: number }
+  >();
   for (const d of deliveries) {
     const birds = Number(d.birds ?? 0);
     const weight = Number(d.weight ?? 0);
@@ -803,9 +806,18 @@ async function assertDeliveriesWithinCapacity(
       if (!Number.isSafeInteger(boxes) || boxes <= 0) {
         throw new AppError(422, "Orders assignment/delivery boxes must be a positive whole number.");
       }
-      const orderRef = remarks.match(/\bO:([^|\s]+)/)?.[1] ?? "unknown";
-      const key = `${orderRef}:${Number(d.shopId ?? 0)}`;
-      const balance = orderBalances.get(key) ?? { planned: 0, captured: 0 };
+      const orderRef = remarks.match(/\bO:([^|\s]+)/)?.[1] ?? "";
+      const shopId = Number(d.shopId ?? 0);
+      if (!orderRef || !Number.isSafeInteger(shopId) || shopId <= 0) {
+        throw new AppError(422, "Orders assignment rows require a valid order reference and shop id.");
+      }
+      const key = `${orderRef}:${shopId}`;
+      const balance = orderBalances.get(key) ?? {
+        orderRef,
+        shopId,
+        planned: 0,
+        captured: 0,
+      };
       if (isCapturedOrderRow) balance.captured += boxes;
       else balance.planned += boxes;
       orderBalances.set(key, balance);
@@ -822,6 +834,53 @@ async function assertDeliveriesWithinCapacity(
       throw new AppError(
         422,
         `Delivered boxes exceed the assigned quantity for order/shop ${key} (${balance.captured} > ${balance.planned}).`
+      );
+    }
+
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `orders_assignment_${balance.orderRef}_${balance.shopId}`,
+    ]);
+
+    const collected = await client.query<{ box_no: number }>(
+      `SELECT d.box_no
+         FROM trips c
+         JOIN trip_deliveries d ON d.trip_id = c.id
+        WHERE c.trip_no = $1
+          AND c.deleted = FALSE
+          AND c.vehicle_id IS NULL
+          AND c.remarks = '[ORDER_COLLECTION]'
+          AND d.deleted = FALSE
+          AND d.shop_id = $2
+          AND d.auto_capture_time IS NULL
+        FOR UPDATE OF d`,
+      [balance.orderRef, balance.shopId],
+    );
+    const collectedBoxes = collected.rows.reduce(
+      (sum, collectedRow) => sum + Number(collectedRow.box_no ?? 0),
+      0,
+    );
+    if (!Number.isSafeInteger(collectedBoxes) || collectedBoxes <= 0) {
+      throw new AppError(409, `Order ${balance.orderRef} has no active collected quantity for this shop.`);
+    }
+
+    const assignedElsewhere = await client.query<{ boxes: string }>(
+      `SELECT COALESCE(SUM(d.box_no), 0)::text AS boxes
+         FROM trip_deliveries d
+         JOIN trips t ON t.id = d.trip_id
+        WHERE d.trip_id <> $1
+          AND t.deleted = FALSE
+          AND t.vehicle_id IS NOT NULL
+          AND d.deleted = FALSE
+          AND d.shop_id = $2
+          AND d.remarks = $3
+          AND d.auto_capture_time IS NULL`,
+      [tripId, balance.shopId, `[ORDER] O:${balance.orderRef}`],
+    );
+    const elsewhereBoxes = Number(assignedElsewhere.rows[0]?.boxes ?? 0);
+    if (elsewhereBoxes + balance.planned > collectedBoxes) {
+      throw new AppError(
+        409,
+        `Order assignment exceeds the collected quantity for order/shop ${key} (${elsewhereBoxes + balance.planned} > ${collectedBoxes}).`,
       );
     }
   }
@@ -1010,8 +1069,10 @@ function flattenDiesel(entries: DieselEntry[]): Record<string, unknown> {
     out[`dieselRate${e.rowIndex}`] = e.rate;
     out[`dieselMeter${e.rowIndex}`] = e.meter;
     out[`dieselBunk${e.rowIndex}`] = e.bunkName;
-    out[`dieselImage${e.rowIndex}`] = e.imageData;
+    // Never duplicate full base64 into flat keys — FE reads dieselEntries /
+    // keeps local sheet images. Flat keys only carry the file name + flag.
     out[`dieselImageName${e.rowIndex}`] = e.imageName;
+    out[`dieselHasImage${e.rowIndex}`] = Boolean(e.imageData && String(e.imageData).length > 40);
     out[`dieselClientKey${e.rowIndex}`] = e.clientKey ?? null;
     out[`dieselGpsLat${e.rowIndex}`] = e.gpsLat ?? null;
     out[`dieselGpsLon${e.rowIndex}`] = e.gpsLon ?? null;
@@ -1021,6 +1082,19 @@ function flattenDiesel(entries: DieselEntry[]): Record<string, unknown> {
     out[`dieselSubmittedAt${e.rowIndex}`] = e.submittedAt ?? null;
   }
   return out;
+}
+
+/** After a single-row diesel write, slim other rows' images so 5–10 bill trips
+ *  do not re-download megabytes of base64 on every submit. */
+function slimDieselEntriesForWriteResponse(
+  entries: DieselEntry[],
+  keepRowIndex: number
+): DieselEntry[] {
+  return entries.map((entry) => {
+    if (entry.rowIndex === keepRowIndex) return entry;
+    const hasImage = Boolean(entry.imageData && String(entry.imageData).length > 40);
+    return hasImage ? { ...entry, imageData: null } : entry;
+  });
 }
 
 function buildListWhere(filters: {
@@ -2569,10 +2643,9 @@ export const tripsService = {
       if (tolls != null && tolls < 0) {
         body.pickupTolls = 0;
       }
-      // Farm Address is a mandatory Step 2 submit field.
-      const farmAddress = body.farmAddress == null ? "" : str(body.farmAddress).trim();
-      if (!farmAddress) {
-        throw new AppError(422, "Farm address is required.");
+      // Farm address is optional (masters may not have one yet).
+      if (body.farmAddress != null) {
+        body.farmAddress = str(body.farmAddress).trim();
       }
       const startMeter = numOrNull(current.opening_meter);
       const farmMeter = numOrNull(body.destMeter);
@@ -2764,11 +2837,24 @@ export const tripsService = {
     await validateTripForeignKeys({ vehicleId });
     const latest = await getLatestVehicleMeter(null, vehicleId);
     if (!latest) return null;
+
+    const ref = String(latest.ref || "").trim();
+    // Display label for Step 1 hint — trip number when from a trip, otherwise
+    // fuel/maintenance source (never raw JSON null in the UI).
+    let tripNo: string | null = null;
+    if (latest.sourceType === "TRIP_END" || latest.sourceType === "TRIP_START") {
+      tripNo = ref || null;
+    } else if (latest.sourceType === "FUEL") {
+      tripNo = ref ? `Fuel ${ref}` : "Fuel";
+    } else if (latest.sourceType === "MAINTENANCE") {
+      tripNo = ref ? `Maintenance ${ref}` : "Maintenance";
+    }
+
     return {
       closingMeter: latest.meter,
       source: latest.sourceType,
       ref: latest.ref,
-      tripNo: latest.sourceType === "TRIP_END" || latest.sourceType === "TRIP_START" ? latest.ref : null,
+      tripNo,
       tripDate: latest.eventDate,
     };
   },
@@ -3003,9 +3089,11 @@ export const tripsService = {
 
       const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
       const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
+      const dieselEntries = slimDieselEntriesForWriteResponse(trip.dieselEntries ?? [], rowIndex!);
       return {
         ...trip,
-        ...flattenDiesel(trip.dieselEntries ?? []),
+        dieselEntries,
+        ...flattenDiesel(dieselEntries),
       };
     });
   },
@@ -3084,9 +3172,12 @@ export const tripsService = {
 
       const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
       const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
+      const keepRow = num(existing.rows[0].row_index);
+      const dieselEntries = slimDieselEntriesForWriteResponse(trip.dieselEntries ?? [], keepRow);
       return {
         ...trip,
-        ...flattenDiesel(trip.dieselEntries ?? []),
+        dieselEntries,
+        ...flattenDiesel(dieselEntries),
       };
     });
   },

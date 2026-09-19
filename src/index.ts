@@ -71,7 +71,7 @@ function sleep(ms: number) {
 
 /** Bind with short retries — tsx watch on Windows can restart before the
  * previous listener has fully released PORT. */
-async function listen(server: http.Server, port: number, attempts = 12): Promise<void> {
+async function listen(server: http.Server, port: number, attempts = 20): Promise<void> {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       await new Promise<void>((resolve, reject) => {
@@ -92,13 +92,25 @@ async function listen(server: http.Server, port: number, attempts = 12): Promise
       return;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
+      // Reset the handle so the next listen() is clean after EADDRINUSE.
+      await new Promise<void>((resolve) => {
+        try {
+          server.close(() => resolve());
+        } catch {
+          resolve();
+        }
+        // close() may not call back if never listening — unblock either way.
+        setTimeout(resolve, 50).unref();
+      });
       if (code !== "EADDRINUSE" || attempt === attempts) {
         throw err;
       }
-      console.warn(
-        `Port ${port} still busy (attempt ${attempt}/${attempts}) — waiting for previous backend to exit…`
-      );
-      await sleep(250 * attempt);
+      if (attempt === 1 || attempt % 4 === 0) {
+        console.warn(
+          `Port ${port} still busy (attempt ${attempt}/${attempts}) — waiting for previous backend to exit…`
+        );
+      }
+      await sleep(Math.min(100 * attempt, 500));
     }
   }
 }
@@ -107,31 +119,53 @@ async function start() {
   await pool.query("SELECT 1");
 
   const server = http.createServer(app);
+  // Short keep-alive so watch restarts are not held open by Vite proxy sockets.
+  server.keepAliveTimeout = 5_000;
+  server.headersTimeout = 6_000;
+  server.requestTimeout = 60_000;
+
+  let exiting = false;
+  const exitNow = (code = 0) => {
+    if (exiting) return;
+    exiting = true;
+    try {
+      server.closeAllConnections();
+    } catch {
+      /* Node < 18.2 or already closed */
+    }
+    try {
+      server.close();
+    } catch {
+      /* ignore */
+    }
+    void pool.end().finally(() => {
+      process.exit(code);
+    });
+    // Hard ceiling — never block tsx watch from respawning.
+    setTimeout(() => process.exit(code), 250).unref();
+  };
 
   const shutdown = (signal: string) => {
     console.log(`\n${signal} received — closing API…`);
-    server.close(async () => {
-      try {
-        await pool.end();
-      } catch {
-        /* ignore */
-      }
-      process.exit(0);
-    });
-    // Force-exit if keep-alive sockets stall the close (Windows + tsx watch).
-    setTimeout(() => process.exit(0), 1500).unref();
+    exitNow(0);
   };
+
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
   // tsx watch on Windows often sends this before respawning.
   process.once("SIGHUP", () => shutdown("SIGHUP"));
+  if (process.platform === "win32") {
+    process.once("SIGBREAK", () => shutdown("SIGBREAK"));
+  }
 
   try {
     await listen(server, env.port);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") {
       console.error(
-        `Port ${env.port} is already in use after retries. Stop the other backend (or free the port) and try again.`
+        `Port ${env.port} is already in use after retries.\n` +
+          `  Another backend is still running (often a second terminal or frontend "npm run dev").\n` +
+          `  Stop it, or from backend run: npm run free-port   then: npm run dev`
       );
       process.exit(1);
     }

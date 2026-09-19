@@ -11,6 +11,7 @@ import { nextDocNo } from "./operationsHelpers.js";
  */
 export async function syncDieselToFuelExpenses(client, tripId, tripDate, entries, context) {
     const activeIndices = [];
+    const ymd = (tripDate || "").replace(/-/g, "") || new Date().toISOString().slice(0, 10).replace(/-/g, "");
     for (const entry of entries) {
         const litres = Number(entry.litres ?? 0);
         const rate = Number(entry.rate ?? 0);
@@ -18,7 +19,20 @@ export async function syncDieselToFuelExpenses(client, tripId, tripDate, entries
             continue;
         activeIndices.push(entry.rowIndex);
         const amount = Number((litres * rate).toFixed(2));
-        const billNo = await nextDocNo(client, "TRF", "fuel_expenses", "bill_no");
+        // Only allocate a new bill_no when inserting. Re-generating on every upsert
+        // races under multi-bill trips and can fail UNIQUE(bill_no).
+        const existingFuel = await client.query(`SELECT id, bill_no FROM fuel_expenses
+        WHERE trip_id = $1 AND trip_fuel_entry_index = $2
+          AND source_type = 'TRIP' AND COALESCE(deleted, FALSE) = FALSE
+        LIMIT 1`, [tripId, entry.rowIndex]);
+        let billNo;
+        if (existingFuel.rowCount) {
+            billNo = existingFuel.rows[0].bill_no;
+        }
+        else {
+            await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`fuel_bill_${ymd}`]);
+            billNo = await nextDocNo(client, "TRF", "fuel_expenses", "bill_no");
+        }
         await client.query(`INSERT INTO fuel_expenses (
          bill_no, expense_date, vehicle_id, vehicle_no, driver_id, driver_name,
          supervisor_id, supervisor_name, trip_id, trip_fuel_entry_index, source_type,

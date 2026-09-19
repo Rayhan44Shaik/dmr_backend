@@ -894,6 +894,24 @@ describe("Orders partial-delivery integrity", () => {
       tripDate: "2026-07-14",
       boxes: [{ boxNo: 1, birds: 300, weight: 600 }],
     });
+    const collection = await tripsService.createDraft({
+      tripDate: "2026-07-14",
+      remarks: "[ORDER_COLLECTION]",
+    });
+    await tripsService.submitStep(collection.id, "deliveries", {
+      mode: "save",
+      deliveries: [
+        delivery({
+          clientKey: "orders-collection-plan",
+          serialNo: 1,
+          boxNo: 20,
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          birds: 200,
+          remarks: "[ORDER]",
+        }),
+      ],
+    } as Record<string, unknown>);
     const plan = delivery({
       clientKey: "orders-plan",
       serialNo: 1,
@@ -901,7 +919,7 @@ describe("Orders partial-delivery integrity", () => {
       shopId: m.shopA.id,
       shopName: m.shopA.shopName,
       birds: 200,
-      remarks: "[ORDER] O:TR-ORDER-001",
+      remarks: `[ORDER] O:${collection.tripNo}`,
     });
     const capture = (clientKey: string, serialNo: number) =>
       delivery({
@@ -911,7 +929,7 @@ describe("Orders partial-delivery integrity", () => {
         shopId: m.shopA.id,
         shopName: m.shopA.shopName,
         birds: 100,
-        remarks: "[ORDER] O:TR-ORDER-001",
+        remarks: `[ORDER] O:${collection.tripNo}`,
         autoCaptureTime: new Date(`2026-07-14T0${serialNo}:00:00.000Z`).toISOString(),
       });
 
@@ -948,6 +966,70 @@ describe("Orders partial-delivery integrity", () => {
       [trip.id],
     );
     assert.equal(Number(afterReject.rows[0].count), 3, "rejected over-delivery must roll back atomically");
+  });
+
+  it("rejects a second vehicle assignment above the collected shop balance", async () => {
+    const firstMasters = await seedMasters();
+    const secondMasters = await seedMasters();
+    const day = "2026-07-15";
+    const firstTrip = await makePickupTrip(firstMasters, {
+      tripDate: day,
+      boxes: [{ boxNo: 1, birds: 300, weight: 600 }],
+    });
+    const secondTrip = await makePickupTrip({
+      ...secondMasters,
+      shopA: firstMasters.shopA,
+    }, {
+      tripDate: day,
+      boxes: [{ boxNo: 1, birds: 300, weight: 600 }],
+    });
+    const collection = await tripsService.createDraft({
+      tripDate: day,
+      remarks: "[ORDER_COLLECTION]",
+    });
+    await tripsService.submitStep(collection.id, "deliveries", {
+      mode: "save",
+      deliveries: [
+        delivery({
+          clientKey: "orders-race-collection",
+          serialNo: 1,
+          boxNo: 20,
+          shopId: firstMasters.shopA.id,
+          shopName: firstMasters.shopA.shopName,
+          birds: 200,
+          remarks: "[ORDER]",
+        }),
+      ],
+    } as Record<string, unknown>);
+    const assignment = (clientKey: string) =>
+      delivery({
+        clientKey,
+        serialNo: 1,
+        boxNo: 15,
+        shopId: firstMasters.shopA.id,
+        shopName: firstMasters.shopA.shopName,
+        birds: 150,
+        remarks: `[ORDER] O:${collection.tripNo}`,
+      });
+
+    await tripsService.submitStep(firstTrip.id, "deliveries", {
+      mode: "save",
+      deliveries: [assignment("orders-race-a")],
+    } as Record<string, unknown>);
+    await assert.rejects(
+      () => tripsService.submitStep(secondTrip.id, "deliveries", {
+        mode: "save",
+        deliveries: [assignment("orders-race-b")],
+      } as Record<string, unknown>),
+      /exceeds the collected quantity/i,
+    );
+    const persisted = await pool.query(
+      `SELECT COALESCE(SUM(d.box_no), 0)::int AS boxes
+         FROM trip_deliveries d
+        WHERE d.remarks = $1 AND d.shop_id = $2 AND d.auto_capture_time IS NULL`,
+      [`[ORDER] O:${collection.tripNo}`, firstMasters.shopA.id],
+    );
+    assert.equal(Number(persisted.rows[0].boxes), 15);
   });
 });
 

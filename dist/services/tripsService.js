@@ -1,6 +1,7 @@
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { dateOnly, isoOrNull, num, numOrNull, str } from "../utils/coerce.js";
+import { formatTripNo, resolveTripDateForNumbering, } from "../utils/tripNumbering.js";
 import { resolveEmployeeNames, validateTripForeignKeys, } from "../utils/fkValidation.js";
 import { computeTripExpense } from "../utils/operationsHelpers.js";
 import { paginatedResult, } from "../utils/pagination.js";
@@ -372,14 +373,22 @@ async function hydrateTrip(client, row, options = {}) {
     }
     return { ...base, vehicleBoxCapacity, ...extras, ...dcPhoto };
 }
-async function generateTripNo(client, tripDate) {
-    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`trip_no_${tripDate}`]);
-    const ymd = tripDate.replace(/-/g, "");
+/**
+ * Allocate the next trip number for a business date.
+ * Counts EVERY row for that trip_date — Draft, Pending, Completed, and soft-deleted.
+ * Deleted numbers stay consumed so Recent / History / Fuel stay gap-stable.
+ */
+async function nextSequenceForTripDate(client, tripDate) {
     const result = await client.query(`SELECT COALESCE(MAX((substring(trip_no from '\\d{3}$'))::int), 0)::text AS m
        FROM trips
       WHERE trip_date = $1::date AND trip_no ~ '^TR-\\d{8}-\\d{3}$'`, [tripDate]);
-    const seq = String(Number(result.rows[0].m) + 1).padStart(3, "0");
-    return `TR-${ymd}-${seq}`;
+    return Number(result.rows[0].m) + 1;
+}
+async function generateTripNo(client, tripDate) {
+    // Serialize allocators for the same calendar day (all statuses / deleted).
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`trip_no_${tripDate}`]);
+    const seq = await nextSequenceForTripDate(client, tripDate);
+    return formatTripNo(tripDate, seq);
 }
 async function assertOptimisticLock(client, tripId, expectedUpdatedAt) {
     if (!expectedUpdatedAt)
@@ -546,9 +555,18 @@ async function assertDeliveriesWithinCapacity(client, tripId, deliveries) {
             if (!Number.isSafeInteger(boxes) || boxes <= 0) {
                 throw new AppError(422, "Orders assignment/delivery boxes must be a positive whole number.");
             }
-            const orderRef = remarks.match(/\bO:([^|\s]+)/)?.[1] ?? "unknown";
-            const key = `${orderRef}:${Number(d.shopId ?? 0)}`;
-            const balance = orderBalances.get(key) ?? { planned: 0, captured: 0 };
+            const orderRef = remarks.match(/\bO:([^|\s]+)/)?.[1] ?? "";
+            const shopId = Number(d.shopId ?? 0);
+            if (!orderRef || !Number.isSafeInteger(shopId) || shopId <= 0) {
+                throw new AppError(422, "Orders assignment rows require a valid order reference and shop id.");
+            }
+            const key = `${orderRef}:${shopId}`;
+            const balance = orderBalances.get(key) ?? {
+                orderRef,
+                shopId,
+                planned: 0,
+                captured: 0,
+            };
             if (isCapturedOrderRow)
                 balance.captured += boxes;
             else
@@ -565,6 +583,38 @@ async function assertDeliveriesWithinCapacity(client, tripId, deliveries) {
     for (const [key, balance] of orderBalances) {
         if (balance.captured > balance.planned) {
             throw new AppError(422, `Delivered boxes exceed the assigned quantity for order/shop ${key} (${balance.captured} > ${balance.planned}).`);
+        }
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+            `orders_assignment_${balance.orderRef}_${balance.shopId}`,
+        ]);
+        const collected = await client.query(`SELECT d.box_no
+         FROM trips c
+         JOIN trip_deliveries d ON d.trip_id = c.id
+        WHERE c.trip_no = $1
+          AND c.deleted = FALSE
+          AND c.vehicle_id IS NULL
+          AND c.remarks = '[ORDER_COLLECTION]'
+          AND d.deleted = FALSE
+          AND d.shop_id = $2
+          AND d.auto_capture_time IS NULL
+        FOR UPDATE OF d`, [balance.orderRef, balance.shopId]);
+        const collectedBoxes = collected.rows.reduce((sum, collectedRow) => sum + Number(collectedRow.box_no ?? 0), 0);
+        if (!Number.isSafeInteger(collectedBoxes) || collectedBoxes <= 0) {
+            throw new AppError(409, `Order ${balance.orderRef} has no active collected quantity for this shop.`);
+        }
+        const assignedElsewhere = await client.query(`SELECT COALESCE(SUM(d.box_no), 0)::text AS boxes
+         FROM trip_deliveries d
+         JOIN trips t ON t.id = d.trip_id
+        WHERE d.trip_id <> $1
+          AND t.deleted = FALSE
+          AND t.vehicle_id IS NOT NULL
+          AND d.deleted = FALSE
+          AND d.shop_id = $2
+          AND d.remarks = $3
+          AND d.auto_capture_time IS NULL`, [tripId, balance.shopId, `[ORDER] O:${balance.orderRef}`]);
+        const elsewhereBoxes = Number(assignedElsewhere.rows[0]?.boxes ?? 0);
+        if (elsewhereBoxes + balance.planned > collectedBoxes) {
+            throw new AppError(409, `Order assignment exceeds the collected quantity for order/shop ${key} (${elsewhereBoxes + balance.planned} > ${collectedBoxes}).`);
         }
     }
     assertWithinCapacity({
@@ -717,8 +767,10 @@ function flattenDiesel(entries) {
         out[`dieselRate${e.rowIndex}`] = e.rate;
         out[`dieselMeter${e.rowIndex}`] = e.meter;
         out[`dieselBunk${e.rowIndex}`] = e.bunkName;
-        out[`dieselImage${e.rowIndex}`] = e.imageData;
+        // Never duplicate full base64 into flat keys — FE reads dieselEntries /
+        // keeps local sheet images. Flat keys only carry the file name + flag.
         out[`dieselImageName${e.rowIndex}`] = e.imageName;
+        out[`dieselHasImage${e.rowIndex}`] = Boolean(e.imageData && String(e.imageData).length > 40);
         out[`dieselClientKey${e.rowIndex}`] = e.clientKey ?? null;
         out[`dieselGpsLat${e.rowIndex}`] = e.gpsLat ?? null;
         out[`dieselGpsLon${e.rowIndex}`] = e.gpsLon ?? null;
@@ -728,6 +780,16 @@ function flattenDiesel(entries) {
         out[`dieselSubmittedAt${e.rowIndex}`] = e.submittedAt ?? null;
     }
     return out;
+}
+/** After a single-row diesel write, slim other rows' images so 5–10 bill trips
+ *  do not re-download megabytes of base64 on every submit. */
+function slimDieselEntriesForWriteResponse(entries, keepRowIndex) {
+    return entries.map((entry) => {
+        if (entry.rowIndex === keepRowIndex)
+            return entry;
+        const hasImage = Boolean(entry.imageData && String(entry.imageData).length > 40);
+        return hasImage ? { ...entry, imageData: null } : entry;
+    });
 }
 function buildListWhere(filters) {
     const clauses = [];
@@ -854,6 +916,19 @@ function applyComputedFields(body, boxDetails, deliveries) {
     }
 }
 export const tripsService = {
+    /**
+     * Preview the next trip number for a selected business date.
+     * Same rule as create (MAX+1 across all statuses including deleted).
+     * Approximate under concurrency — authoritative number is assigned on create.
+     */
+    async previewNextTripNo(rawDate) {
+        const tripDate = resolveTripDateForNumbering(rawDate, { required: true });
+        const result = await query(`SELECT COALESCE(MAX((substring(trip_no from '\\d{3}$'))::int), 0)::text AS m
+         FROM trips
+        WHERE trip_date = $1::date AND trip_no ~ '^TR-\\d{8}-\\d{3}$'`, [tripDate]);
+        const sequence = Number(result.rows[0]?.m ?? 0) + 1;
+        return { tripDate, tripNo: formatTripNo(tripDate, sequence), sequence };
+    },
     async list(filters = {}) {
         const { where, params } = buildListWhere(filters);
         if (filters.pagination) {
@@ -984,9 +1059,9 @@ export const tripsService = {
     async createDraft(body = {}) {
         return withTransaction(async (client) => {
             try {
-                const tripDate = dateOnly(body.tripDate) ??
-                    new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-                // Server-only numbering on create (see save()).
+                // Number from the selected business date (not UTC "yesterday").
+                // Counts Draft / Pending / Completed / Deleted for that day.
+                const tripDate = resolveTripDateForNumbering(body.tripDate, { required: false });
                 const tripNo = await generateTripNo(client, tripDate);
                 const remarks = body.remarks == null ? null : str(body.remarks).trim() || null;
                 const inserted = await client.query(`INSERT INTO trips (trip_no, trip_date, status, remarks)
@@ -1064,15 +1139,20 @@ export const tripsService = {
                     }, client);
                 }
                 if (!tripId) {
-                    const tripDate = dateOnly(body.tripDate) ??
-                        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-                    // A new trip is numbered ONLY by the server. Never trust a
-                    // client-supplied tripNo here: a stale value forwarded by the UI
-                    // collides with trips_trip_no_key (23505) and surfaces to the user
-                    // as the Generic "Duplicate record" 409 â€” even for a different vehicle.
+                    // Selected Step 1 date drives both trip_date and TR-YYYYMMDD-NNN.
+                    // Client tripNo is ignored; deleted / draft / pending / completed all count.
+                    const tripDate = resolveTripDateForNumbering(body.tripDate, { required: true });
                     const tripNo = await generateTripNo(client, tripDate);
                     const inserted = await client.query(`INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,$3) RETURNING id`, [tripNo, tripDate, body.status ?? "Draft"]);
                     tripId = num(inserted.rows[0].id);
+                }
+                else if (body.tripDate != null) {
+                    // trip_date is immutable after create — number embeds the date.
+                    const existingDate = existing ? dateOnly(existing.rows[0].trip_date) : null;
+                    const requested = dateOnly(body.tripDate);
+                    if (existingDate && requested && requested !== existingDate) {
+                        throw new AppError(422, `Trip date is locked to ${existingDate} because trip number ${existing?.rows[0]?.trip_no ?? ""} was already assigned. Close and create a new trip for a different date.`);
+                    }
                 }
                 const dieselEntries = extractDieselFromBody(body);
                 const boxDetails = body.boxDetails ?? [];
@@ -1090,7 +1170,9 @@ export const tripsService = {
                     // The trip's business date â€” primary chronological key (see the
                     // vehicle_meter_events view's comment for why date, not timestamp,
                     // is primary: it keeps same-day cross-module comparisons fair).
-                    const tripBusinessDate = dateOnly(body.tripDate) ?? (existing ? dateOnly(existing.rows[0].trip_date) : null);
+                    // After create, trip_date is locked to the numbered date.
+                    const tripBusinessDate = (existing ? dateOnly(existing.rows[0].trip_date) : null) ??
+                        dateOnly(body.tripDate);
                     if (!tripBusinessDate) {
                         throw new AppError(422, "Trip date is required before submitting this step.");
                     }
@@ -1304,7 +1386,8 @@ export const tripsService = {
             approved_by = COALESCE($66, approved_by)
            WHERE id = $1`, [
                     tripId,
-                    dateOnly(body.tripDate),
+                    // trip_date is immutable after create (number embeds YYYYMMDD).
+                    null,
                     body.status ?? null,
                     // start_time is never trusted from the client — the official Step 1
                     // timestamp is set server-side on first submission (guarded block).
@@ -2376,9 +2459,11 @@ export const tripsService = {
             });
             const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
             const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
+            const dieselEntries = slimDieselEntriesForWriteResponse(trip.dieselEntries ?? [], rowIndex);
             return {
                 ...trip,
-                ...flattenDiesel(trip.dieselEntries ?? []),
+                dieselEntries,
+                ...flattenDiesel(dieselEntries),
             };
         });
     },
@@ -2449,9 +2534,12 @@ export const tripsService = {
             });
             const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
             const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
+            const keepRow = num(existing.rows[0].row_index);
+            const dieselEntries = slimDieselEntriesForWriteResponse(trip.dieselEntries ?? [], keepRow);
             return {
                 ...trip,
-                ...flattenDiesel(trip.dieselEntries ?? []),
+                dieselEntries,
+                ...flattenDiesel(dieselEntries),
             };
         });
     },

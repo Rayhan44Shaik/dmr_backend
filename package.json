@@ -5,7 +5,9 @@
   "type": "module",
   "engines": { "node": ">=22 <26" },
   "scripts": {
-    "dev": "tsx watch --clear-screen=false src/index.ts",
+    "dev": "node scripts/dev.mjs",
+    "dev:watch": "tsx watch --clear-screen=false src/index.ts",
+    "free-port": "node scripts/free-port.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "db:migrate": "tsx src/scripts/migrate.ts",

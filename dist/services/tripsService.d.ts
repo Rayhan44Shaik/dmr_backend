@@ -2,6 +2,16 @@ import type { BoxDetail, DieselEntry, ShopDelivery, Trip, TripStatus, TripStepSt
 import { type PaginationParams, type PaginatedResult } from "../utils/pagination.js";
 import { type TripWizardStep } from "../utils/tripResume.js";
 export declare const tripsService: {
+    /**
+     * Preview the next trip number for a selected business date.
+     * Same rule as create (MAX+1 across all statuses including deleted).
+     * Approximate under concurrency — authoritative number is assigned on create.
+     */
+    previewNextTripNo(rawDate: unknown): Promise<{
+        tripDate: string;
+        tripNo: string;
+        sequence: number;
+    }>;
     list(filters?: {
         fromDate?: string;
         toDate?: string;
@@ -908,6 +918,7 @@ export declare const tripsService: {
      * Idempotent on (trip_id, client_key) when clientKey is provided.
      */
     upsertDieselEntry(tripId: number, body: Record<string, unknown>): Promise<{
+        dieselEntries: DieselEntry[];
         id: number;
         tripNo: string;
         tripDate: string;
@@ -979,7 +990,6 @@ export declare const tripsService: {
         others3Amt?: number;
         others4Amt?: number;
         others5Amt?: number;
-        dieselEntries?: DieselEntry[];
         fuel: number;
         expense: number;
         driverBata?: number;
@@ -1018,6 +1028,7 @@ export declare const tripsService: {
         dcPhotoData2?: string | null;
     }>;
     updateDieselEntry(tripId: number, entryId: number, body: Record<string, unknown>): Promise<{
+        dieselEntries: DieselEntry[];
         id: number;
         tripNo: string;
         tripDate: string;
@@ -1089,7 +1100,6 @@ export declare const tripsService: {
         others3Amt?: number;
         others4Amt?: number;
         others5Amt?: number;
-        dieselEntries?: DieselEntry[];
         fuel: number;
         expense: number;
         driverBata?: number;
