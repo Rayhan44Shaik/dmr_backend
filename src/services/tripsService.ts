@@ -12,6 +12,10 @@ import type {
 } from "../types/models.js";
 import { dateOnly, isoOrNull, num, numOrNull, str } from "../utils/coerce.js";
 import {
+  formatTripNo,
+  resolveTripDateForNumbering,
+} from "../utils/tripNumbering.js";
+import {
   resolveEmployeeNames,
   validateTripForeignKeys,
 } from "../utils/fkValidation.js";
@@ -29,7 +33,7 @@ import {
   computeTripKpis,
   sumDieselFuel,
 } from "../utils/tripCalculations.js";
-import { loadDcPhoto, syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
+import { loadDcPhoto, syncDieselToFuelExpenses, syncTripFuelFromDb } from "../utils/tripFuelSync.js";
 import { assertWithinCapacity, generateSaleNo, recalcTripDeliveryTotals, sumActiveDeliveries } from "../utils/tripDeliverySync.js";
 import {
   getLatestVehicleMeter,
@@ -566,17 +570,26 @@ async function hydrateTrip(
   return { ...base, vehicleBoxCapacity, ...extras, ...dcPhoto };
 }
 
-async function generateTripNo(client: Client, tripDate: string): Promise<string> {
-  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`trip_no_${tripDate}`]);
-  const ymd = tripDate.replace(/-/g, "");
+/**
+ * Allocate the next trip number for a business date.
+ * Counts EVERY row for that trip_date — Draft, Pending, Completed, and soft-deleted.
+ * Deleted numbers stay consumed so Recent / History / Fuel stay gap-stable.
+ */
+async function nextSequenceForTripDate(client: Client, tripDate: string): Promise<number> {
   const result = await client.query<{ m: string }>(
     `SELECT COALESCE(MAX((substring(trip_no from '\\d{3}$'))::int), 0)::text AS m
        FROM trips
       WHERE trip_date = $1::date AND trip_no ~ '^TR-\\d{8}-\\d{3}$'`,
     [tripDate]
   );
-  const seq = String(Number(result.rows[0].m) + 1).padStart(3, "0");
-  return `TR-${ymd}-${seq}`;
+  return Number(result.rows[0].m) + 1;
+}
+
+async function generateTripNo(client: Client, tripDate: string): Promise<string> {
+  // Serialize allocators for the same calendar day (all statuses / deleted).
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`trip_no_${tripDate}`]);
+  const seq = await nextSequenceForTripDate(client, tripDate);
+  return formatTripNo(tripDate, seq);
 }
 
 async function assertOptimisticLock(
@@ -766,6 +779,7 @@ async function assertDeliveriesWithinCapacity(
 
   let totalBirds = 0;
   let totalWeight = 0;
+  const orderBalances = new Map<string, { planned: number; captured: number }>();
   for (const d of deliveries) {
     const birds = Number(d.birds ?? 0);
     const weight = Number(d.weight ?? 0);
@@ -775,8 +789,41 @@ async function assertDeliveriesWithinCapacity(
     if (!Number.isFinite(weight) || weight < 0) {
       throw new AppError(422, `Shop delivery weight must be a non-negative number (got ${d.weight}).`);
     }
-    totalBirds += birds + Number(d.mortality ?? 0);
-    totalWeight += weight + Number(d.mortKg ?? 0);
+    const remarks = String(d.remarks ?? "");
+    const isOrderRow = remarks.startsWith("[ORDER]");
+    const isCapturedOrderRow =
+      isOrderRow &&
+      Boolean(
+        d.autoCaptureTime ||
+          (d as { deliveredAt?: string }).deliveredAt ||
+          (d as { deliveryTime?: string }).deliveryTime
+      );
+    if (isOrderRow) {
+      const boxes = Number(d.boxNo ?? 0);
+      if (!Number.isSafeInteger(boxes) || boxes <= 0) {
+        throw new AppError(422, "Orders assignment/delivery boxes must be a positive whole number.");
+      }
+      const orderRef = remarks.match(/\bO:([^|\s]+)/)?.[1] ?? "unknown";
+      const key = `${orderRef}:${Number(d.shopId ?? 0)}`;
+      const balance = orderBalances.get(key) ?? { planned: 0, captured: 0 };
+      if (isCapturedOrderRow) balance.captured += boxes;
+      else balance.planned += boxes;
+      orderBalances.set(key, balance);
+    }
+    // Assignment plans carry proportional figures for reporting only. They
+    // do not consume pickup capacity until a real Step 4 capture exists.
+    if (!isOrderRow || isCapturedOrderRow) {
+      totalBirds += birds + Number(d.mortality ?? 0);
+      totalWeight += weight + Number(d.mortKg ?? 0);
+    }
+  }
+  for (const [key, balance] of orderBalances) {
+    if (balance.captured > balance.planned) {
+      throw new AppError(
+        422,
+        `Delivered boxes exceed the assigned quantity for order/shop ${key} (${balance.captured} > ${balance.planned}).`
+      );
+    }
   }
 
   assertWithinCapacity({
@@ -1142,6 +1189,23 @@ function applyComputedFields(
 }
 
 export const tripsService = {
+  /**
+   * Preview the next trip number for a selected business date.
+   * Same rule as create (MAX+1 across all statuses including deleted).
+   * Approximate under concurrency — authoritative number is assigned on create.
+   */
+  async previewNextTripNo(rawDate: unknown): Promise<{ tripDate: string; tripNo: string; sequence: number }> {
+    const tripDate = resolveTripDateForNumbering(rawDate, { required: true });
+    const result = await query<{ m: string }>(
+      `SELECT COALESCE(MAX((substring(trip_no from '\\d{3}$'))::int), 0)::text AS m
+         FROM trips
+        WHERE trip_date = $1::date AND trip_no ~ '^TR-\\d{8}-\\d{3}$'`,
+      [tripDate]
+    );
+    const sequence = Number(result.rows[0]?.m ?? 0) + 1;
+    return { tripDate, tripNo: formatTripNo(tripDate, sequence), sequence };
+  },
+
   async list(
     filters: {
       fromDate?: string;
@@ -1331,10 +1395,9 @@ export const tripsService = {
   async createDraft(body: Partial<Trip> = {}) {
     return withTransaction(async (client) => {
       try {
-        const tripDate =
-          dateOnly(body.tripDate) ??
-          new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-        // Server-only numbering on create (see save()).
+        // Number from the selected business date (not UTC "yesterday").
+        // Counts Draft / Pending / Completed / Deleted for that day.
+        const tripDate = resolveTripDateForNumbering(body.tripDate, { required: false });
         const tripNo = await generateTripNo(client, tripDate);
 
         const remarks = body.remarks == null ? null : str(body.remarks).trim() || null;
@@ -1431,19 +1494,25 @@ export const tripsService = {
         }
 
         if (!tripId) {
-          const tripDate =
-            dateOnly(body.tripDate) ??
-            new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-          // A new trip is numbered ONLY by the server. Never trust a
-          // client-supplied tripNo here: a stale value forwarded by the UI
-          // collides with trips_trip_no_key (23505) and surfaces to the user
-          // as the Generic "Duplicate record" 409 â€” even for a different vehicle.
+          // Selected Step 1 date drives both trip_date and TR-YYYYMMDD-NNN.
+          // Client tripNo is ignored; deleted / draft / pending / completed all count.
+          const tripDate = resolveTripDateForNumbering(body.tripDate, { required: true });
           const tripNo = await generateTripNo(client, tripDate);
           const inserted = await client.query(
             `INSERT INTO trips (trip_no, trip_date, status) VALUES ($1,$2,$3) RETURNING id`,
             [tripNo, tripDate, body.status ?? "Draft"]
           );
           tripId = num(inserted.rows[0].id);
+        } else if (body.tripDate != null) {
+          // trip_date is immutable after create — number embeds the date.
+          const existingDate = existing ? dateOnly(existing.rows[0].trip_date) : null;
+          const requested = dateOnly(body.tripDate);
+          if (existingDate && requested && requested !== existingDate) {
+            throw new AppError(
+              422,
+              `Trip date is locked to ${existingDate} because trip number ${existing?.rows[0]?.trip_no ?? ""} was already assigned. Close and create a new trip for a different date.`
+            );
+          }
         }
 
         const dieselEntries = extractDieselFromBody(body);
@@ -1464,8 +1533,10 @@ export const tripsService = {
           // The trip's business date â€” primary chronological key (see the
           // vehicle_meter_events view's comment for why date, not timestamp,
           // is primary: it keeps same-day cross-module comparisons fair).
+          // After create, trip_date is locked to the numbered date.
           const tripBusinessDate =
-            dateOnly(body.tripDate) ?? (existing ? dateOnly(existing.rows[0].trip_date) : null);
+            (existing ? dateOnly(existing.rows[0].trip_date) : null) ??
+            dateOnly(body.tripDate);
           if (!tripBusinessDate) {
             throw new AppError(422, "Trip date is required before submitting this step.");
           }
@@ -1705,7 +1776,8 @@ export const tripsService = {
            WHERE id = $1`,
           [
             tripId,
-            dateOnly(body.tripDate),
+            // trip_date is immutable after create (number embeds YYYYMMDD).
+            null,
             body.status ?? null,
             // start_time is never trusted from the client — the official Step 1
             // timestamp is set server-side on first submission (guarded block).
@@ -1900,8 +1972,13 @@ export const tripsService = {
           }
           await replaceDeliveries(client, tripId, body.deliveries as ShopDelivery[]);
         }
-        if (dieselEntries.length || body.dieselEntries) {
+        if (dieselEntries.length > 0) {
           await replaceDiesel(client, tripId, dieselEntries);
+        } else if (body.dieselEntries === null || body.clearDiesel === true) {
+          // Explicit clear only — never wipe diesel because Step 5 expense
+          // payloads omit diesel (bills live on /diesel) and an empty
+          // `dieselEntries: []` used to delete every row.
+          await replaceDiesel(client, tripId, []);
         }
 
         // Step 3 photos — up to 2, stored in trip_media (base64). Persist the
@@ -1935,9 +2012,17 @@ export const tripsService = {
 
         const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
         const tripRow = row.rows[0];
-        const tripDate = dateOnly(tripRow.trip_date) ?? "";
 
-        if (dieselEntries.length && (body.expensesStepSubmitted || body.syncFuel)) {
+        // Fuel sync always reads trip_diesel_entries (source of truth). Step 5
+        // expense bodies intentionally omit diesel fields, so body-based sync
+        // never created Fuel Expense rows for many completed trips.
+        if (body.expensesStepSubmitted || body.syncFuel || body.endStepSubmitted) {
+          await syncTripFuelFromDb(client, tripId, {
+            approveIfCompleted: str(tripRow.status) === "Completed",
+            createdBy: str(body.createdBy ?? "trip-step5-sync"),
+          });
+        } else if (dieselEntries.length > 0) {
+          const tripDate = dateOnly(tripRow.trip_date) ?? "";
           await syncDieselToFuelExpenses(client, tripId, tripDate, dieselEntries, {
             vehicleId: numOrNull(tripRow.vehicle_id),
             vehicleNo: tripRow.vehicle_no ? str(tripRow.vehicle_no) : null,
@@ -2039,7 +2124,8 @@ export const tripsService = {
 
       // Live deliveries for this trip.
       const delRes = await client.query(
-        `SELECT id, client_key, shop_id, serial_no, birds, weight, mortality, mort_kg
+        `SELECT id, client_key, shop_id, serial_no, box_no, birds, weight,
+                mortality, mort_kg, remarks, auto_capture_time
            FROM trip_deliveries WHERE trip_id = $1`,
         [tripId]
       );
@@ -2048,10 +2134,13 @@ export const tripsService = {
         clientKey: r.client_key == null ? null : str(r.client_key),
         shopId: numOrNull(r.shop_id),
         serialNo: numOrNull(r.serial_no),
+        boxNo: num(r.box_no),
         birds: num(r.birds),
         weight: num(r.weight),
         mortality: num(r.mortality),
         mortKg: num(r.mort_kg),
+        remarks: str(r.remarks),
+        autoCaptureTime: r.auto_capture_time == null ? null : str(r.auto_capture_time),
       }));
 
       const findBy = (d: ShopDelivery) => {
@@ -2094,6 +2183,50 @@ export const tripsService = {
         if (match) excludedIds.add(match.id);
       }
 
+      // Orders delivery captures are append-only partials beside one
+      // uncaptured assignment-plan row. Rebuild the prospective persisted
+      // state while the trip row is locked and reject any direct/stale/
+      // concurrent request whose captures exceed that plan. This is backend
+      // business truth; the browser's pending-box maximum is only UX.
+      const prospectiveOrderRows = [
+        ...existingRows
+          .filter((row) => !excludedIds.has(row.id))
+          .map((row) => ({
+            shopId: row.shopId,
+            boxNo: row.boxNo,
+            remarks: row.remarks,
+            captured: Boolean(row.autoCaptureTime),
+          })),
+        ...deduped.map((row) => ({
+          shopId: row.shopId == null ? null : Number(row.shopId),
+          boxNo: Number(row.boxNo ?? 0),
+          remarks: String(row.remarks ?? ""),
+          captured: Boolean(
+            row.autoCaptureTime ||
+              (row as { deliveredAt?: string }).deliveredAt ||
+              (row as { deliveryTime?: string }).deliveryTime
+          ),
+        })),
+      ].filter((row) => row.remarks.startsWith("[ORDER]") && row.shopId != null);
+
+      const orderBalances = new Map<string, { planned: number; captured: number }>();
+      for (const row of prospectiveOrderRows) {
+        const orderRef = row.remarks.match(/\bO:([^|\s]+)/)?.[1] ?? "unknown";
+        const key = `${orderRef}:${row.shopId}`;
+        const balance = orderBalances.get(key) ?? { planned: 0, captured: 0 };
+        if (row.captured) balance.captured += row.boxNo;
+        else balance.planned += row.boxNo;
+        orderBalances.set(key, balance);
+      }
+      for (const [key, balance] of orderBalances) {
+        if (balance.captured > balance.planned) {
+          throw new AppError(
+            422,
+            `Delivered boxes exceed the assigned quantity for order/shop ${key} (${balance.captured} > ${balance.planned}).`
+          );
+        }
+      }
+
       // Boxes already committed to deliveries NOT being overwritten.
       const excluded = [...excludedIds];
       const exclClause = excluded.length ? `AND d.id <> ALL($2::int[])` : "";
@@ -2113,9 +2246,21 @@ export const tripsService = {
       const base = await sumActiveDeliveries(client, tripId);
       let totalBirds = base.birds + base.mortalityCount;
       let totalWeight = base.weight + base.mortalityWeight;
+      // Assignment-plan rows carry proportional birds/weight for reporting,
+      // but are not physical deliveries. sumActiveDeliveries sees every live
+      // row, so remove uncaptured Orders plans before applying real-capture
+      // capacity checks below.
+      for (const r of existingRows) {
+        const isUncapturedOrderPlan =
+          r.remarks.startsWith("[ORDER]") && !r.autoCaptureTime;
+        if (!isUncapturedOrderPlan) continue;
+        totalBirds -= r.birds + r.mortality;
+        totalWeight -= r.weight + r.mortKg;
+      }
       for (const id of excludedIds) {
         const r = existingRows.find((x) => x.id === id);
         if (!r) continue;
+        if (r.remarks.startsWith("[ORDER]") && !r.autoCaptureTime) continue;
         totalBirds -= r.birds + r.mortality;
         totalWeight -= r.weight + r.mortKg;
       }
@@ -2597,17 +2742,13 @@ export const tripsService = {
         }
       }
 
-      // Diesel bills synced to fuel_expenses get Approved only when the whole
-      // trip completion succeeds â€” same transaction, so failure rolls both back.
+      // Diesel → Fuel Expenses from the live diesel table, then approve when
+      // the trip enters Trip List (Completed).
       if (status === "Completed") {
-        await client.query(
-          `UPDATE fuel_expenses
-             SET status = 'Approved', approved_by = $2, approved_date = NOW(),
-                 ops_status = 'Approved', updated_at = NOW()
-           WHERE trip_id = $1 AND source_type = 'TRIP' AND status = 'Pending'
-             AND COALESCE(deleted, FALSE) = FALSE`,
-          [id, body.approvedBy ?? "system"]
-        );
+        await syncTripFuelFromDb(client, id, {
+          approveIfCompleted: true,
+          createdBy: body.approvedBy ?? "trip-complete-sync",
+        });
       }
 
       const trip = await hydrateTrip(client, result!.rows[0], { includeDcPhoto: true });
@@ -2853,6 +2994,13 @@ export const tripsService = {
         ]
       );
 
+      // Mirror into Fuel Expenses immediately so Trip List completion only has
+      // to approve — bills are never "missing" after a successful Step 5 diesel submit.
+      await syncTripFuelFromDb(client, tripId, {
+        approveIfCompleted: true,
+        createdBy: "diesel-upsert",
+      });
+
       const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
       const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
       return {
@@ -2928,6 +3076,11 @@ export const tripsService = {
           gpsCapturedAt,
         ]
       );
+
+      await syncTripFuelFromDb(client, tripId, {
+        approveIfCompleted: true,
+        createdBy: "diesel-update",
+      });
 
       const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
       const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });

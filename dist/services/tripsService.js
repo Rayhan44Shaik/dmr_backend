@@ -6,7 +6,7 @@ import { computeTripExpense } from "../utils/operationsHelpers.js";
 import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import { computeDeliveryAmount, computeFarmAmount, computeTotalKm, computeTripKpis, sumDieselFuel, } from "../utils/tripCalculations.js";
-import { loadDcPhoto, syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
+import { loadDcPhoto, syncDieselToFuelExpenses, syncTripFuelFromDb } from "../utils/tripFuelSync.js";
 import { assertWithinCapacity, generateSaleNo, recalcTripDeliveryTotals, sumActiveDeliveries } from "../utils/tripDeliverySync.js";
 import { getLatestVehicleMeter, lockVehicleForMeterWrite, preciseIsoOrUndefined, validateVehicleMeter, } from "../utils/vehicleMeterLedger.js";
 import { assertStepOrder, getResumeLabel, getResumeStep, getWizardProgress, } from "../utils/tripResume.js";
@@ -525,6 +525,7 @@ async function assertDeliveriesWithinCapacity(client, tripId, deliveries) {
     const capacityWeight = farmLoadWeight > 0 ? farmLoadWeight : num(row.dc_weight);
     let totalBirds = 0;
     let totalWeight = 0;
+    const orderBalances = new Map();
     for (const d of deliveries) {
         const birds = Number(d.birds ?? 0);
         const weight = Number(d.weight ?? 0);
@@ -534,8 +535,37 @@ async function assertDeliveriesWithinCapacity(client, tripId, deliveries) {
         if (!Number.isFinite(weight) || weight < 0) {
             throw new AppError(422, `Shop delivery weight must be a non-negative number (got ${d.weight}).`);
         }
-        totalBirds += birds + Number(d.mortality ?? 0);
-        totalWeight += weight + Number(d.mortKg ?? 0);
+        const remarks = String(d.remarks ?? "");
+        const isOrderRow = remarks.startsWith("[ORDER]");
+        const isCapturedOrderRow = isOrderRow &&
+            Boolean(d.autoCaptureTime ||
+                d.deliveredAt ||
+                d.deliveryTime);
+        if (isOrderRow) {
+            const boxes = Number(d.boxNo ?? 0);
+            if (!Number.isSafeInteger(boxes) || boxes <= 0) {
+                throw new AppError(422, "Orders assignment/delivery boxes must be a positive whole number.");
+            }
+            const orderRef = remarks.match(/\bO:([^|\s]+)/)?.[1] ?? "unknown";
+            const key = `${orderRef}:${Number(d.shopId ?? 0)}`;
+            const balance = orderBalances.get(key) ?? { planned: 0, captured: 0 };
+            if (isCapturedOrderRow)
+                balance.captured += boxes;
+            else
+                balance.planned += boxes;
+            orderBalances.set(key, balance);
+        }
+        // Assignment plans carry proportional figures for reporting only. They
+        // do not consume pickup capacity until a real Step 4 capture exists.
+        if (!isOrderRow || isCapturedOrderRow) {
+            totalBirds += birds + Number(d.mortality ?? 0);
+            totalWeight += weight + Number(d.mortKg ?? 0);
+        }
+    }
+    for (const [key, balance] of orderBalances) {
+        if (balance.captured > balance.planned) {
+            throw new AppError(422, `Delivered boxes exceed the assigned quantity for order/shop ${key} (${balance.captured} > ${balance.planned}).`);
+        }
     }
     assertWithinCapacity({
         label: "birds",
@@ -1454,8 +1484,14 @@ export const tripsService = {
                     }
                     await replaceDeliveries(client, tripId, body.deliveries);
                 }
-                if (dieselEntries.length || body.dieselEntries) {
+                if (dieselEntries.length > 0) {
                     await replaceDiesel(client, tripId, dieselEntries);
+                }
+                else if (body.dieselEntries === null || body.clearDiesel === true) {
+                    // Explicit clear only — never wipe diesel because Step 5 expense
+                    // payloads omit diesel (bills live on /diesel) and an empty
+                    // `dieselEntries: []` used to delete every row.
+                    await replaceDiesel(client, tripId, []);
                 }
                 // Step 3 photos — up to 2, stored in trip_media (base64). Persist the
                 // submitted set, then remove any image row no longer referenced so a
@@ -1481,8 +1517,17 @@ export const tripsService = {
                 }
                 const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
                 const tripRow = row.rows[0];
-                const tripDate = dateOnly(tripRow.trip_date) ?? "";
-                if (dieselEntries.length && (body.expensesStepSubmitted || body.syncFuel)) {
+                // Fuel sync always reads trip_diesel_entries (source of truth). Step 5
+                // expense bodies intentionally omit diesel fields, so body-based sync
+                // never created Fuel Expense rows for many completed trips.
+                if (body.expensesStepSubmitted || body.syncFuel || body.endStepSubmitted) {
+                    await syncTripFuelFromDb(client, tripId, {
+                        approveIfCompleted: str(tripRow.status) === "Completed",
+                        createdBy: str(body.createdBy ?? "trip-step5-sync"),
+                    });
+                }
+                else if (dieselEntries.length > 0) {
+                    const tripDate = dateOnly(tripRow.trip_date) ?? "";
                     await syncDieselToFuelExpenses(client, tripId, tripDate, dieselEntries, {
                         vehicleId: numOrNull(tripRow.vehicle_id),
                         vehicleNo: tripRow.vehicle_no ? str(tripRow.vehicle_no) : null,
@@ -1573,17 +1618,21 @@ export const tripsService = {
                 boxesByNo.set(num(r.box_no), { birds: num(r.birds), weight: num(r.weight) });
             }
             // Live deliveries for this trip.
-            const delRes = await client.query(`SELECT id, client_key, shop_id, serial_no, birds, weight, mortality, mort_kg
+            const delRes = await client.query(`SELECT id, client_key, shop_id, serial_no, box_no, birds, weight,
+                mortality, mort_kg, remarks, auto_capture_time
            FROM trip_deliveries WHERE trip_id = $1`, [tripId]);
             const existingRows = delRes.rows.map((r) => ({
                 id: num(r.id),
                 clientKey: r.client_key == null ? null : str(r.client_key),
                 shopId: numOrNull(r.shop_id),
                 serialNo: numOrNull(r.serial_no),
+                boxNo: num(r.box_no),
                 birds: num(r.birds),
                 weight: num(r.weight),
                 mortality: num(r.mortality),
                 mortKg: num(r.mort_kg),
+                remarks: str(r.remarks),
+                autoCaptureTime: r.auto_capture_time == null ? null : str(r.auto_capture_time),
             }));
             const findBy = (d) => {
                 const key = d.clientKey ? str(d.clientKey) : null;
@@ -1626,6 +1675,45 @@ export const tripsService = {
                 if (match)
                     excludedIds.add(match.id);
             }
+            // Orders delivery captures are append-only partials beside one
+            // uncaptured assignment-plan row. Rebuild the prospective persisted
+            // state while the trip row is locked and reject any direct/stale/
+            // concurrent request whose captures exceed that plan. This is backend
+            // business truth; the browser's pending-box maximum is only UX.
+            const prospectiveOrderRows = [
+                ...existingRows
+                    .filter((row) => !excludedIds.has(row.id))
+                    .map((row) => ({
+                    shopId: row.shopId,
+                    boxNo: row.boxNo,
+                    remarks: row.remarks,
+                    captured: Boolean(row.autoCaptureTime),
+                })),
+                ...deduped.map((row) => ({
+                    shopId: row.shopId == null ? null : Number(row.shopId),
+                    boxNo: Number(row.boxNo ?? 0),
+                    remarks: String(row.remarks ?? ""),
+                    captured: Boolean(row.autoCaptureTime ||
+                        row.deliveredAt ||
+                        row.deliveryTime),
+                })),
+            ].filter((row) => row.remarks.startsWith("[ORDER]") && row.shopId != null);
+            const orderBalances = new Map();
+            for (const row of prospectiveOrderRows) {
+                const orderRef = row.remarks.match(/\bO:([^|\s]+)/)?.[1] ?? "unknown";
+                const key = `${orderRef}:${row.shopId}`;
+                const balance = orderBalances.get(key) ?? { planned: 0, captured: 0 };
+                if (row.captured)
+                    balance.captured += row.boxNo;
+                else
+                    balance.planned += row.boxNo;
+                orderBalances.set(key, balance);
+            }
+            for (const [key, balance] of orderBalances) {
+                if (balance.captured > balance.planned) {
+                    throw new AppError(422, `Delivered boxes exceed the assigned quantity for order/shop ${key} (${balance.captured} > ${balance.planned}).`);
+                }
+            }
             // Boxes already committed to deliveries NOT being overwritten.
             const excluded = [...excludedIds];
             const exclClause = excluded.length ? `AND d.id <> ALL($2::int[])` : "";
@@ -1643,9 +1731,22 @@ export const tripsService = {
             const base = await sumActiveDeliveries(client, tripId);
             let totalBirds = base.birds + base.mortalityCount;
             let totalWeight = base.weight + base.mortalityWeight;
+            // Assignment-plan rows carry proportional birds/weight for reporting,
+            // but are not physical deliveries. sumActiveDeliveries sees every live
+            // row, so remove uncaptured Orders plans before applying real-capture
+            // capacity checks below.
+            for (const r of existingRows) {
+                const isUncapturedOrderPlan = r.remarks.startsWith("[ORDER]") && !r.autoCaptureTime;
+                if (!isUncapturedOrderPlan)
+                    continue;
+                totalBirds -= r.birds + r.mortality;
+                totalWeight -= r.weight + r.mortKg;
+            }
             for (const id of excludedIds) {
                 const r = existingRows.find((x) => x.id === id);
                 if (!r)
+                    continue;
+                if (r.remarks.startsWith("[ORDER]") && !r.autoCaptureTime)
                     continue;
                 totalBirds -= r.birds + r.mortality;
                 totalWeight -= r.weight + r.mortKg;
@@ -1668,6 +1769,11 @@ export const tripsService = {
                     ? [...new Set(d.selectedBoxIds.map(Number))]
                     : [];
                 const perBoxData = Array.isArray(d.perBoxData) ? d.perBoxData : [];
+                const remarks = String(d.remarks ?? "").trim();
+                const isUncapturedOrderPlan = remarks.startsWith("[ORDER]") &&
+                    !d.autoCaptureTime &&
+                    !d.deliveredAt &&
+                    !d.deliveryTime;
                 // Basic type/safety (Save Progress): non-negative whole birds,
                 // non-negative weight. Never accept impossible negative values.
                 if (!Number.isInteger(birds) || birds < 0) {
@@ -1698,6 +1804,10 @@ export const tripsService = {
                 if (shopChanged && shopStatus !== "Active") {
                     throw new AppError(422, "Shop is no longer available for new selection.");
                 }
+                // Pending `[ORDER]` plan stubs are reference-only (may carry assigned
+                // boxes + planned birds/weight from Order Assignment). Skip
+                // delivery-vs-box capacity checks until Step 4 actually captures.
+                const enforceBoxCapacity = !isUncapturedOrderPlan;
                 // Box availability: every selected box must be a Step 3 pickup box and
                 // must not already be assigned to another (not-being-overwritten) shop.
                 for (const boxNo of selectedBoxIds) {
@@ -1716,14 +1826,16 @@ export const tripsService = {
                 // Shop-level bounds: delivery + mortality can never exceed what the
                 // selected pickup boxes represent (a box may hold MORE weight than the
                 // delivery — that is allowed; the reverse is not).
-                if (farmBirds > 0 && birds + mortality > farmBirds) {
+                // Allow 0.05 kg tolerance for 2-decimal rounding of weight + mortKg.
+                const WEIGHT_TOLERANCE_KG = 0.05;
+                if (enforceBoxCapacity && farmBirds > 0 && birds + mortality > farmBirds) {
                     throw new AppError(422, `Delivered birds plus mortality cannot exceed available birds (${farmBirds}).`);
                 }
-                if (farmWeight > 0 && weight + mortKg > farmWeight) {
+                if (enforceBoxCapacity && farmWeight > 0 && weight + mortKg > farmWeight + WEIGHT_TOLERANCE_KG) {
                     throw new AppError(422, `Delivery weight cannot exceed the selected box available weight (${farmWeight.toFixed(2)} kg).`);
                 }
                 // Weight-mode per-box breakdown must stay within each box's capacity.
-                if (mode === "weight") {
+                if (enforceBoxCapacity && mode === "weight") {
                     for (const pb of perBoxData) {
                         const box = boxesByNo.get(Number(pb.boxNo));
                         if (!box) {
@@ -1737,11 +1849,13 @@ export const tripsService = {
                         }
                     }
                 }
-                // Cross-shop totals (live persisted rows + this payload).
-                totalBirds += birds + mortality;
-                totalWeight += weight + mortKg;
-                assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
-                assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
+                // Cross-shop totals — only real captures count against pickup capacity.
+                if (enforceBoxCapacity) {
+                    totalBirds += birds + mortality;
+                    totalWeight += weight + mortKg;
+                    assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
+                    assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
+                }
                 // Ignore client-calculated totals; this prevents tampering and keeps
                 // retries/edits consistent with the persisted weight and rate.
                 const amount = computeDeliveryAmount(weight, d.rate);
@@ -2039,14 +2153,13 @@ export const tripsService = {
                     throw err;
                 }
             }
-            // Diesel bills synced to fuel_expenses get Approved only when the whole
-            // trip completion succeeds â€” same transaction, so failure rolls both back.
+            // Diesel → Fuel Expenses from the live diesel table, then approve when
+            // the trip enters Trip List (Completed).
             if (status === "Completed") {
-                await client.query(`UPDATE fuel_expenses
-             SET status = 'Approved', approved_by = $2, approved_date = NOW(),
-                 ops_status = 'Approved', updated_at = NOW()
-           WHERE trip_id = $1 AND source_type = 'TRIP' AND status = 'Pending'
-             AND COALESCE(deleted, FALSE) = FALSE`, [id, body.approvedBy ?? "system"]);
+                await syncTripFuelFromDb(client, id, {
+                    approveIfCompleted: true,
+                    createdBy: body.approvedBy ?? "trip-complete-sync",
+                });
             }
             const trip = await hydrateTrip(client, result.rows[0], { includeDcPhoto: true });
             return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
@@ -2255,6 +2368,12 @@ export const tripsService = {
                 gpsAccuracy,
                 gpsCapturedAt,
             ]);
+            // Mirror into Fuel Expenses immediately so Trip List completion only has
+            // to approve — bills are never "missing" after a successful Step 5 diesel submit.
+            await syncTripFuelFromDb(client, tripId, {
+                approveIfCompleted: true,
+                createdBy: "diesel-upsert",
+            });
             const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
             const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
             return {
@@ -2324,6 +2443,10 @@ export const tripsService = {
                 gpsAccuracy,
                 gpsCapturedAt,
             ]);
+            await syncTripFuelFromDb(client, tripId, {
+                approveIfCompleted: true,
+                createdBy: "diesel-update",
+            });
             const tripRow = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
             const trip = await hydrateTrip(client, tripRow.rows[0], { includeDcPhoto: true });
             return {

@@ -19,7 +19,7 @@ app.use(express.json({ limit: "25mb" }));
 app.get("/", (_req, res) => {
   res.json({
     name: "DMR Poultries API",
-    phase: "2 â€” Masters + Trips + Staff + Operations",
+    phase: "2 — Masters + Trips + Staff + Operations",
     docs: {
       swagger: "GET /api/docs",
       openapi: "GET /api/docs/openapi.json",
@@ -65,27 +65,81 @@ app.use("/api", apiRouter);
 app.use(notFound);
 app.use(errorHandler);
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Bind with short retries — tsx watch on Windows can restart before the
+ * previous listener has fully released PORT. */
+async function listen(server: http.Server, port: number, attempts = 12): Promise<void> {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: Error) => {
+          server.off("listening", onListening);
+          reject(err);
+        };
+        const onListening = () => {
+          server.off("error", onError);
+          resolve();
+        };
+        server.once("error", onError);
+        server.once("listening", onListening);
+        // Bind IPv4 explicitly so Vite's 127.0.0.1:4000 proxy always reaches
+        // this process (avoids dual-stack races on Windows).
+        server.listen(port, "0.0.0.0");
+      });
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EADDRINUSE" || attempt === attempts) {
+        throw err;
+      }
+      console.warn(
+        `Port ${port} still busy (attempt ${attempt}/${attempts}) — waiting for previous backend to exit…`
+      );
+      await sleep(250 * attempt);
+    }
+  }
+}
+
 async function start() {
   await pool.query("SELECT 1");
 
   const server = http.createServer(app);
 
-  server.on("error", (err) => {
+  const shutdown = (signal: string) => {
+    console.log(`\n${signal} received — closing API…`);
+    server.close(async () => {
+      try {
+        await pool.end();
+      } catch {
+        /* ignore */
+      }
+      process.exit(0);
+    });
+    // Force-exit if keep-alive sockets stall the close (Windows + tsx watch).
+    setTimeout(() => process.exit(0), 1500).unref();
+  };
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  // tsx watch on Windows often sends this before respawning.
+  process.once("SIGHUP", () => shutdown("SIGHUP"));
+
+  try {
+    await listen(server, env.port);
+  } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") {
       console.error(
-        `Port ${env.port} is already in use. Another process may already be running the backend.`
+        `Port ${env.port} is already in use after retries. Stop the other backend (or free the port) and try again.`
       );
       process.exit(1);
     }
     throw err;
-  });
+  }
 
-  // Bind IPv4 explicitly so Vite's 127.0.0.1:4000 proxy always reaches this
-  // process (avoids dual-stack races with leftover sample servers on Windows).
-  server.listen(env.port, "0.0.0.0", () => {
-    console.log(`DMR backend listening on http://0.0.0.0:${env.port}`);
-    console.log(`PostgreSQL: ${env.databaseUrl.replace(/:[^:@]+@/, ":***@")}`);
-  });
+  console.log(`DMR backend listening on http://0.0.0.0:${env.port}`);
+  console.log(`PostgreSQL: ${env.databaseUrl.replace(/:[^:@]+@/, ":***@")}`);
 }
 
 start().catch((err) => {

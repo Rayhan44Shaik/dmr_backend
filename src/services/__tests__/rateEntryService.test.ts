@@ -36,9 +36,12 @@ async function cleanup(f: Fixture): Promise<void> {
 }
 
 async function makeShop(f: Fixture, name: string): Promise<{ id: number }> {
+  const n = uniqueInt();
+  const phone = `9${String(n).slice(-9).padStart(9, "0")}`;
   const r = await pool.query<{ id: number }>(
-    `INSERT INTO shops (shop_no, shop_name) VALUES ($1, $2) RETURNING id`,
-    [uniqueInt(), name]
+    `INSERT INTO shops (shop_no, shop_number, shop_name, phone_number)
+     VALUES ($1, $2, $3, $4) RETURNING id`,
+    [n, String(n), name, phone]
   );
   f.shopIds.push(r.rows[0].id);
   return r.rows[0];
@@ -297,6 +300,48 @@ describe("rateEntryService", () => {
         () => rateEntryService.lock(tripId, { lockedBy: "tester2" }),
         (err: unknown) => err instanceof AppError && err.status === 409
       );
+    } finally {
+      await cleanup(f);
+    }
+  });
+
+  test("Rate Entry includes captured [ORDER] shops and excludes empty plan stubs", async () => {
+    const f = newFixture();
+    try {
+      const shopA = await makeShop(f, "Order Captured Shop");
+      const shopB = await makeShop(f, "Pending Plan Shop");
+      const tripId = await makeTrip(f, { tripNo: `RT-${uniqueInt()}`, status: "Completed" });
+
+      const capturedId = await addDelivery(tripId, {
+        shopId: shopA.id,
+        shopName: "Order Captured Shop",
+        birds: 54,
+        weight: 136.8,
+      });
+      await pool.query(
+        `UPDATE trip_deliveries
+            SET remarks = $2, auto_capture_time = $3
+          WHERE id = $1`,
+        [capturedId, "[ORDER] O:TR-TEST-ORD", "2026-09-18T10:05:00+05:30"]
+      );
+
+      await pool.query(
+        `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, remarks)
+         VALUES ($1, $2, $3, $4, 0, 0, $5)`,
+        [tripId, `SALE-${uniqueInt()}`, shopB.id, "Pending Plan Shop", "[ORDER] O:TR-TEST-ORD"]
+      );
+
+      const detail = await rateEntryService.getById(tripId);
+      assert.equal(detail.deliveries.length, 1);
+      assert.equal(detail.deliveries[0].shopName, "Order Captured Shop");
+      assert.ok(detail.deliveries[0].remarks.startsWith("[ORDER]"));
+      assert.ok(detail.deliveries[0].autoCaptureTime);
+
+      await rateEntryService.save(tripId, {
+        rates: [{ deliveryId: capturedId, rate: 95 }],
+      });
+      const locked = await rateEntryService.lock(tripId, { lockedBy: "tester" });
+      assert.equal(locked.rateLocked, true);
     } finally {
       await cleanup(f);
     }

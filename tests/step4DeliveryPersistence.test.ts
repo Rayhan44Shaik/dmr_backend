@@ -887,3 +887,67 @@ describe("Step 4 API endpoint (PUT /trips/:id/deliveries)", () => {
   });
 });
 
+describe("Orders partial-delivery integrity", () => {
+  it("persists equal partial captures and rejects capture totals above assignment", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-14",
+      boxes: [{ boxNo: 1, birds: 300, weight: 600 }],
+    });
+    const plan = delivery({
+      clientKey: "orders-plan",
+      serialNo: 1,
+      boxNo: 20,
+      shopId: m.shopA.id,
+      shopName: m.shopA.shopName,
+      birds: 200,
+      remarks: "[ORDER] O:TR-ORDER-001",
+    });
+    const capture = (clientKey: string, serialNo: number) =>
+      delivery({
+        clientKey,
+        serialNo,
+        boxNo: 10,
+        shopId: m.shopA.id,
+        shopName: m.shopA.shopName,
+        birds: 100,
+        remarks: "[ORDER] O:TR-ORDER-001",
+        autoCaptureTime: new Date(`2026-07-14T0${serialNo}:00:00.000Z`).toISOString(),
+      });
+
+    await tripsService.submitStep(trip.id, "deliveries", {
+      deliveries: [plan, capture("orders-part-1", 2), capture("orders-part-2", 3)],
+      mode: "save",
+    } as Record<string, unknown>);
+    const persisted = await pool.query(
+      `SELECT client_key, box_no, auto_capture_time
+         FROM trip_deliveries WHERE trip_id=$1 ORDER BY serial_no`,
+      [trip.id],
+    );
+    assert.equal(persisted.rowCount, 3);
+    assert.equal(
+      persisted.rows.filter((row) => row.auto_capture_time != null).reduce((sum, row) => sum + Number(row.box_no), 0),
+      20,
+    );
+
+    await assert.rejects(
+      () =>
+        tripsService.submitStep(trip.id, "deliveries", {
+          deliveries: [
+            plan,
+            capture("orders-part-1", 2),
+            capture("orders-part-2", 3),
+            capture("orders-part-3", 4),
+          ],
+          mode: "save",
+        } as Record<string, unknown>),
+      /exceed the assigned quantity/i,
+    );
+    const afterReject = await pool.query(
+      `SELECT COUNT(*)::int AS count FROM trip_deliveries WHERE trip_id=$1`,
+      [trip.id],
+    );
+    assert.equal(Number(afterReject.rows[0].count), 3, "rejected over-delivery must roll back atomically");
+  });
+});
+

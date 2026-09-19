@@ -52,7 +52,18 @@ interface DeliveryRow extends Record<string, unknown> {
   amount: number;
   remarks: string;
   delivery_mode: "box" | "weight";
+  auto_capture_time: string | Date | null;
 }
+
+/** Same shops as Trip List Step 4 cards: captured deliveries only.
+ * Pending `[ORDER]` plan stubs (0 birds / 0 kg) stay out of Rate Entry.
+ * Captured order-taken shops (`[ORDER]` + birds/weight) are included. */
+const RATEABLE_DELIVERY_WHERE = `
+  trip_id = $1
+  AND COALESCE(shop_id, 0) > 0
+  AND COALESCE(birds, 0) > 0
+  AND COALESCE(weight, 0) > 0
+`;
 
 interface MarketRateRow {
   shop_id: number | null;
@@ -194,10 +205,11 @@ async function loadDeliveries(
 ): Promise<RateEntryDelivery[]> {
   const result = await client.query<DeliveryRow>(
     `SELECT id, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
-            birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode
+            birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
+            auto_capture_time
      FROM trip_deliveries
-     WHERE trip_id = $1
-     ORDER BY serial_no NULLS LAST, id`,
+     WHERE ${RATEABLE_DELIVERY_WHERE}
+     ORDER BY auto_capture_time ASC NULLS LAST, serial_no ASC NULLS LAST, id ASC`,
     [tripId]
   );
 
@@ -226,6 +238,10 @@ async function loadDeliveries(
       amount: num(r.amount),
       remarks: str(r.remarks),
       deliveryMode: (str(r.delivery_mode) as "box" | "weight") || "box",
+      autoCaptureTime:
+        r.auto_capture_time == null
+          ? null
+          : new Date(r.auto_capture_time as string | Date).toISOString(),
       marketRate: market.get(key) ?? null,
     };
   });
@@ -250,7 +266,9 @@ function mapTrip(
     sourceFarm: row.source_farm == null ? null : str(row.source_farm),
     totalBirds: num(row.total_birds),
     totalWeight: num(row.total_weight),
-    totalShops: num(row.total_shops),
+    // Prefer Step-4 rateable shop count over the trip summary field (which can
+    // still include pending `[ORDER]` plan stubs).
+    totalShops: deliveries.length > 0 ? deliveries.length : num(row.total_shops),
     rateLocked: Boolean(row.rate_completed),
     rateLockedAt: row.rate_locked_at == null ? null : new Date(str(row.rate_locked_at)).toISOString(),
     rateLockedBy: row.rate_locked_by == null ? null : str(row.rate_locked_by),
@@ -485,16 +503,23 @@ export const rateEntryService = {
           );
         }
 
-        const missing = await client.query<{ id: number; shop_name: string }>(
-          `SELECT id, shop_name FROM trip_deliveries
-           WHERE trip_id = $1 AND rate IS NULL
-           ORDER BY serial_no NULLS LAST, id`,
+        const rateable = await client.query<{ id: number; shop_name: string; rate: number | null }>(
+          `SELECT id, shop_name, rate FROM trip_deliveries
+           WHERE ${RATEABLE_DELIVERY_WHERE}
+           ORDER BY auto_capture_time ASC NULLS LAST, serial_no ASC NULLS LAST, id ASC`,
           [tripId]
         );
-        if (missing.rowCount) {
+        if (!rateable.rowCount) {
           throw new AppError(422, "Every shop delivery must have a rate before locking", {
             tripId,
-            missingDeliveries: missing.rows.map((r) => ({
+            missingDeliveries: [],
+          });
+        }
+        const missing = rateable.rows.filter((r) => r.rate == null);
+        if (missing.length) {
+          throw new AppError(422, "Every shop delivery must have a rate before locking", {
+            tripId,
+            missingDeliveries: missing.map((r) => ({
               deliveryId: num(r.id),
               shopName: str(r.shop_name),
             })),

@@ -212,7 +212,9 @@ const stepValidators = {
         .object({
         closingMeter: z.coerce.number().nonnegative().optional(),
         endMeter: z.coerce.number().nonnegative().optional(),
-        endTime: z.string({ required_error: "End time is required" }),
+        // Optional — the server stamps end_time / expenses_step_submitted_at on
+        // final submit. The client deliberately does not send browser clocks.
+        endTime: z.string().optional(),
     })
         .passthrough()
         .refine((data) => data.closingMeter != null || data.endMeter != null, {

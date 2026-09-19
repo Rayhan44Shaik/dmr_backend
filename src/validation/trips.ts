@@ -1,6 +1,13 @@
 import { z } from "zod";
 import { AppError } from "../middleware/errorHandler.js";
 import type { TripWizardStep } from "../utils/tripResume.js";
+import { isValidDateOnly } from "../utils/dateValidation.js";
+import {
+  businessTodayDateOnly,
+  resolveTripDateForNumbering,
+  TRIP_DATE_MAX_FUTURE_DAYS,
+  TRIP_DATE_MAX_PAST_DAYS,
+} from "../utils/tripNumbering.js";
 
 const boxDetailSchema = z.object({
   boxNo: z.coerce.number().int().positive().max(10_000),
@@ -14,7 +21,22 @@ const crewNames = z.array(z.string().trim().min(1).max(120)).min(1).max(50)
   .refine((values) => new Set(values.map((value) => value.toLocaleLowerCase())).size === values.length, {
     message: "Crew members must not be duplicated",
   });
-const dateOnlySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must use YYYY-MM-DD format");
+const dateOnlySchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Date must use YYYY-MM-DD format")
+  .refine((value) => isValidDateOnly(value), { message: "Date must be a real calendar day" });
+
+const tripBusinessDateSchema = dateOnlySchema.superRefine((value, ctx) => {
+  try {
+    resolveTripDateForNumbering(value, { required: true });
+  } catch (err) {
+    const message =
+      err instanceof AppError
+        ? err.message
+        : `Trip date must be within ${TRIP_DATE_MAX_PAST_DAYS} days past and ${TRIP_DATE_MAX_FUTURE_DAYS} days ahead of ${businessTodayDateOnly()}.`;
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+});
 
 /**
  * Rows that count toward Step 4 submit validation.
@@ -106,7 +128,7 @@ export const tripAutosaveSchema = z
 const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
   start: z
     .object({
-      tripDate: dateOnlySchema,
+      tripDate: tripBusinessDateSchema,
       // FIXED: Moved required_error inside z.coerce.number() instead of .int()
       vehicleId: z.coerce.number({ required_error: "Vehicle is required" }).int().positive(),
       driverId: z.coerce.number({ required_error: "Driver is required" }).int().positive(),

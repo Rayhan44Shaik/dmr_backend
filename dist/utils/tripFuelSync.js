@@ -1,4 +1,4 @@
-import { str } from "./coerce.js";
+import { dateOnly, num, numOrNull, str } from "./coerce.js";
 import { nextDocNo } from "./operationsHelpers.js";
 /**
  * Upsert fuel_expenses rows from trip diesel entries (Step 5 sync).
@@ -19,12 +19,6 @@ export async function syncDieselToFuelExpenses(client, tripId, tripDate, entries
         activeIndices.push(entry.rowIndex);
         const amount = Number((litres * rate).toFixed(2));
         const billNo = await nextDocNo(client, "TRF", "fuel_expenses", "bill_no");
-        // Single atomic upsert keyed on the (trip_id, trip_fuel_entry_index)
-        // partial unique index — safe under concurrent/duplicate Step 5
-        // submissions (no separate SELECT-then-branch race window). The
-        // `WHERE fuel_expenses.status = 'Pending'` guard on the conflict action
-        // means an already-approved/rejected bill silently keeps its audited
-        // values instead of being overwritten or erroring.
         await client.query(`INSERT INTO fuel_expenses (
          bill_no, expense_date, vehicle_id, vehicle_no, driver_id, driver_name,
          supervisor_id, supervisor_name, trip_id, trip_fuel_entry_index, source_type,
@@ -77,10 +71,6 @@ export async function syncDieselToFuelExpenses(client, tripId, tripDate, entries
             context.createdBy ?? "trip-sync",
         ]);
     }
-    // Remove trip-generated bills for diesel rows that were deleted during a
-    // Step 5 update. Only Pending bills are removable — once a bill has been
-    // approved (trip completed) it is protected and left in place even if the
-    // diesel row later disappears, since it is now an audited financial record.
     if (activeIndices.length === 0) {
         await client.query(`DELETE FROM fuel_expenses
        WHERE trip_id = $1 AND source_type = 'TRIP' AND status = 'Pending' AND deleted = FALSE`, [tripId]);
@@ -90,6 +80,51 @@ export async function syncDieselToFuelExpenses(client, tripId, tripDate, entries
        WHERE trip_id = $1 AND source_type = 'TRIP' AND status = 'Pending' AND deleted = FALSE
          AND trip_fuel_entry_index <> ALL($2::int[])`, [tripId, activeIndices]);
     }
+}
+/**
+ * Load live diesel rows from trip_diesel_entries and upsert Fuel Expenses.
+ * Prefer this over syncing a request body — Step 5 expense payloads omit diesel
+ * (bills are POSTed to /diesel separately), so body-based sync was a no-op.
+ */
+export async function syncTripFuelFromDb(client, tripId, opts = {}) {
+    const tripRes = await client.query(`SELECT id, trip_date, status, vehicle_id, vehicle_no, driver_id, driver_name,
+            supervisor_id, supervisor_name
+     FROM trips WHERE id = $1`, [tripId]);
+    if (!tripRes.rowCount)
+        return 0;
+    const trip = tripRes.rows[0];
+    const dieselRows = await client.query(`SELECT row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name
+     FROM trip_diesel_entries WHERE trip_id = $1 ORDER BY row_index`, [tripId]);
+    const entries = dieselRows.rows.map((r) => ({
+        rowIndex: num(r.row_index),
+        litres: r.litres == null ? null : num(r.litres),
+        rate: r.rate == null ? null : num(r.rate),
+        meter: r.meter == null ? null : num(r.meter),
+        bunkName: r.bunk_name == null ? null : str(r.bunk_name),
+        bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
+        imageData: r.image_data == null ? null : str(r.image_data),
+        imageName: r.image_name == null ? null : str(r.image_name),
+    }));
+    await syncDieselToFuelExpenses(client, tripId, dateOnly(trip.trip_date) ?? "", entries, {
+        vehicleId: numOrNull(trip.vehicle_id),
+        vehicleNo: trip.vehicle_no == null ? null : str(trip.vehicle_no),
+        driverId: numOrNull(trip.driver_id),
+        driverName: trip.driver_name == null ? null : str(trip.driver_name),
+        supervisorId: numOrNull(trip.supervisor_id),
+        supervisorName: trip.supervisor_name == null ? null : str(trip.supervisor_name),
+        createdBy: opts.createdBy ?? "trip-diesel-sync",
+    });
+    if (opts.approveIfCompleted && str(trip.status) === "Completed") {
+        await client.query(`UPDATE fuel_expenses
+         SET status = 'Approved',
+             approved_by = COALESCE($2, approved_by, 'system'),
+             approved_date = COALESCE(approved_date, NOW()),
+             ops_status = 'Approved',
+             updated_at = NOW()
+       WHERE trip_id = $1 AND source_type = 'TRIP' AND status = 'Pending'
+         AND COALESCE(deleted, FALSE) = FALSE`, [tripId, opts.createdBy ?? "system"]);
+    }
+    return entries.filter((e) => Number(e.litres ?? 0) > 0 || Number(e.rate ?? 0) > 0).length;
 }
 export async function loadDcPhoto(client, tripId, dcPhotoKey) {
     const empty = {

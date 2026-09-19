@@ -19,6 +19,15 @@ export declare function syncDieselToFuelExpenses(client: Client, tripId: number,
     supervisorName?: string | null;
     createdBy?: string;
 }): Promise<void>;
+/**
+ * Load live diesel rows from trip_diesel_entries and upsert Fuel Expenses.
+ * Prefer this over syncing a request body — Step 5 expense payloads omit diesel
+ * (bills are POSTed to /diesel separately), so body-based sync was a no-op.
+ */
+export declare function syncTripFuelFromDb(client: Client, tripId: number, opts?: {
+    approveIfCompleted?: boolean;
+    createdBy?: string;
+}): Promise<number>;
 export declare function loadDcPhoto(client: Client, tripId: number, dcPhotoKey: string | null): Promise<{
     dcPhotoKey: string | null;
     dcPhotoMime: string | null;

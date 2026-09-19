@@ -14,3 +14,5 @@ export function isValidDateOnly(value: string): boolean {
     date.getUTCDate() === day
   );
 }
+
+export { businessTodayDateOnly, resolveTripDateForNumbering } from "./tripNumbering.js";

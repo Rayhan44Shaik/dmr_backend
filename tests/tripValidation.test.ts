@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { validateStepSubmit } from "../src/validation/trips.js";
+import { businessTodayDateOnly, shiftDateOnly } from "../src/utils/tripNumbering.js";
 
 const validStart = {
-  tripDate: "2026-09-10",
+  tripDate: businessTodayDateOnly(),
   vehicleId: 1,
   driverId: 2,
   supervisorId: 3,
@@ -14,13 +15,26 @@ const validStart = {
 describe("Trip step boundary validation", () => {
   it("rejects invalid dates, non-positive IDs, missing crew and duplicate crew", () => {
     assert.throws(() => validateStepSubmit("start", { ...validStart, tripDate: "10/09/2026" }));
+    assert.throws(() => validateStepSubmit("start", { ...validStart, tripDate: "2026-02-30" }));
+    assert.throws(() =>
+      validateStepSubmit("start", {
+        ...validStart,
+        tripDate: shiftDateOnly(businessTodayDateOnly(), 30),
+      })
+    );
     assert.throws(() => validateStepSubmit("start", { ...validStart, vehicleId: 0 }));
     assert.throws(() => validateStepSubmit("start", { ...validStart, helpers: [] }));
     assert.throws(() => validateStepSubmit("start", { ...validStart, loaders: ["A", "a"] }));
   });
 
-  it("accepts a complete Step 1 payload", () => {
+  it("accepts a complete Step 1 payload with a selectable business date", () => {
     assert.doesNotThrow(() => validateStepSubmit("start", validStart));
+    assert.doesNotThrow(() =>
+      validateStepSubmit("start", {
+        ...validStart,
+        tripDate: shiftDateOnly(businessTodayDateOnly(), -30),
+      })
+    );
   });
 
   it("requires Step 2 address, bird type and a valid non-zero GPS location", () => {

@@ -229,6 +229,8 @@ export interface RateEntryDelivery {
   amount: number;
   remarks: string;
   deliveryMode: "box" | "weight";
+  /** Step 4 capture instant — first delivery first in Rate Entry. */
+  autoCaptureTime: string | null;
   marketRate: RateEntryMarketRate | null;
 }
 
