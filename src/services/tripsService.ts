@@ -48,6 +48,19 @@ import {
   getWizardProgress,
   type TripWizardStep,
 } from "../utils/tripResume.js";
+import {
+  addTripLeg,
+  ensureTripLeg1,
+  farmMeterFloor,
+  listTripLegs,
+  maxDieselMeter,
+  MAX_TRIP_LEGS,
+  requireTripLeg,
+  resolveLegIndex,
+  syncTripStepFlagsFromLegs,
+  upsertLegFields,
+  type TripLegRow,
+} from "../utils/tripLegs.js";
 import { assertTripResourcesAvailable } from "../validation/tripResourceValidation.js";
 import { assertTripStatus } from "../validation/operations.js";
 import {
@@ -69,6 +82,7 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     tripNo: str(row.trip_no),
     tripDate: dateOnly(row.trip_date) ?? "",
     status: str(row.status) as TripStatus,
+    legCount: Math.max(1, Math.min(MAX_TRIP_LEGS, num(row.leg_count) || 1)),
 
     startTime: isoOrNull(row.start_time),
     vehicleId: numOrNull(row.vehicle_id),
@@ -404,31 +418,47 @@ function toTripSummary(row: Record<string, unknown>): TripSummary {
   };
 }
 
-async function loadTripExtras(client: Client, tripId: number) {
+async function loadTripExtras(client: Client, tripId: number, legId?: number | null) {
   const crew = await client.query(`SELECT * FROM trip_crew WHERE trip_id = $1`, [tripId]);
+  const boxSql =
+    legId != null && legId > 0
+      ? `SELECT * FROM trip_boxes WHERE trip_id = $1 AND leg_id = $2 ORDER BY box_no`
+      : `SELECT * FROM trip_boxes WHERE trip_id = $1 ORDER BY box_no`;
   const boxes = await client.query(
-    `SELECT * FROM trip_boxes WHERE trip_id = $1 ORDER BY box_no`,
-    [tripId]
+    boxSql,
+    legId != null && legId > 0 ? [tripId, legId] : [tripId]
   );
+  const delSql =
+    legId != null && legId > 0
+      ? `SELECT * FROM trip_deliveries WHERE trip_id = $1 AND leg_id = $2 ORDER BY serial_no NULLS LAST, id`
+      : `SELECT * FROM trip_deliveries WHERE trip_id = $1 ORDER BY serial_no NULLS LAST, id`;
   const deliveries = await client.query(
-    `SELECT * FROM trip_deliveries WHERE trip_id = $1 ORDER BY serial_no NULLS LAST, id`,
-    [tripId]
+    delSql,
+    legId != null && legId > 0 ? [tripId, legId] : [tripId]
   );
   const diesel = await client.query(
     `SELECT * FROM trip_diesel_entries WHERE trip_id = $1 ORDER BY row_index`,
     [tripId]
   );
   const deliveryBoxes = await client.query(
-    `SELECT db.* FROM trip_delivery_boxes db
-     JOIN trip_deliveries d ON d.id = db.delivery_id
-     WHERE d.trip_id = $1`,
-    [tripId]
+    legId != null && legId > 0
+      ? `SELECT db.* FROM trip_delivery_boxes db
+         JOIN trip_deliveries d ON d.id = db.delivery_id
+         WHERE d.trip_id = $1 AND d.leg_id = $2`
+      : `SELECT db.* FROM trip_delivery_boxes db
+         JOIN trip_deliveries d ON d.id = db.delivery_id
+         WHERE d.trip_id = $1`,
+    legId != null && legId > 0 ? [tripId, legId] : [tripId]
   );
   const perBox = await client.query(
-    `SELECT pb.* FROM trip_delivery_per_box pb
-     JOIN trip_deliveries d ON d.id = pb.delivery_id
-     WHERE d.trip_id = $1`,
-    [tripId]
+    legId != null && legId > 0
+      ? `SELECT pb.* FROM trip_delivery_per_box pb
+         JOIN trip_deliveries d ON d.id = pb.delivery_id
+         WHERE d.trip_id = $1 AND d.leg_id = $2`
+      : `SELECT pb.* FROM trip_delivery_per_box pb
+         JOIN trip_deliveries d ON d.id = pb.delivery_id
+         WHERE d.trip_id = $1`,
+    legId != null && legId > 0 ? [tripId, legId] : [tripId]
   );
 
   const helpers = crew.rows
@@ -479,6 +509,7 @@ async function loadTripExtras(client: Client, tripId: number) {
       id,
       serialNo: numOrNull(r.serial_no),
       boxNo: numOrNull(r.box_no),
+      legId: numOrNull(r.leg_id),
       shopId: numOrNull(r.shop_id),
       shopName: str(r.shop_name),
       birdTypeId: numOrNull(r.bird_type_id),
@@ -522,10 +553,88 @@ async function loadTripExtras(client: Client, tripId: number) {
   return { helpers, loaders, boxDetails, deliveries: mappedDeliveries, dieselEntries };
 }
 
+async function hydrateLegs(
+  client: Client,
+  tripId: number
+): Promise<Array<TripLegRow & { boxDetails: BoxDetail[]; deliveries: ShopDelivery[] }>> {
+  const legs = await listTripLegs(client, tripId);
+  const out: Array<TripLegRow & { boxDetails: BoxDetail[]; deliveries: ShopDelivery[] }> = [];
+  for (const leg of legs) {
+    const extras = await loadTripExtras(client, tripId, leg.id);
+    out.push({
+      ...leg,
+      boxDetails: extras.boxDetails,
+      deliveries: extras.deliveries,
+    });
+  }
+  return out;
+}
+
+function isMissingRelationError(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return code === "42P01" || code === "42703";
+}
+
+/** Detect multi-load schema without aborting an open transaction. */
+async function tripLegsSchemaReady(client: Client): Promise<boolean> {
+  try {
+    const r = await client.query<{ t: string | null }>(
+      `SELECT to_regclass('public.trip_legs')::text AS t`
+    );
+    return Boolean(r.rows[0]?.t);
+  } catch {
+    return false;
+  }
+}
+
+/** Build a display-only Load 1 from the trips row when trip_legs is empty/unavailable. */
+function syntheticLeg1FromTripRow(
+  base: ReturnType<typeof mapTripBase>,
+  extras: Awaited<ReturnType<typeof loadTripExtras>>
+): TripLegRow & { boxDetails: BoxDetail[]; deliveries: ShopDelivery[] } {
+  return {
+    id: 0,
+    tripId: base.id,
+    legIndex: 1,
+    sourceFarmId: base.sourceFarmId,
+    sourceFarm: base.sourceFarm,
+    reachedTime: base.reachedTime,
+    destMeter: base.destMeter,
+    pickupTolls: base.pickupTolls,
+    farmAddress: base.farmAddress ?? null,
+    avgBirdWeight: base.avgBirdWeight ?? null,
+    farmRemarks: base.farmRemarks ?? null,
+    farmBirdTypeId: base.farmBirdTypeId ?? null,
+    farmBirdType: base.farmBirdType ?? null,
+    farmBirdCount: base.farmBirdCount ?? null,
+    farmLoadWeight: base.farmLoadWeight ?? null,
+    farmRate: base.farmRate ?? null,
+    farmAmount: base.farmAmount ?? null,
+    farmGpsLat: base.farmGpsLat ?? null,
+    farmGpsLon: base.farmGpsLon ?? null,
+    farmGpsAccuracy: base.farmGpsAccuracy ?? null,
+    farmGpsTime: base.farmGpsTime ?? null,
+    farmStepSubmitted: base.farmStepSubmitted,
+    farmStepSubmittedAt: base.farmStepSubmittedAt,
+    dcWeight: base.dcWeight,
+    totalBirds: base.totalBirds,
+    boxes: base.boxes,
+    avgWeight: base.avgWeight,
+    pickupLoadTime: base.pickupLoadTime,
+    dcPhotoKey: base.dcPhotoKey ?? null,
+    pickupStepSubmitted: base.pickupStepSubmitted,
+    pickupStepSubmittedAt: base.pickupStepSubmittedAt,
+    deliveryStepSubmitted: base.deliveryStepSubmitted,
+    deliveriesStepSubmittedAt: base.deliveriesStepSubmittedAt,
+    boxDetails: extras.boxDetails,
+    deliveries: extras.deliveries,
+  };
+}
+
 async function hydrateTrip(
   client: Client,
   row: Record<string, unknown>,
-  options: { includeDcPhoto?: boolean } = {}
+  options: { includeDcPhoto?: boolean; viewLegIndex?: number } = {}
 ): Promise<
   Trip & {
     dcPhotoData?: string | null;
@@ -536,7 +645,40 @@ async function hydrateTrip(
   }
 > {
   const base = mapTripBase(row);
-  const extras = await loadTripExtras(client, base.id);
+  // GET must never INSERT. Create leg 1 only on write paths (save/submit/addLeg).
+  let legs: Array<TripLegRow & { boxDetails: BoxDetail[]; deliveries: ShopDelivery[] }> = [];
+  const legsReady = await tripLegsSchemaReady(client);
+  if (legsReady) {
+    try {
+      await client.query("SAVEPOINT trip_legs_hydrate");
+      legs = await hydrateLegs(client, base.id);
+      await client.query("RELEASE SAVEPOINT trip_legs_hydrate");
+    } catch (err) {
+      try {
+        await client.query("ROLLBACK TO SAVEPOINT trip_legs_hydrate");
+      } catch {
+        /* ignore — may already be rolled back */
+      }
+      if (!isMissingRelationError(err)) throw err;
+      legs = [];
+    }
+  }
+
+  // Prefer an explicit viewLegIndex; otherwise open the first incomplete load
+  // so resume never jumps to Step 5 while a later load is still empty.
+  const firstIncomplete =
+    legs.find((l) => !l.deliveryStepSubmitted) ?? legs[legs.length - 1] ?? null;
+  const viewIndex = options.viewLegIndex ?? firstIncomplete?.legIndex ?? 1;
+  let viewLeg = legs.find((l) => l.legIndex === viewIndex) ?? legs[0] ?? null;
+  let extras =
+    viewLeg && viewLeg.id > 0
+      ? await loadTripExtras(client, base.id, viewLeg.id)
+      : await loadTripExtras(client, base.id);
+
+  if (!legs.length) {
+    viewLeg = syntheticLeg1FromTripRow(base, extras);
+    legs = [viewLeg];
+  }
 
   // Resolve box capacity from Vehicle Master when not already joined onto the row.
   let vehicleBoxCapacity = base.vehicleBoxCapacity ?? null;
@@ -557,7 +699,7 @@ async function hydrateTrip(
     dcPhotoMime2: string | null;
     dcPhotoData2: string | null;
   } = {
-    dcPhotoKey: base.dcPhotoKey ?? null,
+    dcPhotoKey: (viewLeg?.dcPhotoKey ?? base.dcPhotoKey) ?? null,
     dcPhotoMime: null,
     dcPhotoData: null,
     dcPhotoKey2: null,
@@ -565,9 +707,58 @@ async function hydrateTrip(
     dcPhotoData2: null,
   };
   if (options.includeDcPhoto) {
-    dcPhoto = await loadDcPhoto(client, base.id, base.dcPhotoKey ?? null);
+    dcPhoto = await loadDcPhoto(client, base.id, viewLeg?.dcPhotoKey ?? base.dcPhotoKey ?? null);
   }
-  return { ...base, vehicleBoxCapacity, ...extras, ...dcPhoto };
+
+  const overlaid = viewLeg
+    ? {
+        ...base,
+        legCount: Math.max(legs.length, base.legCount || 1),
+        sourceFarmId: viewLeg.sourceFarmId,
+        sourceFarm: viewLeg.sourceFarm,
+        reachedTime: viewLeg.reachedTime,
+        destMeter: viewLeg.destMeter,
+        pickupTolls: viewLeg.pickupTolls,
+        farmAddress: viewLeg.farmAddress,
+        avgBirdWeight: viewLeg.avgBirdWeight,
+        farmRemarks: viewLeg.farmRemarks,
+        farmBirdTypeId: viewLeg.farmBirdTypeId,
+        farmBirdType: viewLeg.farmBirdType,
+        farmBirdCount: viewLeg.farmBirdCount,
+        farmLoadWeight: viewLeg.farmLoadWeight,
+        farmRate: viewLeg.farmRate,
+        farmAmount: viewLeg.farmAmount,
+        farmGpsLat: viewLeg.farmGpsLat,
+        farmGpsLon: viewLeg.farmGpsLon,
+        farmGpsAccuracy: viewLeg.farmGpsAccuracy,
+        farmGpsTime: viewLeg.farmGpsTime,
+        farmStepSubmitted: viewLeg.farmStepSubmitted,
+        farmStepSubmittedAt: viewLeg.farmStepSubmittedAt,
+        dcWeight: viewLeg.dcWeight,
+        totalBirds: viewLeg.totalBirds,
+        boxes: viewLeg.boxes,
+        avgWeight: viewLeg.avgWeight,
+        pickupLoadTime: viewLeg.pickupLoadTime,
+        dcPhotoKey: viewLeg.dcPhotoKey,
+        pickupStepSubmitted: viewLeg.pickupStepSubmitted,
+        pickupStepSubmittedAt: viewLeg.pickupStepSubmittedAt,
+        deliveryStepSubmitted: viewLeg.deliveryStepSubmitted,
+        deliveriesStepSubmittedAt: viewLeg.deliveriesStepSubmittedAt,
+      }
+    : { ...base, legCount: legs.length || base.legCount || 1 };
+
+  return {
+    ...overlaid,
+    vehicleBoxCapacity,
+    helpers: extras.helpers,
+    loaders: extras.loaders,
+    boxDetails: extras.boxDetails,
+    deliveries: extras.deliveries,
+    dieselEntries: extras.dieselEntries,
+    legs,
+    activeLegIndex: viewLeg?.legIndex ?? viewIndex,
+    ...dcPhoto,
+  };
 }
 
 /**
@@ -681,8 +872,20 @@ async function replaceCrew(
   }
 }
 
-async function replaceBoxes(client: Client, tripId: number, boxes: BoxDetail[] = []) {
-  await client.query(`DELETE FROM trip_boxes WHERE trip_id = $1`, [tripId]);
+async function replaceBoxes(
+  client: Client,
+  tripId: number,
+  boxes: BoxDetail[] = [],
+  legId?: number | null
+) {
+  if (legId != null && legId > 0) {
+    await client.query(`DELETE FROM trip_boxes WHERE trip_id = $1 AND leg_id = $2`, [
+      tripId,
+      legId,
+    ]);
+  } else {
+    await client.query(`DELETE FROM trip_boxes WHERE trip_id = $1`, [tripId]);
+  }
   for (const box of boxes) {
     const birds = Number(box.birds ?? 0);
     const weight = Number(box.weight ?? 0);
@@ -690,8 +893,8 @@ async function replaceBoxes(client: Client, tripId: number, boxes: BoxDetail[] =
     const avgWeight =
       birds > 0 && Number.isFinite(weight) ? Number((weight / birds).toFixed(3)) : null;
     await client.query(
-      `INSERT INTO trip_boxes (trip_id, box_no, birds, weight, avg_weight) VALUES ($1,$2,$3,$4,$5)`,
-      [tripId, box.boxNo, birds, weight, avgWeight]
+      `INSERT INTO trip_boxes (trip_id, leg_id, box_no, birds, weight, avg_weight) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [tripId, legId ?? null, box.boxNo, birds, weight, avgWeight]
     );
   }
 }
@@ -717,7 +920,8 @@ async function replaceBoxes(client: Client, tripId: number, boxes: BoxDetail[] =
 async function assertDeliveriesWithinCapacity(
   client: Client,
   tripId: number,
-  deliveries: ShopDelivery[]
+  deliveries: ShopDelivery[],
+  legId?: number | null
 ): Promise<void> {
   const tripRow = await client.query<{
     farm_bird_count: number | null;
@@ -772,10 +976,25 @@ async function assertDeliveriesWithinCapacity(
     }
     return;
   }
-  const farmBirdCount = num(row.farm_bird_count);
-  const farmLoadWeight = num(row.farm_load_weight);
-  const capacityBirds = farmBirdCount > 0 ? farmBirdCount : num(row.total_birds);
-  const capacityWeight = farmLoadWeight > 0 ? farmLoadWeight : num(row.dc_weight);
+
+  let farmBirdCount = num(row.farm_bird_count);
+  let farmLoadWeight = num(row.farm_load_weight);
+  let totalBirdsCap = num(row.total_birds);
+  let dcWeightCap = num(row.dc_weight);
+  if (legId != null && legId > 0) {
+    const leg = await client.query(
+      `SELECT farm_bird_count, farm_load_weight, total_birds, dc_weight FROM trip_legs WHERE id = $1`,
+      [legId]
+    );
+    if (leg.rowCount) {
+      farmBirdCount = num(leg.rows[0].farm_bird_count);
+      farmLoadWeight = num(leg.rows[0].farm_load_weight);
+      totalBirdsCap = num(leg.rows[0].total_birds);
+      dcWeightCap = num(leg.rows[0].dc_weight);
+    }
+  }
+  const capacityBirds = farmBirdCount > 0 ? farmBirdCount : totalBirdsCap;
+  const capacityWeight = farmLoadWeight > 0 ? farmLoadWeight : dcWeightCap;
 
   let totalBirds = 0;
   let totalWeight = 0;
@@ -902,12 +1121,20 @@ async function assertDeliveriesWithinCapacity(
 async function replaceDeliveries(
   client: Client,
   tripId: number,
-  deliveries: ShopDelivery[] = []
+  deliveries: ShopDelivery[] = [],
+  legId?: number | null
 ) {
   if (deliveries.length > 0) {
-    await assertDeliveriesWithinCapacity(client, tripId, deliveries);
+    await assertDeliveriesWithinCapacity(client, tripId, deliveries, legId);
   }
-  await client.query(`DELETE FROM trip_deliveries WHERE trip_id = $1`, [tripId]);
+  if (legId != null && legId > 0) {
+    await client.query(`DELETE FROM trip_deliveries WHERE trip_id = $1 AND leg_id = $2`, [
+      tripId,
+      legId,
+    ]);
+  } else {
+    await client.query(`DELETE FROM trip_deliveries WHERE trip_id = $1`, [tripId]);
+  }
   if (deliveries.length === 0) return;
 
   // trip_deliveries.sale_no is NOT NULL (023_shop_sales_hardening.sql) in the
@@ -933,13 +1160,14 @@ async function replaceDeliveries(
 
     const inserted = await client.query(
       `INSERT INTO trip_deliveries (
-         trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
+         trip_id, leg_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
          birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
          farm_birds, farm_weight, auto_capture_time, client_key
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
        RETURNING id`,
       [
         tripId,
+        legId ?? null,
         saleNo,
         d.serialNo ?? index + 1,
         d.boxNo ?? null,
@@ -1439,31 +1667,38 @@ export const tripsService = {
     const result = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
     if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
 
-    return withTransaction(async (client) => {
-      const trip = await hydrateTrip(client, result.rows[0], { includeDcPhoto: true });
-      const flags = {
-        startStepSubmitted: trip.startStepSubmitted,
-        farmStepSubmitted: trip.farmStepSubmitted,
-        pickupStepSubmitted: trip.pickupStepSubmitted,
-        deliveryStepSubmitted: trip.deliveryStepSubmitted,
-        expensesStepSubmitted: trip.expensesStepSubmitted,
-        endStepSubmitted: trip.endStepSubmitted,
-        status: trip.status,
-        deleted: trip.deleted,
-      };
-      return {
-        ...trip,
-        ...flattenDiesel(trip.dieselEntries ?? []),
-        resumeStep: getResumeStep(flags),
-        resumeStepLabel: getResumeLabel(flags),
-        wizardProgress: getWizardProgress(flags),
-        stepStatuses: computeStepStatuses(trip, {
-          boxCount: trip.boxDetails.length,
-          deliveryCount: trip.deliveries.length,
-          dieselCount: (trip.dieselEntries ?? []).length,
-        }),
-      };
-    });
+    try {
+      return await withTransaction(async (client) => {
+        const trip = await hydrateTrip(client, result.rows[0], { includeDcPhoto: true });
+        const flags = {
+          startStepSubmitted: trip.startStepSubmitted,
+          farmStepSubmitted: trip.farmStepSubmitted,
+          pickupStepSubmitted: trip.pickupStepSubmitted,
+          deliveryStepSubmitted: trip.deliveryStepSubmitted,
+          expensesStepSubmitted: trip.expensesStepSubmitted,
+          endStepSubmitted: trip.endStepSubmitted,
+          status: trip.status,
+          deleted: trip.deleted,
+        };
+        return {
+          ...trip,
+          ...flattenDiesel(trip.dieselEntries ?? []),
+          resumeStep: getResumeStep(flags),
+          resumeStepLabel: getResumeLabel(flags),
+          wizardProgress: getWizardProgress(flags),
+          stepStatuses: computeStepStatuses(trip, {
+            boxCount: trip.boxDetails.length,
+            deliveryCount: trip.deliveries.length,
+            dieselCount: (trip.dieselEntries ?? []).length,
+          }),
+        };
+      });
+    } catch (err) {
+      if (!(err instanceof AppError)) {
+        console.error(`[trips.getById] failed for trip ${id}:`, err);
+      }
+      throw err;
+    }
   },
 
   async createDraft(body: Partial<Trip> = {}) {
@@ -1480,6 +1715,7 @@ export const tripsService = {
            VALUES ($1,$2,'Draft',$3) RETURNING *`,
           [tripNo, tripDate, remarks]
         );
+        await ensureTripLeg1(client, num(inserted.rows[0].id));
         const trip = await hydrateTrip(client, inserted.rows[0]);
         const flags = {
           startStepSubmitted: trip.startStepSubmitted,
@@ -1577,6 +1813,7 @@ export const tripsService = {
             [tripNo, tripDate, body.status ?? "Draft"]
           );
           tripId = num(inserted.rows[0].id);
+          await ensureTripLeg1(client, tripId);
         } else if (body.tripDate != null) {
           // trip_date is immutable after create — number embeds the date.
           const existingDate = existing ? dateOnly(existing.rows[0].trip_date) : null;
@@ -1592,6 +1829,38 @@ export const tripsService = {
         const dieselEntries = extractDieselFromBody(body);
         const boxDetails = (body.boxDetails as BoxDetail[]) ?? [];
         const deliveries = (body.deliveries as ShopDelivery[]) ?? [];
+        const legIndex = resolveLegIndex(body);
+        await ensureTripLeg1(client, tripId!);
+        const activeLeg = await requireTripLeg(client, tripId!, legIndex);
+        // Keep a copy for trip_legs writes before stripping Load-1 trip-row fields.
+        const legBody: Record<string, unknown> = { ...body };
+
+        // Loads beyond #1 must not overwrite the trip-row mirror of Load 1.
+        if (legIndex > 1) {
+          delete body.sourceFarmId;
+          delete body.sourceFarm;
+          delete body.destMeter;
+          delete body.pickupTolls;
+          delete body.farmAddress;
+          delete body.avgBirdWeight;
+          delete body.farmRemarks;
+          delete body.farmBirdTypeId;
+          delete body.farmBirdType;
+          delete body.farmBirdCount;
+          delete body.farmLoadWeight;
+          delete body.farmGpsLat;
+          delete body.farmGpsLon;
+          delete body.farmGpsAccuracy;
+          delete body.farmGpsTime;
+          delete body.farmStepSubmitted;
+          delete body.dcWeight;
+          delete body.totalBirds;
+          delete body.boxes;
+          delete body.avgWeight;
+          delete body.dcPhotoKey;
+          delete body.pickupStepSubmitted;
+          delete body.deliveryStepSubmitted;
+        }
 
         // ---- Universal vehicle meter validation ----
         // Only runs on a real step submission (start/expenses), never on
@@ -1717,6 +1986,13 @@ export const tripsService = {
 
         if (boxDetails.length || deliveries.length) {
           applyComputedFields(body, boxDetails, deliveries);
+          // Keep trip_legs in sync with derived pickup/delivery totals.
+          legBody.dcWeight = body.dcWeight;
+          legBody.totalBirds = body.totalBirds;
+          legBody.boxes = body.boxes;
+          legBody.avgWeight = body.avgWeight;
+          legBody.farmBirdCount = body.farmBirdCount ?? body.totalBirds;
+          legBody.farmLoadWeight = body.farmLoadWeight ?? body.dcWeight;
         } else if (body.openingMeter != null && (body.closingMeter != null || body.endMeter != null)) {
           body.totalKm = computeTotalKm(
             body.openingMeter as number,
@@ -2033,8 +2309,26 @@ export const tripsService = {
             (body.loaders as string[]) ?? []
           );
         }
+
+        // Write load scalars (incl. pickup totals) before boxes/deliveries so
+        // capacity checks read the correct farm_bird_count / dc_weight.
+        await upsertLegFields(client, activeLeg.id, legBody, {
+          farmStepSubmitted:
+            typeof legBody.farmStepSubmitted === "boolean"
+              ? (legBody.farmStepSubmitted as boolean)
+              : undefined,
+          pickupStepSubmitted:
+            typeof legBody.pickupStepSubmitted === "boolean"
+              ? (legBody.pickupStepSubmitted as boolean)
+              : undefined,
+          deliveryStepSubmitted:
+            typeof legBody.deliveryStepSubmitted === "boolean"
+              ? (legBody.deliveryStepSubmitted as boolean)
+              : undefined,
+        });
+
         if (body.boxDetails) {
-          await replaceBoxes(client, tripId, body.boxDetails as BoxDetail[]);
+          await replaceBoxes(client, tripId, body.boxDetails as BoxDetail[], activeLeg.id);
         }
         if (body.deliveries) {
           if (existing && existing.rowCount && Boolean(existing.rows[0].rate_completed)) {
@@ -2044,8 +2338,16 @@ export const tripsService = {
               { tripId }
             );
           }
-          await replaceDeliveries(client, tripId, body.deliveries as ShopDelivery[]);
+          await replaceDeliveries(
+            client,
+            tripId,
+            body.deliveries as ShopDelivery[],
+            activeLeg.id
+          );
         }
+
+        await syncTripStepFlagsFromLegs(client, tripId!);
+
         if (dieselEntries.length > 0) {
           await replaceDiesel(client, tripId, dieselEntries);
         } else if (body.dieselEntries === null || body.clearDiesel === true) {
@@ -2108,7 +2410,10 @@ export const tripsService = {
           });
         }
 
-        const trip = await hydrateTrip(client, tripRow, { includeDcPhoto: true });
+        const trip = await hydrateTrip(client, tripRow, {
+          includeDcPhoto: true,
+          viewLegIndex: resolveLegIndex(legBody),
+        });
         const flags = {
           startStepSubmitted: trip.startStepSubmitted,
           farmStepSubmitted: trip.farmStepSubmitted,
@@ -2129,6 +2434,7 @@ export const tripsService = {
             deliveryCount: trip.deliveries.length,
             dieselCount: (trip.dieselEntries ?? []).length,
           }),
+          activeLegIndex: resolveLegIndex(legBody),
         };
       } catch (err) {
         rethrowIfAppError(err);
@@ -2160,8 +2466,9 @@ export const tripsService = {
    * box-availability / active-shop check is re-run against the LIVE
    * persisted rows — never trusted from the client.
    */
-  async saveDeliveries(tripId: number, body: { deliveries?: ShopDelivery[] } = {}) {
+  async saveDeliveries(tripId: number, body: { deliveries?: ShopDelivery[]; legIndex?: number } = {}) {
     const { deliveries } = parseDeliverySave(body);
+    const legIndex = resolveLegIndex(body as Record<string, unknown>);
 
     return withTransaction(async (client) => {
       const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [tripId]);
@@ -2176,32 +2483,34 @@ export const tripsService = {
 
       // Serialize concurrent saves for this trip (read-modify-write below).
       await client.query(`SELECT id FROM trips WHERE id = $1 FOR UPDATE`, [tripId]);
+      await ensureTripLeg1(client, tripId);
+      const activeLeg = await requireTripLeg(client, tripId, legIndex);
 
-      // Step 3 capacity (farm_load_weight ?? dc_weight, farm_bird_count ?? total_birds).
+      // Step 3 capacity from this load (farm_load_weight ?? dc_weight, farm_bird_count ?? total_birds).
       const capacityBirds =
-        num(tripRow.farm_bird_count) > 0 ? num(tripRow.farm_bird_count) : num(tripRow.total_birds);
+        num(activeLeg.farmBirdCount) > 0 ? num(activeLeg.farmBirdCount) : num(activeLeg.totalBirds);
       const capacityWeight =
-        num(tripRow.farm_load_weight) > 0 ? num(tripRow.farm_load_weight) : num(tripRow.dc_weight);
+        num(activeLeg.farmLoadWeight) > 0 ? num(activeLeg.farmLoadWeight) : num(activeLeg.dcWeight);
       if (capacityBirds <= 0 && capacityWeight <= 0) {
         throw new AppError(422, "Step 3 (Pickup) must be completed before saving shop deliveries.");
       }
 
-      // Live pickup boxes (Step 3 — read-only source of truth for allocation).
+      // Live pickup boxes for this load only.
       const boxRes = await client.query(
-        `SELECT box_no, birds, weight FROM trip_boxes WHERE trip_id = $1 ORDER BY box_no`,
-        [tripId]
+        `SELECT box_no, birds, weight FROM trip_boxes WHERE trip_id = $1 AND leg_id = $2 ORDER BY box_no`,
+        [tripId, activeLeg.id]
       );
       const boxesByNo = new Map<number, { birds: number; weight: number }>();
       for (const r of boxRes.rows) {
         boxesByNo.set(num(r.box_no), { birds: num(r.birds), weight: num(r.weight) });
       }
 
-      // Live deliveries for this trip.
+      // Live deliveries for this load.
       const delRes = await client.query(
         `SELECT id, client_key, shop_id, serial_no, box_no, birds, weight,
                 mortality, mort_kg, remarks, auto_capture_time
-           FROM trip_deliveries WHERE trip_id = $1`,
-        [tripId]
+           FROM trip_deliveries WHERE trip_id = $1 AND leg_id = $2`,
+        [tripId, activeLeg.id]
       );
       const existingRows = delRes.rows.map((r) => ({
         id: num(r.id),
@@ -2301,29 +2610,33 @@ export const tripsService = {
         }
       }
 
-      // Boxes already committed to deliveries NOT being overwritten.
+      // Boxes already committed to deliveries NOT being overwritten (this load only).
       const excluded = [...excludedIds];
-      const exclClause = excluded.length ? `AND d.id <> ALL($2::int[])` : "";
-      const boxParams: unknown[] = [tripId];
+      const exclClause = excluded.length ? `AND d.id <> ALL($3::int[])` : "";
+      const boxParams: unknown[] = [tripId, activeLeg.id];
       if (excluded.length) boxParams.push(excluded);
       const otherBoxes = await client.query(
         `SELECT db.box_no
            FROM trip_delivery_boxes db
            JOIN trip_deliveries d ON d.id = db.delivery_id
-          WHERE d.trip_id = $1 AND d.deleted = FALSE ${exclClause}`,
+          WHERE d.trip_id = $1 AND d.leg_id = $2 AND d.deleted = FALSE ${exclClause}`,
         boxParams
       );
       const usedBoxes = new Set<number>();
       for (const r of otherBoxes.rows) usedBoxes.add(num(r.box_no));
 
-      // Cross-shop totals from live persisted rows, minus the rows we replace.
-      const base = await sumActiveDeliveries(client, tripId);
-      let totalBirds = base.birds + base.mortalityCount;
-      let totalWeight = base.weight + base.mortalityWeight;
+      // Cross-shop totals from live persisted rows on THIS load, minus rows we replace.
+      let totalBirds = 0;
+      let totalWeight = 0;
+      for (const r of existingRows) {
+        totalBirds += r.birds + r.mortality;
+        totalWeight += r.weight + r.mortKg;
+      }
       // Assignment-plan rows carry proportional birds/weight for reporting,
       // but are not physical deliveries. sumActiveDeliveries sees every live
       // row, so remove uncaptured Orders plans before applying real-capture
       // capacity checks below.
+      // (existingRows is already scoped to this load's leg_id.)
       for (const r of existingRows) {
         const isUncapturedOrderPlan =
           r.remarks.startsWith("[ORDER]") && !r.autoCaptureTime;
@@ -2360,9 +2673,11 @@ export const tripsService = {
         const remarks = String(d.remarks ?? "").trim();
         const isUncapturedOrderPlan =
           remarks.startsWith("[ORDER]") &&
-          !d.autoCaptureTime &&
-          !(d as { deliveredAt?: string }).deliveredAt &&
-          !(d as { deliveryTime?: string }).deliveryTime;
+          !(
+            d.autoCaptureTime ||
+            (d as { deliveredAt?: string }).deliveredAt ||
+            (d as { deliveryTime?: string }).deliveryTime
+          );
 
         // Basic type/safety (Save Progress): non-negative whole birds,
         // non-negative weight. Never accept impossible negative values.
@@ -2514,13 +2829,14 @@ export const tripsService = {
           maxSerial += 1;
           const inserted = await client.query(
             `INSERT INTO trip_deliveries (
-               trip_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
+               trip_id, leg_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
                birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
                farm_birds, farm_weight, auto_capture_time, client_key
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
              RETURNING id`,
             [
               tripId,
+              activeLeg.id,
               saleNo,
               d.serialNo ?? maxSerial,
               selectedBoxIds.length,
@@ -2598,6 +2914,7 @@ export const tripsService = {
     body: Partial<Trip> & Record<string, unknown>
   ) {
     const isSaveMode = body.mode === "save";
+    const legIndex = resolveLegIndex(body);
 
     if (!isSaveMode) {
       validateStepSubmit(step, body);
@@ -2607,8 +2924,30 @@ export const tripsService = {
     if (!existing.rowCount) throw new AppError(404, `Trip ${id} not found`);
     const current = existing.rows[0];
 
+    // Ensure Load 1 exists for legacy trips created before multi-load.
+    await withTransaction(async (client) => {
+      await ensureTripLeg1(client, id);
+    });
+
+    const legsRes = await query(
+      `SELECT * FROM trip_legs WHERE trip_id = $1 ORDER BY leg_index`,
+      [id]
+    );
+    const legRows = legsRes.rows.map((r) => ({
+      farmStepSubmitted: Boolean(r.farm_step_submitted),
+      pickupStepSubmitted: Boolean(r.pickup_step_submitted),
+      deliveryStepSubmitted: Boolean(r.delivery_step_submitted),
+      destMeter: numOrNull(r.dest_meter),
+      legIndex: num(r.leg_index),
+    }));
+    const activeLegRow = legRows.find((l) => l.legIndex === legIndex);
+    if (!activeLegRow && ["farm", "pickup", "deliveries"].includes(step)) {
+      throw new AppError(404, `Load ${legIndex} not found on trip ${id}`);
+    }
+
     const flags = {
       startStepSubmitted: Boolean(current.start_step_submitted),
+      // Trip-level flags for Step 5 / resume across all loads.
       farmStepSubmitted: Boolean(current.farm_step_submitted),
       pickupStepSubmitted: Boolean(current.pickup_step_submitted),
       deliveryStepSubmitted: Boolean(current.delivery_step_submitted),
@@ -2621,7 +2960,7 @@ export const tripsService = {
     // "Save Progress" is a permissive autosave: it must never run strict step
     // validation, enforce step order, or lock/submit a step.
     if (isSaveMode) {
-      const autosaveBody: Partial<Trip> & Record<string, unknown> = { ...body };
+      const autosaveBody: Partial<Trip> & Record<string, unknown> = { ...body, legIndex };
       delete autosaveBody.mode;
       delete autosaveBody.startStepSubmitted;
       delete autosaveBody.farmStepSubmitted;
@@ -2632,11 +2971,48 @@ export const tripsService = {
       return this.save(id, autosaveBody);
     }
 
-    assertStepOrder(step, flags);
+    // Per-load step order for Farm / Pickup / Deliveries; trip-level for start/expenses.
+    if (step === "farm" || step === "pickup" || step === "deliveries") {
+      if (!flags.startStepSubmitted) {
+        throw new AppError(422, "Complete Step 1 — Trip Header before Farm Loading", {
+          resumeStep: "start",
+          requestedStep: step,
+        });
+      }
+      const legFlags = {
+        startStepSubmitted: true,
+        farmStepSubmitted: Boolean(activeLegRow?.farmStepSubmitted),
+        pickupStepSubmitted: Boolean(activeLegRow?.pickupStepSubmitted),
+        deliveryStepSubmitted: Boolean(activeLegRow?.deliveryStepSubmitted),
+        expensesStepSubmitted: flags.expensesStepSubmitted,
+        endStepSubmitted: flags.endStepSubmitted,
+        status: flags.status,
+        deleted: flags.deleted,
+      };
+      assertStepOrder(step, legFlags);
+    } else if (step === "expenses") {
+      // Every load must finish deliveries before final expenses submit.
+      const incomplete = legRows.find((l) => !l.deliveryStepSubmitted);
+      if (incomplete) {
+        throw new AppError(
+          422,
+          `Complete deliveries for Load ${incomplete.legIndex} before Step 5 — Diesel & Expenses`,
+          { resumeStep: "deliveries", requestedStep: step, legIndex: incomplete.legIndex }
+        );
+      }
+      assertStepOrder(step, {
+        ...flags,
+        farmStepSubmitted: true,
+        pickupStepSubmitted: true,
+        deliveryStepSubmitted: true,
+      });
+    } else {
+      assertStepOrder(step, flags);
+    }
 
     // Backend-authoritative Step 2 (Farm) validation — never trust the frontend.
-    // Farm Meter must be present and STRICTLY greater than the Step 1 start meter
-    // (equality is rejected). Runs only on submit, never on Save Progress.
+    // Farm Meter must be present and STRICTLY greater than the prior floor
+    // (opening meter for Load 1; prior farm dest / diesel for later loads).
     if (step === "farm") {
       // Normalize negative tolls to 0 (tolls may legitimately be zero).
       const tolls = numOrNull(body.pickupTolls);
@@ -2647,15 +3023,17 @@ export const tripsService = {
       if (body.farmAddress != null) {
         body.farmAddress = str(body.farmAddress).trim();
       }
-      const startMeter = numOrNull(current.opening_meter);
       const farmMeter = numOrNull(body.destMeter);
       if (farmMeter == null || farmMeter <= 0) {
         throw new AppError(422, "Farm meter is required for Step 2 submission.");
       }
-      if (startMeter != null && farmMeter <= startMeter) {
+      const floorInfo = await withTransaction(async (client) =>
+        farmMeterFloor(client, id, legIndex, numOrNull(current.opening_meter))
+      );
+      if (floorInfo.floor > 0 && farmMeter <= floorInfo.floor) {
         throw new AppError(
           422,
-          `Farm meter (${farmMeter} KM) must be strictly greater than the Step 1 starting meter (${startMeter} KM).`
+          `Farm meter (${farmMeter} KM) must be strictly greater than the ${floorInfo.label} (${floorInfo.floor} KM).`
         );
       }
     }
@@ -2712,11 +3090,28 @@ export const tripsService = {
       }
     }
 
+    if (step === "expenses") {
+      const closing =
+        numOrNull(body.closingMeter) ?? numOrNull(body.endMeter) ?? numOrNull(current.closing_meter);
+      if (closing != null) {
+        const maxDest = Math.max(0, ...legRows.map((l) => l.destMeter ?? 0));
+        const dieselMax = await withTransaction(async (client) => maxDieselMeter(client, id));
+        const opening = numOrNull(current.opening_meter) ?? 0;
+        const floor = Math.max(opening, maxDest, dieselMax);
+        if (floor > 0 && closing < floor) {
+          throw new AppError(
+            422,
+            `End meter (${closing} KM) must be at least ${floor} KM (opening / farm / diesel chain).`
+          );
+        }
+      }
+    }
+
     const stepFlags: Record<string, Partial<Trip> & Record<string, unknown>> = {
       start: { startStepSubmitted: true, status: (body.status as TripStatus) ?? "Draft" },
-      farm: { farmStepSubmitted: true },
-      pickup: { pickupStepSubmitted: true },
-      deliveries: { deliveryStepSubmitted: true },
+      farm: { farmStepSubmitted: true, legIndex },
+      pickup: { pickupStepSubmitted: true, legIndex },
+      deliveries: { deliveryStepSubmitted: true, legIndex },
       expenses: {
         expensesStepSubmitted: true,
         endStepSubmitted: true,
@@ -2729,7 +3124,27 @@ export const tripsService = {
       },
     };
 
-    return this.save(id, { ...body, ...stepFlags[step] });
+    return this.save(id, { ...body, legIndex, ...stepFlags[step] });
+  },
+
+  /** Add Load 2 or Load 3 on the same Draft trip (max 3). */
+  async addLeg(id: number) {
+    return withTransaction(async (client) => {
+      const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [id]);
+      if (!existing.rowCount) throw new AppError(404, `Trip ${id} not found`);
+      await ensureTripLeg1(client, id);
+      const leg = await addTripLeg(client, id);
+      const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [id]);
+      const trip = await hydrateTrip(client, row.rows[0], {
+        includeDcPhoto: true,
+        viewLegIndex: leg.legIndex,
+      });
+      return {
+        ...trip,
+        ...flattenDiesel(trip.dieselEntries ?? []),
+        activeLegIndex: leg.legIndex,
+      };
+    });
   },
 
   async softDelete(id: number, reason?: string) {
@@ -3006,6 +3421,18 @@ export const tripsService = {
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
       if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
       if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
+      const destMax = await client.query<{ m: string | null }>(
+        `SELECT MAX(dest_meter) AS m FROM trip_legs
+          WHERE trip_id = $1 AND farm_step_submitted = TRUE AND dest_meter IS NOT NULL`,
+        [tripId]
+      );
+      const farmFloor = num(destMax.rows[0]?.m);
+      if (farmFloor > 0 && meter < farmFloor) {
+        throw new AppError(
+          422,
+          `Diesel meter (${meter} KM) must be at least the latest farm meter (${farmFloor} KM).`
+        );
+      }
       if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
         throw new AppError(422, "Diesel bunk GPS is required");
       }
@@ -3114,6 +3541,18 @@ export const tripsService = {
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
       if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
       if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
+      const destMax = await client.query<{ m: string | null }>(
+        `SELECT MAX(dest_meter) AS m FROM trip_legs
+          WHERE trip_id = $1 AND farm_step_submitted = TRUE AND dest_meter IS NOT NULL`,
+        [tripId]
+      );
+      const farmFloor = num(destMax.rows[0]?.m);
+      if (farmFloor > 0 && meter < farmFloor) {
+        throw new AppError(
+          422,
+          `Diesel meter (${meter} KM) must be at least the latest farm meter (${farmFloor} KM).`
+        );
+      }
       if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
         throw new AppError(422, "Diesel bunk GPS is required");
       }

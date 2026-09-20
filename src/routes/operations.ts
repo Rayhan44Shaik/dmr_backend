@@ -4,6 +4,7 @@ import { collectionEntryService } from "../services/collectionEntryService.js";
 import { collectionsService } from "../services/collectionsService.js";
 import { dashboardService } from "../services/dashboardService.js";
 import { fuelExpensesService } from "../services/fuelExpensesService.js";
+import { mortalityAnalysisService } from "../services/mortalityAnalysisService.js";
 import { rateEntryService } from "../services/rateEntryService.js";
 import { shopRatesService } from "../services/shopRatesService.js";
 import { shopSalesService } from "../services/shopSalesService.js";
@@ -43,6 +44,25 @@ operationsRouter.get(
     const toDate =
       typeof req.query.toDate === "string" ? req.query.toDate : undefined;
     res.json(await dashboardService.getSummary({ asOf, fromDate, toDate }));
+  })
+);
+
+/** Completed-trip mortality / weight trends for dashboard + analysis page. */
+operationsRouter.get(
+  "/mortality-analysis",
+  asyncHandler(async (req, res) => {
+    const { params: pagination, enabled } = parsePagination(req.query);
+    const sortBy = typeof req.query.sortBy === "string" ? req.query.sortBy : "tripDate";
+    const sortDir = req.query.sortDir === "desc" ? "desc" : "asc";
+    res.json(
+      await mortalityAnalysisService.list({
+        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        sortBy,
+        sortDir,
+        pagination: enabled ? pagination : null,
+      })
+    );
   })
 );
 

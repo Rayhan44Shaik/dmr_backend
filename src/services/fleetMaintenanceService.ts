@@ -207,8 +207,24 @@ function buildWhere(filters: {
     clauses.push(`fm.maintenance_date <= $${params.length}`);
   }
   if (filters.status && filters.status !== "ALL") {
-    params.push(filters.status);
-    clauses.push(`fm.status = $${params.length}::ops_record_status`);
+    // Frontend shortcuts: "Pending" / "PendingApproval" → ops enum "Pending Approval".
+    const raw = String(filters.status).trim();
+    const normalized = raw.toLowerCase().replace(/[_\s]+/g, "");
+    const status =
+      normalized === "pending" || normalized === "pendingapproval"
+        ? "Pending Approval"
+        : raw;
+    const allowed = new Set([
+      "Draft",
+      "Pending Approval",
+      "Approved",
+      "Rejected",
+      "Deleted",
+    ]);
+    if (allowed.has(status)) {
+      params.push(status);
+      clauses.push(`fm.status = $${params.length}::ops_record_status`);
+    }
   }
   if (filters.search) {
     params.push(`%${filters.search}%`);

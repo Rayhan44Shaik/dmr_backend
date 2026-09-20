@@ -183,6 +183,20 @@ tripsRouter.post(
 );
 
 /**
+ * Add another Farm→Pickup→Deliveries load on the same Draft trip (max 3).
+ * Requires the previous load's deliveries to be submitted.
+ */
+tripsRouter.post(
+  "/:id/legs",
+  asyncHandler(async (req, res) => {
+    const id = positiveId(req.params.id);
+    await requireTripAccess(res, id, "trip.submit");
+    const trip = await tripsService.addLeg(id);
+    res.status(201).json(trip);
+  })
+);
+
+/**
  * Step 4 per-shop persistence — idempotent Save Progress / single-shop save.
  * Upserts the submitted shop deliveries by client_key (falling back to server
  * id), never wipes shops not in the payload, never submits Step 4 and never
