@@ -393,6 +393,30 @@ function computeStepStatuses(
 
 function toTripSummary(row: Record<string, unknown>): TripSummary {
   const base = mapTripBase(row);
+  const rawLoadSummaries = Array.isArray(row.load_summaries) ? row.load_summaries : [];
+  const loadSummaries = rawLoadSummaries.map((item) => {
+    const value = item as Record<string, unknown>;
+    return {
+      load: num(value.load),
+      birds: num(value.birds),
+      weight: num(value.weight),
+      mortality: num(value.mortality),
+      mortalityWeight: num(value.mortalityWeight ?? value.mortality_weight),
+      weightLoss: num(value.weightLoss ?? value.weight_loss),
+      shops: num(value.shops),
+    };
+  });
+  const completedTotals = loadSummaries.reduce(
+    (sum, load) => ({
+      birds: sum.birds + load.birds,
+      weight: sum.weight + load.weight,
+      mortality: sum.mortality + load.mortality,
+      mortalityWeight: sum.mortalityWeight + load.mortalityWeight,
+      weightLoss: sum.weightLoss + load.weightLoss,
+      shops: sum.shops + load.shops,
+    }),
+    { birds: 0, weight: 0, mortality: 0, mortalityWeight: 0, weightLoss: 0, shops: 0 }
+  );
   const flags = {
     startStepSubmitted: base.startStepSubmitted,
     farmStepSubmitted: base.farmStepSubmitted,
@@ -406,6 +430,17 @@ function toTripSummary(row: Record<string, unknown>): TripSummary {
 
   return {
     ...base,
+    submittedLoadCount: Math.max(1, num(row.submitted_load_count) || 1),
+    loadSummaries,
+    totalBirds: completedTotals.birds,
+    totalBirdsDelivered: completedTotals.birds,
+    totalWeight: completedTotals.weight,
+    totalDeliveredWeight: completedTotals.weight,
+    totalMortality: completedTotals.mortality,
+    totalMortalityCount: completedTotals.mortality,
+    totalMortalityWeight: completedTotals.mortalityWeight,
+    weightLoss: completedTotals.weightLoss,
+    totalShops: completedTotals.shops,
     helpers: [],
     loaders: [],
     boxDetails: [],
@@ -512,6 +547,7 @@ async function loadTripExtras(client: Client, tripId: number, legId?: number | n
       legId: numOrNull(r.leg_id),
       shopId: numOrNull(r.shop_id),
       shopName: str(r.shop_name),
+      subShopName: str(r.sub_shop_name),
       birdTypeId: numOrNull(r.bird_type_id),
       birdType: str(r.bird_type),
       birds: num(r.birds),
@@ -707,7 +743,12 @@ async function hydrateTrip(
     dcPhotoData2: null,
   };
   if (options.includeDcPhoto) {
-    dcPhoto = await loadDcPhoto(client, base.id, viewLeg?.dcPhotoKey ?? base.dcPhotoKey ?? null);
+    dcPhoto = await loadDcPhoto(
+      client,
+      base.id,
+      viewLeg?.dcPhotoKey ?? base.dcPhotoKey ?? null,
+      viewLeg?.id && viewLeg.id > 0 ? viewLeg.id : null
+    );
   }
 
   const overlaid = viewLeg
@@ -1154,7 +1195,9 @@ async function replaceDeliveries(
   for (const [index, d] of deliveries.entries()) {
     // Financial values are authoritative on the server. Never persist a
     // browser-supplied amount that can be derived from weight and rate.
-    const amount = computeDeliveryAmount(Number(d.weight ?? 0), d.rate);
+    const weight = Number(Number(d.weight ?? 0).toFixed(2));
+    const mortKg = Number(Number(d.mortKg ?? 0).toFixed(2));
+    const amount = computeDeliveryAmount(weight, d.rate);
 
     const saleNo = await generateSaleNo(client, tripId, tripNo);
 
@@ -1162,8 +1205,8 @@ async function replaceDeliveries(
       `INSERT INTO trip_deliveries (
          trip_id, leg_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
          birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
-         farm_birds, farm_weight, auto_capture_time, client_key
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+         farm_birds, farm_weight, auto_capture_time, client_key, sub_shop_name
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
        RETURNING id`,
       [
         tripId,
@@ -1176,17 +1219,18 @@ async function replaceDeliveries(
         d.birdTypeId ?? null,
         d.birdType ?? "",
         d.birds ?? 0,
-        d.weight ?? 0,
+        weight,
         d.mortality ?? 0,
-        d.mortKg ?? 0,
+        mortKg,
         d.rate ?? null,
         amount,
         d.remarks ?? "",
         d.deliveryMode ?? "box",
         d.farmBirds ?? null,
-        d.farmWeight ?? null,
+        d.farmWeight == null ? null : Number(Number(d.farmWeight).toFixed(2)),
         normalizeTripTimestamp(d.autoCaptureTime),
         d.clientKey ?? null,
+        d.subShopName ?? "",
       ]
     );
     const deliveryId = num(inserted.rows[0].id);
@@ -1203,7 +1247,7 @@ async function replaceDeliveries(
       await client.query(
         `INSERT INTO trip_delivery_per_box (delivery_id, box_no, birds, weight)
          VALUES ($1,$2,$3,$4)`,
-        [deliveryId, pb.boxNo, pb.birds ?? 0, pb.weight ?? 0]
+        [deliveryId, pb.boxNo, pb.birds ?? 0, Number(Number(pb.weight ?? 0).toFixed(2))]
       );
     }
   }
@@ -1490,6 +1534,41 @@ function applyComputedFields(
   }
 }
 
+/** Canonical per-load Recent Trips metrics. Only submitted Step 4 loads count. */
+const recentLoadSummarySelect = `,
+  (SELECT COUNT(*) FROM trip_legs submitted
+    WHERE submitted.trip_id = trips.id AND submitted.farm_step_submitted = TRUE) AS submitted_load_count,
+  COALESCE((
+    SELECT jsonb_agg(
+      jsonb_build_object(
+        'load', totals.leg_index,
+        'birds', totals.birds,
+        'weight', totals.weight,
+        'mortality', totals.mortality,
+        'mortalityWeight', totals.mortality_weight,
+        'weightLoss', GREATEST(0, totals.dc_weight - totals.weight - totals.mortality_weight),
+        'shops', totals.shops
+      ) ORDER BY totals.leg_index
+    )
+    FROM (
+      SELECT leg.leg_index,
+             COALESCE(leg.dc_weight, 0) AS dc_weight,
+             COALESCE(SUM(delivery.birds), 0) AS birds,
+             COALESCE(SUM(delivery.weight), 0) AS weight,
+             COALESCE(SUM(delivery.mortality), 0) AS mortality,
+             COALESCE(SUM(delivery.mort_kg), 0) AS mortality_weight,
+             COUNT(DISTINCT delivery.shop_id) AS shops
+        FROM trip_legs leg
+        LEFT JOIN trip_deliveries delivery
+          ON delivery.trip_id = leg.trip_id
+         AND delivery.leg_id = leg.id
+         AND COALESCE(delivery.deleted, FALSE) = FALSE
+       WHERE leg.trip_id = trips.id
+         AND leg.delivery_step_submitted = TRUE
+       GROUP BY leg.id, leg.leg_index, leg.dc_weight
+    ) totals
+  ), '[]'::jsonb) AS load_summaries`;
+
 export const tripsService = {
   /**
    * Preview the next trip number for a selected business date.
@@ -1535,6 +1614,7 @@ export const tripsService = {
                 (SELECT COUNT(*) FROM trip_boxes b WHERE b.trip_id = trips.id) AS box_count,
                 (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id) AS delivery_count,
                 (SELECT COUNT(*) FROM trip_diesel_entries e WHERE e.trip_id = trips.id) AS diesel_count
+                ${recentLoadSummarySelect}
          FROM trips ${where}
          ORDER BY trip_date DESC, id DESC
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -1549,6 +1629,7 @@ export const tripsService = {
               (SELECT COUNT(*) FROM trip_boxes b WHERE b.trip_id = trips.id) AS box_count,
               (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id) AS delivery_count,
               (SELECT COUNT(*) FROM trip_diesel_entries e WHERE e.trip_id = trips.id) AS diesel_count
+              ${recentLoadSummarySelect}
        FROM trips ${where} ORDER BY trip_date DESC, id DESC`,
       params
     );
@@ -1663,13 +1744,13 @@ export const tripsService = {
     });
   },
 
-  async getById(id: number) {
+  async getById(id: number, viewLegIndex?: number) {
     const result = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
     if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
 
     try {
       return await withTransaction(async (client) => {
-        const trip = await hydrateTrip(client, result.rows[0], { includeDcPhoto: true });
+        const trip = await hydrateTrip(client, result.rows[0], { includeDcPhoto: true, viewLegIndex });
         const flags = {
           startStepSubmitted: trip.startStepSubmitted,
           farmStepSubmitted: trip.farmStepSubmitted,
@@ -1777,9 +1858,10 @@ export const tripsService = {
           );
         }
 
-        // Trip number is generated ONLY at creation, server-side, locked.
-        // Editing a trip never generates a new number (BUG 2: sequence is
-        // consumed per trip date and a deleted trip keeps its number).
+        // Trip numbers are always server-generated. Creation allocates against
+        // the selected date; a Step 1 date edit allocates a fresh number for
+        // the new date. Old numbers remain consumed because allocation is
+        // MAX+1 across every status (including soft-deleted rows).
         await validateTripForeignKeys(body, client);
         await enrichMasterDenorm(client, body);
 
@@ -1815,13 +1897,21 @@ export const tripsService = {
           tripId = num(inserted.rows[0].id);
           await ensureTripLeg1(client, tripId);
         } else if (body.tripDate != null) {
-          // trip_date is immutable after create — number embeds the date.
           const existingDate = existing ? dateOnly(existing.rows[0].trip_date) : null;
-          const requested = dateOnly(body.tripDate);
+          const requested = resolveTripDateForNumbering(body.tripDate, { required: true });
           if (existingDate && requested && requested !== existingDate) {
-            throw new AppError(
-              422,
-              `Trip date is locked to ${existingDate} because trip number ${existing?.rows[0]?.trip_no ?? ""} was already assigned. Close and create a new trip for a different date.`
+            const oldTripNo = str(existing?.rows[0]?.trip_no);
+            const tripNo = await generateTripNo(client, requested);
+            await client.query(
+              `UPDATE trips SET trip_date = $2::date, trip_no = $3, updated_at = NOW() WHERE id = $1`,
+              [tripId, requested, tripNo]
+            );
+            await client.query(
+              `UPDATE trip_deliveries
+                  SET sale_no = $2 || substring(sale_no from '-S[0-9]+$')
+                WHERE trip_id = $1
+                  AND sale_no LIKE $3 || '-S%'`,
+              [tripId, tripNo, oldTripNo]
             );
           }
         }
@@ -2363,11 +2453,13 @@ export const tripsService = {
         const persistPhoto = async (key: unknown, mime: unknown, data: unknown) => {
           if (data && key) {
             await client.query(
-              `INSERT INTO trip_media (trip_id, media_key, media_type, mime_type, data_base64)
-               VALUES ($1,$2,'image',$3,$4)
+              `INSERT INTO trip_media (trip_id, leg_id, media_key, media_type, mime_type, data_base64)
+               VALUES ($1,$2,$3,'image',$4,$5)
                ON CONFLICT (trip_id, media_key) DO UPDATE
-                 SET data_base64 = EXCLUDED.data_base64, mime_type = EXCLUDED.mime_type`,
-              [tripId, str(key), mime ? str(mime) : "image/jpeg", str(data)]
+                 SET leg_id = EXCLUDED.leg_id,
+                     data_base64 = EXCLUDED.data_base64,
+                     mime_type = EXCLUDED.mime_type`,
+              [tripId, activeLeg.id, str(key), mime ? str(mime) : "image/jpeg", str(data)]
             );
           }
         };
@@ -2376,10 +2468,11 @@ export const tripsService = {
         if (body.dcPhotoKey || body.dcPhotoData || body.dcPhotoKey2 || body.dcPhotoData2) {
           await client.query(
             `DELETE FROM trip_media
-              WHERE trip_id = $1 AND media_type = 'image'
-                AND media_key NOT IN ($2, $3)`,
+              WHERE trip_id = $1 AND leg_id = $2 AND media_type = 'image'
+                AND media_key NOT IN ($3, $4)`,
             [
               tripId,
+              activeLeg.id,
               body.dcPhotoKey ? str(body.dcPhotoKey) : "__none__",
               body.dcPhotoKey2 ? str(body.dcPhotoKey2) : "__none__",
             ]
@@ -2662,9 +2755,9 @@ export const tripsService = {
         const match = findBy(d);
         const mode = d.deliveryMode === "weight" ? "weight" : "box";
         const birds = Number(d.birds ?? 0);
-        const weight = Number(d.weight ?? 0);
+        const weight = Number(Number(d.weight ?? 0).toFixed(2));
         const mortality = Number(d.mortality ?? 0);
-        const mortKg = Number(d.mortKg ?? 0);
+        const mortKg = Number(Number(d.mortKg ?? 0).toFixed(2));
         const shopId = d.shopId != null ? Number(d.shopId) : null;
         const selectedBoxIds = Array.isArray(d.selectedBoxIds)
           ? [...new Set((d.selectedBoxIds as number[]).map(Number))]
@@ -2800,7 +2893,8 @@ export const tripsService = {
                farm_birds = $16,
                farm_weight = $17,
                auto_capture_time = $18,
-               client_key = $19
+               client_key = $19,
+               sub_shop_name = $20
              WHERE id = $1`,
             [
               deliveryId,
@@ -2822,6 +2916,7 @@ export const tripsService = {
               farmWeight,
               autoCaptureTime,
               d.clientKey ? str(d.clientKey) : null,
+              d.subShopName ?? "",
             ]
           );
         } else {
@@ -2831,8 +2926,8 @@ export const tripsService = {
             `INSERT INTO trip_deliveries (
                trip_id, leg_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
                birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
-               farm_birds, farm_weight, auto_capture_time, client_key
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+               farm_birds, farm_weight, auto_capture_time, client_key, sub_shop_name
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
              RETURNING id`,
             [
               tripId,
@@ -2856,6 +2951,7 @@ export const tripsService = {
               farmWeight,
               autoCaptureTime,
               d.clientKey ? str(d.clientKey) : null,
+              d.subShopName ?? "",
             ]
           );
           deliveryId = num(inserted.rows[0].id);
@@ -3036,6 +3132,35 @@ export const tripsService = {
           `Farm meter (${farmMeter} KM) must be strictly greater than the ${floorInfo.label} (${floorInfo.floor} KM).`
         );
       }
+      const nextReading = await withTransaction(async (client) => {
+        const result = await client.query<{ meter: string | null }>(
+          `WITH active AS (
+             SELECT farm_step_submitted_at
+               FROM trip_legs WHERE trip_id = $1 AND leg_index = $2
+           ), later_readings AS (
+             SELECT dest_meter AS meter
+               FROM trip_legs
+              WHERE trip_id = $1 AND leg_index > $2 AND dest_meter IS NOT NULL
+             UNION ALL
+             SELECT d.meter
+               FROM trip_diesel_entries d, active a
+              WHERE d.trip_id = $1 AND d.meter IS NOT NULL
+                AND a.farm_step_submitted_at IS NOT NULL
+                AND d.submitted_at > a.farm_step_submitted_at
+             UNION ALL
+             SELECT closing_meter FROM trips
+              WHERE id = $1 AND closing_meter IS NOT NULL
+           ) SELECT MIN(meter) AS meter FROM later_readings`,
+          [id, legIndex]
+        );
+        return num(result.rows[0]?.meter);
+      });
+      if (nextReading > 0 && farmMeter >= nextReading) {
+        throw new AppError(
+          422,
+          `Farm meter (${farmMeter} KM) must be less than the next entered meter (${nextReading} KM).`
+        );
+      }
     }
 
     // Backend-authoritative Step 3 (Pickup) validation — never trust the frontend.
@@ -3101,7 +3226,7 @@ export const tripsService = {
         if (floor > 0 && closing < floor) {
           throw new AppError(
             422,
-            `End meter (${closing} KM) must be at least ${floor} KM (opening / farm / diesel chain).`
+            `End meter (${closing} KM) must be greater than or equal to the last entered meter (${floor} KM).`
           );
         }
       }
@@ -3127,7 +3252,7 @@ export const tripsService = {
     return this.save(id, { ...body, legIndex, ...stepFlags[step] });
   },
 
-  /** Add Load 2 or Load 3 on the same Draft trip (max 3). */
+  /** Add Load 2–4 on the same Draft trip (max 4). */
   async addLeg(id: number) {
     return withTransaction(async (client) => {
       const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [id]);
@@ -3144,6 +3269,48 @@ export const tripsService = {
         ...flattenDiesel(trip.dieselEntries ?? []),
         activeLegIndex: leg.legIndex,
       };
+    });
+  },
+
+  /** Remove only the last, completely unsubmitted load opened by mistake. */
+  async removeEmptyLeg(id: number, legIndex: number) {
+    return withTransaction(async (client) => {
+      const tripRes = await client.query(`SELECT * FROM trips WHERE id = $1 FOR UPDATE`, [id]);
+      if (!tripRes.rowCount) throw new AppError(404, `Trip ${id} not found`);
+      if (str(tripRes.rows[0].status) !== "Draft") {
+        throw new AppError(422, "Loads can only be closed while the trip is Draft");
+      }
+      const legs = await listTripLegs(client, id);
+      const last = legs[legs.length - 1];
+      if (!last || legIndex <= 1 || last.legIndex !== legIndex) {
+        throw new AppError(422, "Only the latest additional load can be closed");
+      }
+      if (last.farmStepSubmitted || last.pickupStepSubmitted || last.deliveryStepSubmitted) {
+        throw new AppError(422, `Load ${legIndex} already has submitted steps and cannot be closed`);
+      }
+      const childRows = await client.query(
+        `SELECT
+           EXISTS (SELECT 1 FROM trip_boxes WHERE trip_id = $1 AND leg_id = $2) AS has_boxes,
+           EXISTS (SELECT 1 FROM trip_deliveries WHERE trip_id = $1 AND leg_id = $2) AS has_deliveries`,
+        [id, last.id]
+      );
+      if (childRows.rows[0]?.has_boxes || childRows.rows[0]?.has_deliveries) {
+        throw new AppError(422, `Load ${legIndex} has saved data and cannot be closed`);
+      }
+      await client.query(`DELETE FROM trip_legs WHERE id = $1`, [last.id]);
+      const previous = legs[legs.length - 2];
+      await client.query(
+        `UPDATE trips SET leg_count = $2,
+           farm_step_submitted = $3,
+           pickup_step_submitted = $4,
+           delivery_step_submitted = $5,
+           updated_at = NOW()
+         WHERE id = $1`,
+        [id, previous.legIndex, previous.farmStepSubmitted, previous.pickupStepSubmitted, previous.deliveryStepSubmitted]
+      );
+      const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [id]);
+      const trip = await hydrateTrip(client, row.rows[0], { includeDcPhoto: true, viewLegIndex: previous.legIndex });
+      return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []), activeLegIndex: previous.legIndex };
     });
   },
 
@@ -3408,7 +3575,7 @@ export const tripsService = {
    */
   async upsertDieselEntry(tripId: number, body: Record<string, unknown>) {
     return withTransaction(async (client) => {
-      const existing = await client.query(`SELECT id, trip_date FROM trips WHERE id = $1 AND deleted = FALSE`, [
+      const existing = await client.query(`SELECT id, trip_date, closing_meter FROM trips WHERE id = $1 AND deleted = FALSE`, [
         tripId,
       ]);
       if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
@@ -3427,12 +3594,6 @@ export const tripsService = {
         [tripId]
       );
       const farmFloor = num(destMax.rows[0]?.m);
-      if (farmFloor > 0 && meter < farmFloor) {
-        throw new AppError(
-          422,
-          `Diesel meter (${meter} KM) must be at least the latest farm meter (${farmFloor} KM).`
-        );
-      }
       if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
         throw new AppError(422, "Diesel bunk GPS is required");
       }
@@ -3462,6 +3623,41 @@ export const tripsService = {
           [tripId]
         );
         rowIndex = num(maxRow.rows[0].m) + 1;
+      }
+
+      const priorDiesel = await client.query<{ meter: string; row_index: number }>(
+        `SELECT meter, row_index FROM trip_diesel_entries
+          WHERE trip_id = $1 AND row_index < $2 AND meter IS NOT NULL
+          ORDER BY row_index DESC LIMIT 1`,
+        [tripId, rowIndex]
+      );
+      const meterFloor = Math.max(farmFloor, num(priorDiesel.rows[0]?.meter));
+      if (meterFloor > 0 && meter <= meterFloor) {
+        throw new AppError(422, `Diesel meter (${meter} KM) must be greater than the last entered meter (${meterFloor} KM).`);
+      }
+
+      const laterDiesel = await client.query<{ meter: string; row_index: number }>(
+        `SELECT meter, row_index FROM trip_diesel_entries
+          WHERE trip_id = $1 AND row_index > $2 AND meter IS NOT NULL
+          ORDER BY row_index ASC LIMIT 1`,
+        [tripId, rowIndex]
+      );
+      const nextMeter = num(laterDiesel.rows[0]?.meter);
+      if (nextMeter > 0 && meter >= nextMeter) {
+        throw new AppError(422, `Diesel meter (${meter} KM) must be less than the next entered meter (${nextMeter} KM).`);
+      }
+      const duplicateBill = await client.query(
+        `SELECT row_index FROM trip_diesel_entries
+          WHERE trip_id = $1 AND row_index <> $2 AND image_data = $3
+          LIMIT 1`,
+        [tripId, rowIndex, imageData]
+      );
+      if (duplicateBill.rowCount) {
+        throw new AppError(422, `Diesel bill image is already used in row ${num(duplicateBill.rows[0].row_index)}.`);
+      }
+      const closingMeter = num(existing.rows[0].closing_meter);
+      if (closingMeter > 0 && meter > closingMeter) {
+        throw new AppError(422, `Diesel meter (${meter} KM) cannot exceed the end meter (${closingMeter} KM).`);
       }
 
       const bunkName = body.bunkName != null ? str(body.bunkName) : null;
@@ -3528,7 +3724,10 @@ export const tripsService = {
   async updateDieselEntry(tripId: number, entryId: number, body: Record<string, unknown>) {
     return withTransaction(async (client) => {
       const existing = await client.query(
-        `SELECT id, row_index FROM trip_diesel_entries WHERE id = $1 AND trip_id = $2`,
+        `SELECT d.id, d.row_index, t.closing_meter
+           FROM trip_diesel_entries d
+           JOIN trips t ON t.id = d.trip_id
+          WHERE d.id = $1 AND d.trip_id = $2`,
         [entryId, tripId]
       );
       if (!existing.rowCount) throw new AppError(404, `Diesel entry ${entryId} not found`);
@@ -3547,11 +3746,29 @@ export const tripsService = {
         [tripId]
       );
       const farmFloor = num(destMax.rows[0]?.m);
-      if (farmFloor > 0 && meter < farmFloor) {
-        throw new AppError(
-          422,
-          `Diesel meter (${meter} KM) must be at least the latest farm meter (${farmFloor} KM).`
-        );
+      const rowIndex = num(existing.rows[0].row_index);
+      const neighbors = await client.query<{ meter: string; row_index: number }>(
+        `SELECT meter, row_index FROM trip_diesel_entries
+          WHERE trip_id = $1 AND id <> $2 AND meter IS NOT NULL
+            AND (row_index < $3 OR row_index > $3)
+          ORDER BY row_index`,
+        [tripId, entryId, rowIndex]
+      );
+      const priorMeter = Math.max(
+        farmFloor,
+        ...neighbors.rows.filter((r) => num(r.row_index) < rowIndex).map((r) => num(r.meter))
+      );
+      const next = neighbors.rows.find((r) => num(r.row_index) > rowIndex);
+      const nextMeter = next ? num(next.meter) : 0;
+      if (priorMeter > 0 && meter <= priorMeter) {
+        throw new AppError(422, `Diesel meter (${meter} KM) must be greater than the last entered meter (${priorMeter} KM).`);
+      }
+      if (nextMeter > 0 && meter >= nextMeter) {
+        throw new AppError(422, `Diesel meter (${meter} KM) must be less than the next entered meter (${nextMeter} KM).`);
+      }
+      const closingMeter = num(existing.rows[0].closing_meter);
+      if (closingMeter > 0 && meter > closingMeter) {
+        throw new AppError(422, `Diesel meter (${meter} KM) cannot exceed the end meter (${closingMeter} KM).`);
       }
       if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
         throw new AppError(422, "Diesel bunk GPS is required");
@@ -3559,6 +3776,15 @@ export const tripsService = {
       const imageData = body.imageData != null ? str(body.imageData) : "";
       if (!imageData || imageData.length < 40) {
         throw new AppError(422, "Diesel bill image is required");
+      }
+      const duplicateBill = await client.query(
+        `SELECT row_index FROM trip_diesel_entries
+          WHERE trip_id = $1 AND id <> $2 AND image_data = $3
+          LIMIT 1`,
+        [tripId, entryId, imageData]
+      );
+      if (duplicateBill.rowCount) {
+        throw new AppError(422, `Diesel bill image is already used in row ${num(duplicateBill.rows[0].row_index)}.`);
       }
 
       const bunkName = body.bunkName != null ? str(body.bunkName) : null;

@@ -1,6 +1,6 @@
 /**
  * Same-trip multi-load helpers: trip_legs holds repeated Farm→Pickup→Deliveries
- * cycles (max 3) while Step 1 / Step 5 stay on the trips row.
+ * cycles (max 4) while Step 1 / Step 5 stay on the trips row.
  */
 import type pg from "pg";
 import { AppError } from "../middleware/errorHandler.js";
@@ -9,7 +9,7 @@ import { isoOrNull, num, numOrNull, str } from "./coerce.js";
 
 type Client = pg.PoolClient;
 
-export const MAX_TRIP_LEGS = 3;
+export const MAX_TRIP_LEGS = 4;
 
 export interface TripLegRow {
   id: number;
@@ -309,7 +309,7 @@ export async function maxDieselMeter(client: Client, tripId: number): Promise<nu
 /**
  * Floor for farm dest meter on a load:
  * - Load 1: opening meter
- * - Load N: max(prev leg dest, max diesel so far)
+ * - Load N: max(all prior load destinations, max diesel so far)
  */
 export async function farmMeterFloor(
   client: Client,
@@ -321,14 +321,19 @@ export async function farmMeterFloor(
     const floor = openingMeter != null && openingMeter > 0 ? openingMeter : 0;
     return { floor, label: "Step 1 starting meter" };
   }
-  const prev = await getTripLeg(client, tripId, legIndex - 1);
-  const prevDest = prev?.destMeter != null && prev.destMeter > 0 ? prev.destMeter : 0;
+  const priorDestResult = await client.query<{ m: string | null }>(
+    `SELECT MAX(dest_meter) AS m
+       FROM trip_legs
+      WHERE trip_id = $1 AND leg_index < $2 AND dest_meter IS NOT NULL`,
+    [tripId, legIndex]
+  );
+  const prevDest = num(priorDestResult.rows[0]?.m);
   const dieselMax = await maxDieselMeter(client, tripId);
   const floor = Math.max(prevDest, dieselMax);
   const label =
     dieselMax >= prevDest && dieselMax > 0
       ? "last diesel meter on this trip"
-      : `Load ${legIndex - 1} farm meter`;
+      : "previous load destination meter";
   return { floor, label };
 }
 

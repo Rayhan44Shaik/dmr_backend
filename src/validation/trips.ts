@@ -59,6 +59,7 @@ const deliverySchema = z.object({
   boxNo: z.coerce.number().int().nullable().optional(),
   shopId: z.coerce.number().int().nonnegative().nullable().optional(),
   shopName: shortText.optional(),
+  subShopName: shortText.optional(),
   birdTypeId: z.coerce.number().int().nonnegative().nullable().optional(),
   birdType: shortText.optional(),
   birds: z.coerce.number().int().nonnegative("Bird count cannot be negative").max(1_000_000).optional(),

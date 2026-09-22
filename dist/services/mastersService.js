@@ -82,6 +82,34 @@ export function mapShop(row) {
         currentBalance: num(row.current_balance),
     };
 }
+/** Keep readable name snapshots synchronized by immutable shop identity. */
+async function propagateShopName(client, shopId, shopName) {
+    // Never match the old spelling. Rows without a shop id remain historical
+    // free text and similarly named shops cannot be modified accidentally.
+    for (const table of ["trip_deliveries", "shop_rates", "shop_sales", "collections"]) {
+        await client.query(`UPDATE ${table} SET shop_name = $2 WHERE shop_id = $1`, [shopId, shopName]);
+    }
+    // last_shop is derived display data without its own shop_id. Rebuild it
+    // only on trips that contain the exact renamed shop identity.
+    await client.query(`UPDATE trips t
+        SET last_shop = (
+         SELECT d.shop_name
+           FROM trip_deliveries d
+          WHERE d.trip_id = t.id
+            AND COALESCE(d.deleted, FALSE) = FALSE
+          ORDER BY COALESCE(d.leg_id, 0) DESC,
+                   COALESCE(d.serial_no, 0) DESC,
+                   d.id DESC
+          LIMIT 1
+       )
+      WHERE EXISTS (
+        SELECT 1
+          FROM trip_deliveries changed
+         WHERE changed.trip_id = t.id
+           AND changed.shop_id = $1
+           AND COALESCE(changed.deleted, FALSE) = FALSE
+      )`, [shopId]);
+}
 export function mapBank(row) {
     return {
         id: num(row.id),
@@ -419,10 +447,12 @@ export const mastersService = {
     async upsertShop(body) {
         assertValid(validateShopFields(body));
         if (body.id) {
-            await assertUnique("shop", body.shopName, body.id);
+            const shopId = body.id;
+            await assertUnique("shop", body.shopName, shopId);
             if (body.shopNumber)
-                await assertUnique("shopNumber", body.shopNumber, body.id);
-            const result = await query(`UPDATE shops SET
+                await assertUnique("shopNumber", body.shopNumber, shopId);
+            return withTransaction(async (client) => {
+                const result = await client.query(`UPDATE shops SET
           shop_no=COALESCE($2,shop_no), shop_number=$3, shop_name=$4, owner_name=$5, phone_number=$6,
           secondary_phone_number=$7, whatsapp_number=$8, email=$9,
           city=$10, village=$10, address=$11, latitude=$12, longitude=$13,
@@ -430,27 +460,29 @@ export const mastersService = {
           current_balance = $17 + COALESCE(
             (SELECT SUM(debit) - SUM(credit) FROM shop_ledger WHERE shop_id = $1), 0)
          WHERE id=$1 RETURNING *`, [
-                body.id,
-                body.shopNo,
-                body.shopNumber ?? "",
-                body.shopName,
-                body.ownerName ?? "",
-                body.phoneNumber ?? "",
-                body.secondaryPhoneNumber ?? "",
-                body.whatsappNumber ?? "",
-                body.email ?? "",
-                body.city ?? body.village ?? "",
-                body.address ?? null,
-                body.latitude ?? null,
-                body.longitude ?? null,
-                body.paperRate ?? 1,
-                body.associationType ?? "",
-                body.status ?? "Active",
-                body.openingBalance ?? 0,
-            ]);
-            if (!result.rowCount)
-                throw new AppError(404, "Shop not found");
-            return mapShop(result.rows[0]);
+                    shopId,
+                    body.shopNo,
+                    body.shopNumber ?? "",
+                    body.shopName,
+                    body.ownerName ?? "",
+                    body.phoneNumber ?? "",
+                    body.secondaryPhoneNumber ?? "",
+                    body.whatsappNumber ?? "",
+                    body.email ?? "",
+                    body.city ?? body.village ?? "",
+                    body.address ?? null,
+                    body.latitude ?? null,
+                    body.longitude ?? null,
+                    body.paperRate ?? 1,
+                    body.associationType ?? "",
+                    body.status ?? "Active",
+                    body.openingBalance ?? 0,
+                ]);
+                if (!result.rowCount)
+                    throw new AppError(404, "Shop not found");
+                await propagateShopName(client, shopId, body.shopName);
+                return mapShop(result.rows[0]);
+            });
         }
         const nextNo = await query(`SELECT next_master_number('shops') AS n`);
         await assertUnique("shop", body.shopName);

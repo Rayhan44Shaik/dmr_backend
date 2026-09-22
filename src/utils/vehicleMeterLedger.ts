@@ -28,9 +28,13 @@ export interface MeterEvent {
   sourceType: MeterSourceType;
   recordId: string;
   ref: string;
+  /** Trip primary key for trip-linked fuel rows; absent for standalone fuel. */
+  tripId?: string;
   meter: number;
   eventDate: string;
   eventInstant: string;
+  /** Trip status for trip-bound events; absent for standalone fuel/maintenance rows. */
+  tripStatus?: string;
 }
 
 const SOURCE_LABELS: Record<MeterSourceType, string> = {
@@ -46,9 +50,11 @@ function mapEvent(row: Record<string, unknown>): MeterEvent {
     sourceType: str(row.source_type) as MeterSourceType,
     recordId: str(row.record_id),
     ref: str(row.ref),
+    tripId: row.trip_id == null ? undefined : str(row.trip_id),
     meter: num(row.meter),
     eventDate: dateOnly(row.event_date) ?? "",
     eventInstant: preciseIsoOrUndefined(row.event_instant) ?? "",
+    tripStatus: row.trip_status == null ? undefined : str(row.trip_status),
   };
 }
 
@@ -189,9 +195,57 @@ export async function listVehicleMeterHistory(vehicleId: number): Promise<
   Array<MeterEvent & { diffFromPrevious: number | null }>
 > {
   const result = await query(
-    `SELECT * FROM vehicle_meter_events
-     WHERE vehicle_id = $1
-     ORDER BY event_date ASC, event_instant ASC, created_at ASC, record_id ASC`,
+    `SELECT vme.*,
+            CASE
+              WHEN vme.source_type = 'FUEL' AND trip_fuel.source_type = 'TRIP'
+                THEN trip_fuel.trip_id::text
+              ELSE NULL
+            END AS trip_id,
+            CASE
+              WHEN vme.source_type IN ('TRIP_START', 'TRIP_END') THEN trip.status
+              WHEN vme.source_type = 'FUEL' AND trip_fuel.source_type = 'TRIP' THEN fuel_trip.status
+              ELSE NULL
+            END AS trip_status
+     FROM vehicle_meter_events vme
+     LEFT JOIN trips trip
+       ON vme.source_type IN ('TRIP_START', 'TRIP_END')
+      AND trip.id::text = vme.record_id
+     LEFT JOIN fuel_expenses trip_fuel
+       ON vme.source_type = 'FUEL'
+      AND trip_fuel.id::text = vme.record_id
+      AND trip_fuel.source_type = 'TRIP'
+     LEFT JOIN trips fuel_trip
+       ON fuel_trip.id = trip_fuel.trip_id
+     WHERE vme.vehicle_id = $1
+       AND (
+         vme.source_type NOT IN ('TRIP_START', 'TRIP_END')
+         OR EXISTS (
+           SELECT 1
+           FROM trips t
+           WHERE t.id::text = vme.record_id
+             AND t.status IN ('Approved', 'Completed')
+             AND COALESCE(t.deleted, FALSE) = FALSE
+         )
+       )
+       AND (
+         vme.source_type <> 'FUEL'
+         OR NOT EXISTS (
+           SELECT 1
+           FROM fuel_expenses fe
+           WHERE fe.id::text = vme.record_id
+             AND fe.source_type = 'TRIP'
+         )
+         OR EXISTS (
+           SELECT 1
+           FROM fuel_expenses fe
+           JOIN trips t ON t.id = fe.trip_id
+           WHERE fe.id::text = vme.record_id
+             AND fe.source_type = 'TRIP'
+             AND t.status IN ('Approved', 'Completed')
+             AND COALESCE(t.deleted, FALSE) = FALSE
+         )
+       )
+     ORDER BY vme.event_date ASC, vme.event_instant ASC, vme.created_at ASC, vme.record_id ASC`,
     [vehicleId]
   );
   const events = result.rows.map(mapEvent);

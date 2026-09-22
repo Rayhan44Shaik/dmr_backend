@@ -140,7 +140,7 @@ export interface BoxDetail {
   legId?: number | null;
 }
 
-/** One Farm→Pickup→Deliveries cycle on the same Draft trip (max 3). */
+/** One Farm→Pickup→Deliveries cycle on the same Draft trip (max 4). */
 export interface TripLeg {
   id: number;
   tripId: number;
@@ -179,6 +179,16 @@ export interface TripLeg {
   deliveries?: ShopDelivery[];
 }
 
+export interface TripLoadSummary {
+  load: number;
+  birds: number;
+  weight: number;
+  mortality: number;
+  mortalityWeight: number;
+  weightLoss: number;
+  shops: number;
+}
+
 export interface ShopDelivery {
   id: number;
   serialNo?: number | null;
@@ -186,6 +196,7 @@ export interface ShopDelivery {
   legId?: number | null;
   shopId: number | null;
   shopName: string;
+  subShopName?: string;
   birdTypeId: number | null;
   birdType: string;
   birds: number;
@@ -358,6 +369,10 @@ export interface TripStepStatuses {
 }
 
 export interface TripSummary extends Trip {
+  /** Step-2-submitted loads, visible immediately in Recent Trips. */
+  submittedLoadCount: number;
+  /** Step-4-submitted load totals used by Recent Trips and its tooltips. */
+  loadSummaries: TripLoadSummary[];
   resumeStep: "start" | "farm" | "pickup" | "deliveries" | "expenses" | null;
   resumeStepLabel: string | null;
   wizardProgress: {

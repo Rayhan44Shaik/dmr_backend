@@ -151,25 +151,26 @@ describe("trip numbering by selected date", () => {
     assert.equal(otherDay.tripNo, "TR-20260815-001");
   });
 
-  it("locks trip_date after create (number embeds the date)", async () => {
+  it("re-numbers an existing trip when Step 1 changes its date", async () => {
     const crew = await seedCrew();
+    const occupyingCrew = await seedCrew();
     const trip = await createStartTrip(crew, "2026-08-16", 3000);
-    await assert.rejects(
-      () =>
-        tripsService.save(trip.id, {
-          tripDate: "2026-08-17",
-          vehicleId: crew.vehicle.id,
-          driverId: crew.driver.id,
-          supervisorId: crew.supervisor.id,
-          helpers: [crew.helper.employeeName],
-          loaders: [crew.loader.employeeName],
-          startStepSubmitted: true,
-        }),
-      (err: unknown) => err instanceof AppError && err.status === 422
-    );
+    const occupied = await createStartTrip(occupyingCrew, "2026-08-17", 3100);
+    assert.equal(occupied.tripNo, "TR-20260817-001");
+    const updated = await tripsService.save(trip.id, {
+      tripDate: "2026-08-17",
+      vehicleId: crew.vehicle.id,
+      driverId: crew.driver.id,
+      supervisorId: crew.supervisor.id,
+      helpers: [crew.helper.employeeName],
+      loaders: [crew.loader.employeeName],
+      startStepSubmitted: true,
+    });
+    assert.equal(updated.tripDate, "2026-08-17");
+    assert.equal(updated.tripNo, "TR-20260817-002");
     const reloaded = await tripsService.getById(trip.id);
-    assert.equal(reloaded.tripDate, "2026-08-16");
-    assert.equal(reloaded.tripNo, trip.tripNo);
+    assert.equal(reloaded.tripDate, "2026-08-17");
+    assert.equal(reloaded.tripNo, "TR-20260817-002");
   });
 
   it("preview next-number API matches create allocation rule", async () => {

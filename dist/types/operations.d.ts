@@ -159,6 +159,10 @@ export interface FuelExpense {
     amount: number;
     pumpName: string;
     bunkAddress?: string | null;
+    gpsLat?: number | null;
+    gpsLon?: number | null;
+    gpsAccuracy?: number | null;
+    gpsCapturedAt?: string | null;
     remarks?: string | null;
     status: OpsRecordStatus;
     imageData?: string | null;

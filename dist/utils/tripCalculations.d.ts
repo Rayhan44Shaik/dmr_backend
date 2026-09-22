@@ -25,8 +25,10 @@ export declare function computeTripKpis(opts: {
         id: number;
         serialNo?: number | null;
         boxNo?: number | null;
+        legId?: number | null;
         shopId: number | null;
         shopName: string;
+        subShopName?: string;
         birdTypeId: number | null;
         birdType: string;
         birds: number;

@@ -62,6 +62,21 @@ function mapEntry(row: Record<string, unknown>): CollectionEntry {
   };
 }
 
+function collectionWeekBounds(input?: string) {
+  const parsed = input && /^\d{4}-\d{2}-\d{2}$/.test(input) ? new Date(`${input}T00:00:00Z`) : new Date();
+  if (Number.isNaN(parsed.getTime())) throw new AppError(400, "Invalid date");
+  const day = parsed.getUTCDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  const start = new Date(parsed);
+  start.setUTCDate(start.getUTCDate() + mondayOffset);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 6);
+  const iso = (value: Date) => value.toISOString().slice(0, 10);
+  const today = new Date();
+  const todayText = iso(today);
+  return { asOfDate: iso(parsed), weekStart: iso(start), weekEnd: iso(end), isCurrentWeek: todayText >= iso(start) && todayText <= iso(end) };
+}
+
 /**
  * Requirement 7 — prerequisite gate. A collection may only be raised against a
  * delivery/trip once the business flow has reached it: Completed Trip →
@@ -132,6 +147,71 @@ async function loadOne(client: Client, id: number): Promise<CollectionEntry> {
 }
 
 export const collectionEntryService = {
+  async weekBounds(date?: string) {
+    return collectionWeekBounds(date);
+  },
+
+  async pendingSummary(date?: string) {
+    const bounds = collectionWeekBounds(date);
+    const result = await query(
+      `SELECT s.id AS shop_id, s.shop_name, COALESCE(s.current_balance, 0) AS balance,
+              COALESCE(ws.amount, 0) AS weekly_sales,
+              COALESCE(ac.amount, 0) AS approved_collections,
+              COALESCE(pc.amount, 0) AS pending_collections,
+              lc.last_collection_date
+         FROM shops s
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(d.amount, 0)) AS amount
+             FROM trip_deliveries d JOIN trips t ON t.id = d.trip_id
+            WHERE d.shop_id = s.id AND COALESCE(d.deleted, FALSE) = FALSE
+              AND COALESCE(t.deleted, FALSE) = FALSE AND COALESCE(t.rate_completed, FALSE) = TRUE
+              AND t.trip_date BETWEEN $1::date AND $2::date
+         ) ws ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount
+             FROM collections c WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
+              AND COALESCE(c.is_financial, FALSE) = TRUE
+              AND c.collection_date BETWEEN $1::date AND $2::date
+         ) ac ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount
+             FROM collections c WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
+              AND COALESCE(c.is_financial, FALSE) = FALSE AND c.status = 'Pending Approval'
+              AND c.collection_date BETWEEN $1::date AND $2::date
+         ) pc ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT MAX(c.collection_date) AS last_collection_date
+             FROM collections c WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
+              AND COALESCE(c.is_financial, FALSE) = TRUE
+         ) lc ON TRUE
+        WHERE s.status = 'Active'
+        ORDER BY s.shop_name`,
+      [bounds.weekStart, bounds.weekEnd]
+    );
+    const shops = result.rows.map((row) => {
+      const weeklySales = num(row.weekly_sales);
+      const approved = num(row.approved_collections);
+      const lastDate = dateOnly(row.last_collection_date);
+      const overdueDays = lastDate ? Math.max(0, Math.floor((new Date(`${bounds.asOfDate}T00:00:00Z`).getTime() - new Date(`${lastDate}T00:00:00Z`).getTime()) / 86_400_000)) : null;
+      return {
+        shopId: num(row.shop_id), shopName: str(row.shop_name), weekStart: bounds.weekStart, weekEnd: bounds.weekEnd,
+        balance: num(row.balance), weeklySales, weeklyApprovedCollections: approved,
+        weeklyPendingCollections: num(row.pending_collections),
+        recoveryPercentage: weeklySales > 0 ? Number(((approved / weeklySales) * 100).toFixed(2)) : 0,
+        overdueDays, hasPendingCollections: num(row.pending_collections) > 0, lastCollectionDate: lastDate,
+      };
+    });
+    const totals = shops.reduce((acc, row) => ({
+      weeklySales: acc.weeklySales + row.weeklySales,
+      weeklyApprovedCollections: acc.weeklyApprovedCollections + row.weeklyApprovedCollections,
+      weeklyPendingCollections: acc.weeklyPendingCollections + row.weeklyPendingCollections,
+      balance: acc.balance + row.balance,
+      recoveryPercentage: 0,
+    }), { weeklySales: 0, weeklyApprovedCollections: 0, weeklyPendingCollections: 0, balance: 0, recoveryPercentage: 0 });
+    totals.recoveryPercentage = totals.weeklySales > 0 ? Number(((totals.weeklyApprovedCollections / totals.weeklySales) * 100).toFixed(2)) : 0;
+    return { weekStart: bounds.weekStart, weekEnd: bounds.weekEnd, shops, totals };
+  },
+
   async list(filters: {
     shopId?: number;
     fromDate?: string;

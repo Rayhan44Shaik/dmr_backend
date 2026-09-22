@@ -131,7 +131,8 @@ tripsRouter.get(
   asyncHandler(async (req, res) => {
     const id = positiveId(req.params.id);
     await requireTripAccess(res, id, "trip.view");
-    res.json(await tripsService.getById(id));
+    const legIndex = req.query.legIndex ? positiveId(String(req.query.legIndex), "Load number") : undefined;
+    res.json(await tripsService.getById(id, legIndex));
   })
 );
 
@@ -183,7 +184,7 @@ tripsRouter.post(
 );
 
 /**
- * Add another Farm→Pickup→Deliveries load on the same Draft trip (max 3).
+ * Add another Farm→Pickup→Deliveries load on the same Draft trip (max 4).
  * Requires the previous load's deliveries to be submitted.
  */
 tripsRouter.post(
@@ -193,6 +194,18 @@ tripsRouter.post(
     await requireTripAccess(res, id, "trip.submit");
     const trip = await tripsService.addLeg(id);
     res.status(201).json(trip);
+  })
+);
+
+/** Close an accidentally opened, still-empty latest load. */
+tripsRouter.delete(
+  "/:id/legs/:legIndex",
+  asyncHandler(async (req, res) => {
+    const id = positiveId(req.params.id);
+    const legIndex = positiveId(req.params.legIndex, "Load number");
+    await requireTripAccess(res, id, "trip.edit");
+    const trip = await tripsService.removeEmptyLeg(id, legIndex);
+    res.json(trip);
   })
 );
 

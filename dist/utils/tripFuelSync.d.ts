@@ -28,7 +28,7 @@ export declare function syncTripFuelFromDb(client: Client, tripId: number, opts?
     approveIfCompleted?: boolean;
     createdBy?: string;
 }): Promise<number>;
-export declare function loadDcPhoto(client: Client, tripId: number, dcPhotoKey: string | null): Promise<{
+export declare function loadDcPhoto(client: Client, tripId: number, dcPhotoKey: string | null, legId?: number | null): Promise<{
     dcPhotoKey: string | null;
     dcPhotoMime: string | null;
     dcPhotoData: string | null;

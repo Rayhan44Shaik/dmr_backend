@@ -121,9 +121,38 @@ export async function validateVehicleMeter(client, opts) {
 }
 /** Full ordered timeline for a vehicle — backs the Vehicle History UI. */
 export async function listVehicleMeterHistory(vehicleId) {
-    const result = await query(`SELECT * FROM vehicle_meter_events
-     WHERE vehicle_id = $1
-     ORDER BY event_date ASC, event_instant ASC, created_at ASC, record_id ASC`, [vehicleId]);
+    const result = await query(`SELECT vme.*
+     FROM vehicle_meter_events vme
+     WHERE vme.vehicle_id = $1
+       AND (
+         vme.source_type NOT IN ('TRIP_START', 'TRIP_END')
+         OR EXISTS (
+           SELECT 1
+           FROM trips t
+           WHERE t.id::text = vme.record_id
+             AND t.status = 'Completed'
+             AND COALESCE(t.deleted, FALSE) = FALSE
+         )
+       )
+       AND (
+         vme.source_type <> 'FUEL'
+         OR NOT EXISTS (
+           SELECT 1
+           FROM fuel_expenses fe
+           WHERE fe.id::text = vme.record_id
+             AND fe.source_type = 'TRIP'
+         )
+         OR EXISTS (
+           SELECT 1
+           FROM fuel_expenses fe
+           JOIN trips t ON t.id = fe.trip_id
+           WHERE fe.id::text = vme.record_id
+             AND fe.source_type = 'TRIP'
+             AND t.status = 'Completed'
+             AND COALESCE(t.deleted, FALSE) = FALSE
+         )
+       )
+     ORDER BY vme.event_date ASC, vme.event_instant ASC, vme.created_at ASC, vme.record_id ASC`, [vehicleId]);
     const events = result.rows.map(mapEvent);
     let prevMeter = null;
     return events.map((e) => {

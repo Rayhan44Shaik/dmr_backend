@@ -55,6 +55,10 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
     amount: num(row.amount),
     pumpName: str(row.pump_name || row.petrol_bunk),
     bunkAddress: row.bunk_address == null ? null : str(row.bunk_address),
+    gpsLat: row.gps_lat == null ? null : num(row.gps_lat),
+    gpsLon: row.gps_lon == null ? null : num(row.gps_lon),
+    gpsAccuracy: row.gps_accuracy == null ? null : num(row.gps_accuracy),
+    gpsCapturedAt: row.gps_captured_at == null ? null : str(row.gps_captured_at),
     remarks: row.remarks == null ? null : str(row.remarks),
     status: opsStatus,
     imageData: row.image_data == null ? null : str(row.image_data),
@@ -230,9 +234,9 @@ export const fuelExpensesService = {
              bill_no, expense_date, vehicle_id, vehicle_no, driver_id, driver_name,
              supervisor_id, supervisor_name, trip_id, source_type, meter_reading, amount, rate,
              litres, petrol_bunk, pump_name, bunk_address, remarks, status, ops_status,
-             image_data, image_name, image_mime, created_by
+             image_data, image_name, image_mime, gps_lat, gps_lon, gps_accuracy, gps_captured_at, created_by
            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'MANUAL',$10,$11,$12,$13,$14,$14,$15,$16,
-             'Pending'::approval_status,'Pending Approval'::ops_record_status,$17,$18,$19,$20)
+             'Pending'::approval_status,'Pending Approval'::ops_record_status,$17,$18,$19,$20,$21,$22,$23,$24)
            RETURNING *`,
           [
             billNo,
@@ -254,6 +258,10 @@ export const fuelExpensesService = {
             data.imageData ?? null,
             data.imageName ?? null,
             data.imageMime ?? null,
+            data.gpsLat ?? null,
+            data.gpsLon ?? null,
+            data.gpsAccuracy ?? null,
+            data.gpsCapturedAt ?? null,
             data.createdBy ?? "",
           ]
         );
@@ -334,7 +342,11 @@ export const fuelExpensesService = {
              image_data = COALESCE($17, image_data),
              image_name = COALESCE($18, image_name),
              image_mime = COALESCE($19, image_mime),
-             created_by = COALESCE($20, created_by)
+             gps_lat = COALESCE($20, gps_lat),
+             gps_lon = COALESCE($21, gps_lon),
+             gps_accuracy = COALESCE($22, gps_accuracy),
+             gps_captured_at = COALESCE($23, gps_captured_at),
+             created_by = COALESCE($24, created_by)
            WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE
            RETURNING *`,
           [
@@ -357,6 +369,10 @@ export const fuelExpensesService = {
             data.imageData ?? null,
             data.imageName ?? null,
             data.imageMime ?? null,
+            data.gpsLat ?? null,
+            data.gpsLon ?? null,
+            data.gpsAccuracy ?? null,
+            data.gpsCapturedAt ?? null,
             data.createdBy ?? null,
           ]
         );

@@ -181,6 +181,69 @@ async function runLoad(
 }
 
 describe("trip multi-load (same Draft trip)", () => {
+  it("Recent Trips counts Step 2 loads and totals only Step 4 submitted loads", async () => {
+    const { trip, m } = await startTrip(5000);
+    await runLoad(trip.id, 1, {
+      destMeter: 5050,
+      farmId: m.farm.id,
+      farmName: m.farm.farmName,
+      birdTypeId: m.birdType.id,
+      birdType: m.birdType.birdType,
+      shopId: m.shop.id,
+      shopName: m.shop.shopName,
+    });
+    await tripsService.addLeg(trip.id);
+    await tripsService.submitStep(trip.id, "farm", {
+      legIndex: 2,
+      sourceFarmId: m.farm2.id,
+      sourceFarm: m.farm2.farmName,
+      destMeter: 5100,
+      pickupTolls: 0,
+      avgBirdWeight: 2.5,
+      farmGpsLat: 12.97,
+      farmGpsLon: 77.59,
+      farmGpsAccuracy: 10,
+      farmGpsTime: new Date().toISOString(),
+      farmBirdTypeId: m.birdType.id,
+      farmBirdType: m.birdType.birdType,
+    });
+
+    let recent = await tripsService.list() as Array<{ id: number; submittedLoadCount: number; loadSummaries: Array<{ load: number }>; totalBirds: number }>;
+    let row = recent.find((item) => item.id === trip.id)!;
+    assert.equal(row.submittedLoadCount, 2, "Load 2 appears as soon as its Step 2 is submitted");
+    assert.deepEqual(row.loadSummaries.map((load) => load.load), [1]);
+    assert.equal(row.totalBirds, 40, "unfinished Load 2 must not affect Recent totals");
+
+    await tripsService.submitStep(trip.id, "pickup", {
+      legIndex: 2,
+      boxDetails: [{ boxNo: 1, birds: 40, weight: 80 }],
+      dcPhotoKey: "dc-recent-2",
+      dcPhotoMime: "image/jpeg",
+      dcPhotoData: `data:image/jpeg;base64,${"C".repeat(80)}`,
+    });
+    await tripsService.submitStep(trip.id, "deliveries", {
+      legIndex: 2,
+      deliveries: [{
+        id: 0, clientKey: `recent-${trip.id}-2`, shopId: m.shop.id, shopName: m.shop.shopName, subShopName: "Counter B",
+        birdTypeId: m.birdType.id, birdType: m.birdType.birdType, birds: 40, weight: 80,
+        mortality: 0, mortKg: 0, rate: 100, amount: 8000, remarks: "", deliveryMode: "box",
+        selectedBoxIds: [1], boxNo: 1,
+      }],
+    });
+
+    recent = await tripsService.list() as typeof recent;
+    row = recent.find((item) => item.id === trip.id)!;
+    assert.deepEqual(row.loadSummaries.map((load) => load.load), [1, 2]);
+    assert.equal(row.totalBirds, 80, "completed loads are summed in Recent totals");
+
+    const load1View = await tripsService.getById(trip.id, 1);
+    const load2View = await tripsService.getById(trip.id, 2);
+    assert.equal(load1View.dcPhotoKey, "dc-1");
+    assert.equal(load2View.dcPhotoKey, "dc-recent-2");
+    assert.equal(load2View.deliveries[0]?.subShopName, "Counter B");
+    assert.notEqual(load1View.dcPhotoData, load2View.dcPhotoData, "each load must hydrate its own submitted image");
+  });
+
   it("single-load trip still completes through expenses", async () => {
     const { trip, m } = await startTrip(1000);
     assert.equal(trip.legCount ?? 1, 1);
@@ -269,9 +332,9 @@ describe("trip multi-load (same Draft trip)", () => {
     assert.equal(done.status, "Pending");
   });
 
-  it("cannot add a 4th load", async () => {
+  it("allows four loads and cannot add a 5th load", async () => {
     const { trip, m } = await startTrip(3000);
-    for (let leg = 1; leg <= 3; leg++) {
+    for (let leg = 1; leg <= 4; leg++) {
       if (leg > 1) await tripsService.addLeg(trip.id);
       await runLoad(trip.id, leg, {
         destMeter: 3000 + leg * 40,
@@ -287,6 +350,25 @@ describe("trip multi-load (same Draft trip)", () => {
       () => tripsService.addLeg(trip.id),
       (err: unknown) => err instanceof AppError && err.status === 422
     );
+  });
+
+  it("closes only the latest accidentally opened empty load", async () => {
+    const { trip, m } = await startTrip(3500);
+    await runLoad(trip.id, 1, {
+      destMeter: 3540,
+      farmId: m.farm.id,
+      farmName: m.farm.farmName,
+      birdTypeId: m.birdType.id,
+      birdType: m.birdType.birdType,
+      shopId: m.shop.id,
+      shopName: m.shop.shopName,
+    });
+    const opened = await tripsService.addLeg(trip.id);
+    assert.equal(opened.legCount, 2);
+    const closed = await tripsService.removeEmptyLeg(trip.id, 2);
+    assert.equal(closed.legCount, 1);
+    assert.equal(closed.activeLegIndex, 1);
+    assert.equal(closed.deliveryStepSubmitted, true);
   });
 
   it("blocks expenses while a load is incomplete", async () => {

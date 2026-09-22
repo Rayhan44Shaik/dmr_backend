@@ -195,7 +195,8 @@ export async function syncTripFuelFromDb(
 export async function loadDcPhoto(
   client: Client,
   tripId: number,
-  dcPhotoKey: string | null
+  dcPhotoKey: string | null,
+  legId?: number | null
 ): Promise<{
   dcPhotoKey: string | null;
   dcPhotoMime: string | null;
@@ -214,8 +215,10 @@ export async function loadDcPhoto(
   };
   const result = await client.query(
     `SELECT media_key, mime_type, data_base64 FROM trip_media
-     WHERE trip_id = $1 AND media_type = 'image' ORDER BY media_key`,
-    [tripId]
+     WHERE trip_id = $1 AND media_type = 'image'
+       AND ($2::int IS NULL OR leg_id = $2)
+     ORDER BY media_key`,
+    [tripId, legId ?? null]
   );
   if (!result.rowCount) return empty;
 

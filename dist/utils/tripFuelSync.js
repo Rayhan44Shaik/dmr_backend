@@ -140,7 +140,7 @@ export async function syncTripFuelFromDb(client, tripId, opts = {}) {
     }
     return entries.filter((e) => Number(e.litres ?? 0) > 0 || Number(e.rate ?? 0) > 0).length;
 }
-export async function loadDcPhoto(client, tripId, dcPhotoKey) {
+export async function loadDcPhoto(client, tripId, dcPhotoKey, legId) {
     const empty = {
         dcPhotoKey: dcPhotoKey ?? null,
         dcPhotoMime: null,
@@ -150,7 +150,9 @@ export async function loadDcPhoto(client, tripId, dcPhotoKey) {
         dcPhotoData2: null,
     };
     const result = await client.query(`SELECT media_key, mime_type, data_base64 FROM trip_media
-     WHERE trip_id = $1 AND media_type = 'image' ORDER BY media_key`, [tripId]);
+     WHERE trip_id = $1 AND media_type = 'image'
+       AND ($2::int IS NULL OR leg_id = $2)
+     ORDER BY media_key`, [tripId, legId ?? null]);
     if (!result.rowCount)
         return empty;
     const photos = result.rows

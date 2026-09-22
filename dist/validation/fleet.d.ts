@@ -69,8 +69,8 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
         specification?: string | undefined;
     }[] | undefined;
     vehicleNo?: string | null | undefined;
-    driverId?: number | null | undefined;
     remarks?: string | null | undefined;
+    driverId?: number | null | undefined;
     createdBy?: string | undefined;
     driverName?: string | null | undefined;
     totalCost?: number | undefined;
@@ -92,8 +92,8 @@ export declare const fleetMaintenanceBodySchema: z.ZodObject<{
         quantity?: number | undefined;
     }[] | undefined;
     vehicleNo?: string | null | undefined;
-    driverId?: number | null | undefined;
     remarks?: string | null | undefined;
+    driverId?: number | null | undefined;
     createdBy?: string | undefined;
     driverName?: string | null | undefined;
     totalCost?: number | undefined;
@@ -151,9 +151,9 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     }[] | undefined;
     date?: string | undefined;
     vehicleNo?: string | null | undefined;
+    remarks?: string | null | undefined;
     vehicleId?: number | undefined;
     driverId?: number | null | undefined;
-    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     driverName?: string | null | undefined;
     totalCost?: number | undefined;
@@ -175,9 +175,9 @@ export declare const fleetMaintenanceUpdateSchema: z.ZodObject<{
     }[] | undefined;
     date?: string | undefined;
     vehicleNo?: string | null | undefined;
+    remarks?: string | null | undefined;
     vehicleId?: number | undefined;
     driverId?: number | null | undefined;
-    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     driverName?: string | null | undefined;
     totalCost?: number | undefined;

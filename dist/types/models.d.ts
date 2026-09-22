@@ -127,13 +127,63 @@ export interface BoxDetail {
     birds: number;
     weight: number;
     avgWeight?: number | null;
+    legId?: number | null;
+}
+/** One Farm→Pickup→Deliveries cycle on the same Draft trip (max 4). */
+export interface TripLeg {
+    id: number;
+    tripId: number;
+    legIndex: number;
+    sourceFarmId: number | null;
+    sourceFarm: string | null;
+    reachedTime: string | null;
+    destMeter: number | null;
+    pickupTolls: number;
+    farmAddress: string | null;
+    avgBirdWeight: number | null;
+    farmRemarks: string | null;
+    farmBirdTypeId: number | null;
+    farmBirdType: string | null;
+    farmBirdCount: number | null;
+    farmLoadWeight: number | null;
+    farmRate: number | null;
+    farmAmount: number | null;
+    farmGpsLat: number | null;
+    farmGpsLon: number | null;
+    farmGpsAccuracy: number | null;
+    farmGpsTime: string | null;
+    farmStepSubmitted: boolean;
+    farmStepSubmittedAt: string | null;
+    dcWeight: number;
+    totalBirds: number;
+    boxes: number;
+    avgWeight: number;
+    pickupLoadTime: string | null;
+    dcPhotoKey: string | null;
+    pickupStepSubmitted: boolean;
+    pickupStepSubmittedAt: string | null;
+    deliveryStepSubmitted: boolean;
+    deliveriesStepSubmittedAt: string | null;
+    boxDetails?: BoxDetail[];
+    deliveries?: ShopDelivery[];
+}
+export interface TripLoadSummary {
+    load: number;
+    birds: number;
+    weight: number;
+    mortality: number;
+    mortalityWeight: number;
+    weightLoss: number;
+    shops: number;
 }
 export interface ShopDelivery {
     id: number;
     serialNo?: number | null;
     boxNo?: number | null;
+    legId?: number | null;
     shopId: number | null;
     shopName: string;
+    subShopName?: string;
     birdTypeId: number | null;
     birdType: string;
     birds: number;
@@ -175,6 +225,12 @@ export interface Trip {
     tripNo: string;
     tripDate: string;
     status: TripStatus;
+    /** Number of Farm→Pickup→Delivery loads on this trip (1–3). */
+    legCount?: number;
+    /** Active load index (1–3) for the wizard form overlay. */
+    activeLegIndex?: number;
+    /** All loads; Step 1 / Step 5 remain trip-level. */
+    legs?: TripLeg[];
     startTime: string | null;
     vehicleId: number | null;
     vehicleNo: string | null;
@@ -288,6 +344,10 @@ export interface TripStepStatuses {
     expenses: TripStepStatus;
 }
 export interface TripSummary extends Trip {
+    /** Step-2-submitted loads, visible immediately in Recent Trips. */
+    submittedLoadCount: number;
+    /** Step-4-submitted load totals used by Recent Trips and its tooltips. */
+    loadSummaries: TripLoadSummary[];
     resumeStep: "start" | "farm" | "pickup" | "deliveries" | "expenses" | null;
     resumeStepLabel: string | null;
     wizardProgress: {

@@ -58,6 +58,9 @@ operationsRouter.get(
       await mortalityAnalysisService.list({
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        farm: typeof req.query.farm === "string" ? req.query.farm : undefined,
+        supervisor: typeof req.query.supervisor === "string" ? req.query.supervisor : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
         sortBy,
         sortDir,
         pagination: enabled ? pagination : null,
@@ -464,6 +467,27 @@ operationsRouter.get(
   "/collection-entry",
   asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.list(collectionEntryFilters(req)));
+  })
+);
+
+operationsRouter.get(
+  "/mortality-analysis/:tripId/deliveries",
+  asyncHandler(async (req, res) => {
+    res.json(await mortalityAnalysisService.deliveries(Number(req.params.tripId)));
+  })
+);
+
+operationsRouter.get(
+  "/collection-entry/week-bounds",
+  asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.weekBounds(typeof req.query.date === "string" ? req.query.date : undefined));
+  })
+);
+
+operationsRouter.get(
+  "/collection-entry/pending-summary",
+  asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.pendingSummary(typeof req.query.date === "string" ? req.query.date : undefined));
   })
 );
 
