@@ -147,6 +147,97 @@ async function loadOne(client: Client, id: number): Promise<CollectionEntry> {
 }
 
 export const collectionEntryService = {
+  async report(filters: {
+    fromDate?: string;
+    toDate?: string;
+    shopId?: number;
+    collector?: string;
+    paymentMode?: string;
+  }) {
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if (!filters.fromDate || !datePattern.test(filters.fromDate) || !filters.toDate || !datePattern.test(filters.toDate)) {
+      throw new AppError(400, "Valid fromDate and toDate are required");
+    }
+    if (filters.fromDate > filters.toDate) {
+      throw new AppError(400, "fromDate cannot be after toDate");
+    }
+
+    const params: unknown[] = [filters.fromDate, filters.toDate];
+    const clauses = [
+      `collection_date BETWEEN $1::date AND $2::date`,
+      `COALESCE(deleted, FALSE) = FALSE`,
+      `COALESCE(is_financial, FALSE) = TRUE`,
+    ];
+    if (filters.shopId) {
+      params.push(filters.shopId);
+      clauses.push(`shop_id = $${params.length}`);
+    }
+    if (filters.collector?.trim()) {
+      params.push(filters.collector.trim());
+      clauses.push(`collector = $${params.length}`);
+    }
+    if (filters.paymentMode?.trim()) {
+      params.push(filters.paymentMode.trim());
+      clauses.push(`payment_mode = $${params.length}`);
+    }
+
+    const result = await query(
+      `SELECT COALESCE(NULLIF(BTRIM(payment_mode), ''), 'Cash') AS payment_mode,
+              COALESCE(NULLIF(BTRIM(collector), ''), 'Unassigned') AS collector,
+              COUNT(*)::int AS count,
+              COALESCE(SUM(COALESCE(amount, amount_collected, 0)), 0) AS amount
+         FROM collections
+        WHERE ${clauses.join(" AND ")}
+        GROUP BY 1, 2
+        ORDER BY 1, 2`,
+      params
+    );
+
+    const paymentModes = new Map<string, { count: number; amount: number; collectors: Set<string> }>();
+    const collectors = new Map<string, Record<string, number>>();
+    let totalAmount = 0;
+    let totalCount = 0;
+    for (const row of result.rows) {
+      const paymentMode = str(row.payment_mode) || "Cash";
+      const collector = str(row.collector) || "Unassigned";
+      const count = num(row.count);
+      const amount = num(row.amount);
+      const mode = paymentModes.get(paymentMode) ?? { count: 0, amount: 0, collectors: new Set<string>() };
+      mode.count += count;
+      mode.amount += amount;
+      mode.collectors.add(collector);
+      paymentModes.set(paymentMode, mode);
+      const collectorAmounts = collectors.get(collector) ?? {};
+      collectorAmounts[paymentMode] = (collectorAmounts[paymentMode] ?? 0) + amount;
+      collectors.set(collector, collectorAmounts);
+      totalCount += count;
+      totalAmount += amount;
+    }
+
+    return {
+      fromDate: filters.fromDate,
+      toDate: filters.toDate,
+      totalAmount,
+      totalCount,
+      totalCollectors: collectors.size,
+      paymentModeSummary: [...paymentModes.entries()].map(([paymentMode, value]) => ({
+        paymentMode,
+        count: value.count,
+        amount: value.amount,
+        percentage: totalAmount > 0 ? Number(((value.amount / totalAmount) * 100).toFixed(2)) : 0,
+      })),
+      collectorsByPaymentMode: [...paymentModes.entries()].map(([paymentMode, value]) => ({
+        paymentMode,
+        collectorCount: value.collectors.size,
+      })),
+      collectorSummary: [...collectors.entries()].map(([collector, amounts]) => ({
+        collector,
+        amounts,
+        total: Object.values(amounts).reduce((sum, amount) => sum + amount, 0),
+      })),
+    };
+  },
+
   async weekBounds(date?: string) {
     return collectionWeekBounds(date);
   },

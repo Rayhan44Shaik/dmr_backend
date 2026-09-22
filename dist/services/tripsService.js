@@ -873,7 +873,9 @@ async function replaceDeliveries(client, tripId, deliveries = [], legId) {
     for (const [index, d] of deliveries.entries()) {
         // Financial values are authoritative on the server. Never persist a
         // browser-supplied amount that can be derived from weight and rate.
-        const amount = computeDeliveryAmount(Number(d.weight ?? 0), d.rate);
+        const weight = Number(Number(d.weight ?? 0).toFixed(2));
+        const mortKg = Number(Number(d.mortKg ?? 0).toFixed(2));
+        const amount = computeDeliveryAmount(weight, d.rate);
         const saleNo = await generateSaleNo(client, tripId, tripNo);
         const inserted = await client.query(`INSERT INTO trip_deliveries (
          trip_id, leg_id, sale_no, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
@@ -891,15 +893,15 @@ async function replaceDeliveries(client, tripId, deliveries = [], legId) {
             d.birdTypeId ?? null,
             d.birdType ?? "",
             d.birds ?? 0,
-            d.weight ?? 0,
+            weight,
             d.mortality ?? 0,
-            d.mortKg ?? 0,
+            mortKg,
             d.rate ?? null,
             amount,
             d.remarks ?? "",
             d.deliveryMode ?? "box",
             d.farmBirds ?? null,
-            d.farmWeight ?? null,
+            d.farmWeight == null ? null : Number(Number(d.farmWeight).toFixed(2)),
             normalizeTripTimestamp(d.autoCaptureTime),
             d.clientKey ?? null,
             d.subShopName ?? "",
@@ -911,7 +913,7 @@ async function replaceDeliveries(client, tripId, deliveries = [], legId) {
         }
         for (const pb of d.perBoxData ?? []) {
             await client.query(`INSERT INTO trip_delivery_per_box (delivery_id, box_no, birds, weight)
-         VALUES ($1,$2,$3,$4)`, [deliveryId, pb.boxNo, pb.birds ?? 0, pb.weight ?? 0]);
+         VALUES ($1,$2,$3,$4)`, [deliveryId, pb.boxNo, pb.birds ?? 0, Number(Number(pb.weight ?? 0).toFixed(2))]);
         }
     }
 }
@@ -1387,9 +1389,10 @@ export const tripsService = {
                     }
                     await assertOptimisticLock(client, tripId, body.expectedUpdatedAt ?? body.updatedAt);
                 }
-                // Trip number is generated ONLY at creation, server-side, locked.
-                // Editing a trip never generates a new number (BUG 2: sequence is
-                // consumed per trip date and a deleted trip keeps its number).
+                // Trip numbers are always server-generated. Creation allocates against
+                // the selected date; a Step 1 date edit allocates a fresh number for
+                // the new date. Old numbers remain consumed because allocation is
+                // MAX+1 across every status (including soft-deleted rows).
                 await validateTripForeignKeys(body, client);
                 await enrichMasterDenorm(client, body);
                 // Resource availability is DB-backed and transaction-safe. A single
@@ -1418,11 +1421,16 @@ export const tripsService = {
                     await ensureTripLeg1(client, tripId);
                 }
                 else if (body.tripDate != null) {
-                    // trip_date is immutable after create — number embeds the date.
                     const existingDate = existing ? dateOnly(existing.rows[0].trip_date) : null;
-                    const requested = dateOnly(body.tripDate);
+                    const requested = resolveTripDateForNumbering(body.tripDate, { required: true });
                     if (existingDate && requested && requested !== existingDate) {
-                        throw new AppError(422, `Trip date is locked to ${existingDate} because trip number ${existing?.rows[0]?.trip_no ?? ""} was already assigned. Close and create a new trip for a different date.`);
+                        const oldTripNo = str(existing?.rows[0]?.trip_no);
+                        const tripNo = await generateTripNo(client, requested);
+                        await client.query(`UPDATE trips SET trip_date = $2::date, trip_no = $3, updated_at = NOW() WHERE id = $1`, [tripId, requested, tripNo]);
+                        await client.query(`UPDATE trip_deliveries
+                  SET sale_no = $2 || substring(sale_no from '-S[0-9]+$')
+                WHERE trip_id = $1
+                  AND sale_no LIKE $3 || '-S%'`, [tripId, tripNo, oldTripNo]);
                     }
                 }
                 const dieselEntries = extractDieselFromBody(body);
@@ -2181,9 +2189,9 @@ export const tripsService = {
                 const match = findBy(d);
                 const mode = d.deliveryMode === "weight" ? "weight" : "box";
                 const birds = Number(d.birds ?? 0);
-                const weight = Number(d.weight ?? 0);
+                const weight = Number(Number(d.weight ?? 0).toFixed(2));
                 const mortality = Number(d.mortality ?? 0);
-                const mortKg = Number(d.mortKg ?? 0);
+                const mortKg = Number(Number(d.mortKg ?? 0).toFixed(2));
                 const shopId = d.shopId != null ? Number(d.shopId) : null;
                 const selectedBoxIds = Array.isArray(d.selectedBoxIds)
                     ? [...new Set(d.selectedBoxIds.map(Number))]
@@ -2669,6 +2677,7 @@ export const tripsService = {
          RETURNING id`, [id, reason ?? null]);
             if (!result.rowCount)
                 throw new AppError(404, `Trip ${id} not found`);
+            await client.query(`UPDATE fuel_expenses SET deleted = TRUE WHERE trip_id = $1 AND source_type = 'TRIP' AND COALESCE(deleted, FALSE) = FALSE`, [id]);
             return { id, deleted: true };
         });
     },
@@ -2706,6 +2715,7 @@ export const tripsService = {
                 else if (status === "Deleted") {
                     result = await client.query(`UPDATE trips SET status = 'Deleted', deleted = TRUE, deleted_reason = $2
              WHERE id = $1 RETURNING *`, [id, body.reason ?? body.rejectedReason ?? null]);
+                    await client.query(`UPDATE fuel_expenses SET deleted = TRUE WHERE trip_id = $1 AND source_type = 'TRIP' AND COALESCE(deleted, FALSE) = FALSE`, [id]);
                 }
                 else {
                     result = await client.query(`UPDATE trips SET status = $2::trip_status, deleted = FALSE WHERE id = $1 RETURNING *`, [id, status]);

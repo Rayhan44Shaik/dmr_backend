@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   employeeSchema,
+  birdTypeSchema,
   masterIdSchema,
   resolveMasterLocation,
   shopSchema,
@@ -13,6 +14,21 @@ test("Masters params reject non-positive and non-numeric ids", () => {
   assert.equal(masterIdSchema.safeParse({ id: "1" }).success, true);
   assert.equal(masterIdSchema.safeParse({ id: "0" }).success, false);
   assert.equal(masterIdSchema.safeParse({ id: "abc" }).success, false);
+});
+
+test("Others master validates Bird and Fuel Bunk category-specific fields", () => {
+  assert.equal(birdTypeSchema.safeParse({ birdType: "Broiler", category: "Bird", averageWeight: 2.2 }).success, true);
+  assert.equal(birdTypeSchema.safeParse({ birdType: "Fuel One", category: "Fuel Bunk", averageWeight: 0 }).success, false);
+  assert.equal(birdTypeSchema.safeParse({
+    birdType: "Fuel One", category: "Fuel Bunk", averageWeight: 0,
+    ownerName: "Owner", mobileNumber: "9876543210", address: "Main Road",
+    latitude: 16.5, longitude: 80.6,
+  }).success, true);
+  assert.equal(birdTypeSchema.safeParse({
+    birdType: "Fuel Two", category: "Fuel Bunk", averageWeight: 0,
+    ownerName: "Owner", mobileNumber: "919876543210", address: "Main Road",
+    latitude: 16.5, longitude: 80.6,
+  }).success, false);
 });
 
 test("employee validation rejects malformed identity and contact fields", () => {
@@ -80,8 +96,26 @@ test("location resolver accepts coordinates but never resolves arbitrary URLs", 
     latitude: 17.385,
     longitude: 78.4867,
     address: null,
+    placeName: null,
+    mapsUrl: "https://www.google.com/maps/search/?api=1&query=17.385,78.4867",
+    precision: "pin",
   });
   assert.throws(() => resolveMasterLocation("https://example.com/redirect"));
+});
+
+test("location resolver prefers the place pin over the viewport centre", () => {
+  const url =
+    "https://www.google.com/maps/place/Hindustan+Petroleum+Corporation+Limited/" +
+    "@16.6930784,80.3538467,15z/data=!4m10!1m2!2m1!1spetrol+bunk+in+kanchikacherla" +
+    "+andhra+pradesh!3m6!1s0x3a35be04442b7027:0xc4eb6e86288ca144" +
+    "!8m2!3d16.6930784!4d80.3729011!15sCixwZXRyb2wgYnVuayBpbiBrYW5jaGlrYWNoZXJsYSBhbmRocmEgcHJhZGVzaJIBC2dhc19zdGF0aW9u4AEA!16s%2Fg%2F11bx1z4yln?entry=ttu";
+  const resolved = resolveMasterLocation(url);
+  // Exact pin (80.3729011), not the viewport middle (80.3538467).
+  assert.equal(resolved.latitude, 16.6930784);
+  assert.equal(resolved.longitude, 80.3729011);
+  assert.equal(resolved.placeName, "Hindustan Petroleum Corporation Limited");
+  assert.equal(resolved.precision, "pin");
+  assert.ok(resolved.mapsUrl?.includes("16.6930784,80.3729011"));
 });
 
 test("bulk validation is bounded and reports invalid rows atomically", () => {

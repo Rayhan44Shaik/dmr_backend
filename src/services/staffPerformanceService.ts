@@ -38,6 +38,14 @@ function recent(row: TripRow) {
   };
 }
 
+// Driver maintenance-KPI source decision (P2 closure, business-confirmed):
+// the driver KPI uses trip-attributed `trips.vehicle_maintenance` because it is
+// the only maintenance figure attributable to a driver trip. The Fleet ledger
+// (`fleet_maintenance.total_cost`) is vehicle-level, approval-gated
+// (Draft/Pending Approval/Approved) and keyed by vehicle/driver without a trip
+// link, so mixing it into per-driver cost would double-count and leak
+// unapproved entries. Fleet remains the system of record for vehicle
+// maintenance; Staff only reads trip-sourced aggregates.
 async function load(kind: Kind, params: Params): Promise<TripRow[]> {
   validate(params);
   const idColumn = kind === "drivers" ? "t.driver_id" : "t.supervisor_id";

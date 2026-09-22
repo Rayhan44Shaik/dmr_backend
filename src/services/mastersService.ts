@@ -161,6 +161,12 @@ export function mapBirdType(row: Record<string, unknown>): BirdType {
     birdType: str(row.bird_type),
     averageWeight: num(row.average_weight),
     description: str(row.description),
+    category: (str(row.category) || "Bird") as BirdType["category"],
+    ownerName: str(row.owner_name),
+    mobileNumber: str(row.mobile_number),
+    address: str(row.address),
+    latitude: numOrNull(row.latitude),
+    longitude: numOrNull(row.longitude),
     status: str(row.status) as BirdType["status"],
   };
 }
@@ -1116,7 +1122,8 @@ export const mastersService = {
       await assertUnique("birdType", body.birdType, body.id);
       const result = await query(
         `UPDATE bird_types SET
-          bird_type_no=COALESCE($2,bird_type_no), bird_type=$3, average_weight=$4, description=$5, status=$6
+          bird_type_no=COALESCE($2,bird_type_no), bird_type=$3, average_weight=$4, description=$5, status=$6,
+          category=$7, owner_name=$8, mobile_number=$9, address=$10, latitude=$11, longitude=$12
          WHERE id=$1 RETURNING *`,
         [
           body.id,
@@ -1125,6 +1132,12 @@ export const mastersService = {
           body.averageWeight ?? 0,
           body.description ?? "",
           body.status ?? "Active",
+          body.category ?? "Bird",
+          body.ownerName ?? "",
+          body.mobileNumber ?? "",
+          body.address ?? "",
+          body.latitude ?? null,
+          body.longitude ?? null,
         ]
       );
       if (!result.rowCount) throw new AppError(404, "BirdType not found");
@@ -1137,14 +1150,21 @@ export const mastersService = {
     await assertUnique("birdType", body.birdType);
     const result = await query(
       `INSERT INTO bird_types (
-         bird_type_no, bird_type, average_weight, description, status
-       ) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+         bird_type_no, bird_type, average_weight, description, status,
+         category, owner_name, mobile_number, address, latitude, longitude
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
       [
         body.birdTypeNo ?? nextNo.rows[0].n,
         body.birdType,
         body.averageWeight ?? 0,
         body.description ?? "",
         body.status ?? "Active",
+        body.category ?? "Bird",
+        body.ownerName ?? "",
+        body.mobileNumber ?? "",
+        body.address ?? "",
+        body.latitude ?? null,
+        body.longitude ?? null,
       ]
     );
     return mapBirdType(result.rows[0]);

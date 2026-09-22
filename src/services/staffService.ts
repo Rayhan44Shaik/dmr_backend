@@ -1026,7 +1026,7 @@ const data = parseBody(salaryCreateSchema, body);
     });
   },
 
-  async queuePayslipDelivery(channel: "email" | "whatsapp", ids: string[], payload: { language: string; subject?: string; body: string }, queuedBy: string) {
+  async queuePayslipDelivery(channel: "email" | "whatsapp", ids: string[], payload: { language: string; subject?: string; body?: string }, queuedBy: string) {
     return withTransaction(async (client) => {
       const rows = await client.query(
         `SELECT s.id,s.status,e.email,e.phone_number FROM salary_records s JOIN employees e ON e.id=s.employee_id
@@ -1037,11 +1037,11 @@ const data = parseBody(salaryCreateSchema, body);
       for (const row of rows.rows) {
         const recipient = channel === "email" ? str(row.email).trim() : str(row.phone_number).trim();
         if (!["Submitted", "Paid"].includes(str(row.status)) || !recipient) { failed++; continue; }
-        const hash = createHash("sha256").update(JSON.stringify({ channel, recipient, language: payload.language, subject: payload.subject ?? "", body: payload.body })).digest("hex");
+        const hash = createHash("sha256").update(JSON.stringify({ channel, recipient, language: payload.language, subject: payload.subject ?? "", body: payload.body ?? "" })).digest("hex");
         const inserted = await client.query(
           `INSERT INTO salary_payslip_deliveries(salary_id,channel,recipient,language,subject,message_body,payload_hash,queued_by)
            VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(salary_id,channel,payload_hash) DO NOTHING RETURNING id`,
-          [row.id, channel, recipient, payload.language, payload.subject ?? null, payload.body, hash, queuedBy]
+          [row.id, channel, recipient, payload.language, payload.subject ?? null, payload.body ?? "", hash, queuedBy]
         );
         if (inserted.rowCount) sent++; else sent++; // idempotent retry counts the already queued request as accepted
       }

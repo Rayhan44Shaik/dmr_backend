@@ -22,24 +22,37 @@ export function errorHandler(
   res: Response,
   _next: NextFunction
 ) {
+  // P3: every error response carries the request correlation id when present.
+  const requestId =
+    typeof res.locals.requestId === "string" ? res.locals.requestId : null;
+  const withId = (body: Record<string, unknown>) =>
+    requestId ? { ...body, requestId } : body;
+
   if (err instanceof AppError) {
-    return res.status(err.status).json({
-      error: err.message,
-      message: err.message,
-      details: err.details,
-    });
+    return res.status(err.status).json(
+      withId({
+        error: err.message,
+        message: err.message,
+        details: err.details,
+      })
+    );
   }
 
   const pgErr = mapPgError(err);
   if (pgErr) {
-    return res.status(pgErr.status).json({
-      error: pgErr.message,
-      details: pgErr.details,
-    });
+    return res.status(pgErr.status).json(
+      withId({
+        error: pgErr.message,
+        details: pgErr.details,
+      })
+    );
   }
 
-  console.error(err);
-  return res.status(500).json({ error: "Internal server error" });
+  if (requestId) console.error(`[${requestId}]`, err);
+  else console.error(err);
+  return res
+    .status(500)
+    .json(withId({ error: "Internal server error" }));
 }
 
 export function asyncHandler(

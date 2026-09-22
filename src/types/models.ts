@@ -98,6 +98,12 @@ export interface BirdType {
   birdType: string;
   averageWeight: number;
   description: string;
+  category: "Bird" | "Fuel Bunk";
+  ownerName: string;
+  mobileNumber: string;
+  address: string;
+  latitude: number | null;
+  longitude: number | null;
   status: ActiveStatus;
 }
 
@@ -223,6 +229,8 @@ export interface DieselEntry {
   rate?: number | null;
   meter?: number | null;
   bunkName?: string | null;
+  bunkSource?: "MASTER" | "OTHER";
+  fuelBunkId?: number | null;
   bunkGps?: string | null;
   imageData?: string | null;
   imageName?: string | null;

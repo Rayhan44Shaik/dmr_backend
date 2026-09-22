@@ -33,6 +33,11 @@ export function mapPgError(err: unknown): AppError | null {
         detail: err.detail,
       });
     }
+    case "23P01":
+      return new AppError(409, "Overlapping pending or approved leave already exists for this employee", {
+        constraint: err.constraint,
+        detail: err.detail ?? err.message,
+      });
     case "23503":
       return new AppError(422, "Referenced record does not exist", {
         constraint: err.constraint,

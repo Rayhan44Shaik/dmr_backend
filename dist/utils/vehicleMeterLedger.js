@@ -28,9 +28,11 @@ function mapEvent(row) {
         sourceType: str(row.source_type),
         recordId: str(row.record_id),
         ref: str(row.ref),
+        tripId: row.trip_id == null ? undefined : str(row.trip_id),
         meter: num(row.meter),
         eventDate: dateOnly(row.event_date) ?? "",
         eventInstant: preciseIsoOrUndefined(row.event_instant) ?? "",
+        tripStatus: row.trip_status == null ? undefined : str(row.trip_status),
     };
 }
 async function run(client, sql, params) {
@@ -54,11 +56,24 @@ export async function lockVehicleForMeterWrite(client, vehicleId) {
  * across trips (start + end), fuel expenses, and fleet maintenance — ordered
  * by business date first (event_date), then the most precise available
  * "actually happened at" timestamp (event_instant) — never MAX(meter). */
-export async function getLatestVehicleMeter(client, vehicleId) {
+export async function getLatestVehicleMeter(client, vehicleId, excludeTripId) {
+    // Editing a trip must never report the trip's own start/end meter - or the
+    // fuel synced from its own diesel rows - as the "previous" reading.
+    const params = [vehicleId];
+    let exclude = "";
+    if (excludeTripId != null && excludeTripId > 0) {
+        params.push(excludeTripId);
+        exclude = `AND NOT (source_type IN ('TRIP_START', 'TRIP_END') AND record_id = $2)
+     AND NOT (source_type = 'FUEL' AND EXISTS (
+       SELECT 1 FROM fuel_expenses fe
+       WHERE fe.id::text = vehicle_meter_events.record_id AND fe.trip_id = $2
+     ))`;
+    }
     const result = await run(client, `SELECT * FROM vehicle_meter_events
      WHERE vehicle_id = $1
+     ${exclude}
      ORDER BY event_date DESC, event_instant DESC, created_at DESC, record_id DESC
-     LIMIT 1`, [vehicleId]);
+     LIMIT 1`, params);
     if (!result.rowCount)
         return null;
     return mapEvent(result.rows[0]);
@@ -121,8 +136,27 @@ export async function validateVehicleMeter(client, opts) {
 }
 /** Full ordered timeline for a vehicle — backs the Vehicle History UI. */
 export async function listVehicleMeterHistory(vehicleId) {
-    const result = await query(`SELECT vme.*
+    const result = await query(`SELECT vme.*,
+            CASE
+              WHEN vme.source_type = 'FUEL' AND trip_fuel.source_type = 'TRIP'
+                THEN trip_fuel.trip_id::text
+              ELSE NULL
+            END AS trip_id,
+            CASE
+              WHEN vme.source_type IN ('TRIP_START', 'TRIP_END') THEN trip.status
+              WHEN vme.source_type = 'FUEL' AND trip_fuel.source_type = 'TRIP' THEN fuel_trip.status
+              ELSE NULL
+            END AS trip_status
      FROM vehicle_meter_events vme
+     LEFT JOIN trips trip
+       ON vme.source_type IN ('TRIP_START', 'TRIP_END')
+      AND trip.id::text = vme.record_id
+     LEFT JOIN fuel_expenses trip_fuel
+       ON vme.source_type = 'FUEL'
+      AND trip_fuel.id::text = vme.record_id
+      AND trip_fuel.source_type = 'TRIP'
+     LEFT JOIN trips fuel_trip
+       ON fuel_trip.id = trip_fuel.trip_id
      WHERE vme.vehicle_id = $1
        AND (
          vme.source_type NOT IN ('TRIP_START', 'TRIP_END')
@@ -130,7 +164,7 @@ export async function listVehicleMeterHistory(vehicleId) {
            SELECT 1
            FROM trips t
            WHERE t.id::text = vme.record_id
-             AND t.status = 'Completed'
+             AND t.status IN ('Approved', 'Completed')
              AND COALESCE(t.deleted, FALSE) = FALSE
          )
        )
@@ -148,7 +182,7 @@ export async function listVehicleMeterHistory(vehicleId) {
            JOIN trips t ON t.id = fe.trip_id
            WHERE fe.id::text = vme.record_id
              AND fe.source_type = 'TRIP'
-             AND t.status = 'Completed'
+             AND t.status IN ('Approved', 'Completed')
              AND COALESCE(t.deleted, FALSE) = FALSE
          )
        )

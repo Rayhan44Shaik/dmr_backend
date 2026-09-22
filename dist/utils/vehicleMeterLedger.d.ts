@@ -17,9 +17,13 @@ export interface MeterEvent {
     sourceType: MeterSourceType;
     recordId: string;
     ref: string;
+    /** Trip primary key for trip-linked fuel rows; absent for standalone fuel. */
+    tripId?: string;
     meter: number;
     eventDate: string;
     eventInstant: string;
+    /** Trip status for trip-bound events; absent for standalone fuel/maintenance rows. */
+    tripStatus?: string;
 }
 /**
  * Lock the vehicle's row so a concurrent write for the same vehicle serializes
@@ -32,7 +36,7 @@ export declare function lockVehicleForMeterWrite(client: Client, vehicleId: numb
  * across trips (start + end), fuel expenses, and fleet maintenance — ordered
  * by business date first (event_date), then the most precise available
  * "actually happened at" timestamp (event_instant) — never MAX(meter). */
-export declare function getLatestVehicleMeter(client: Queryable, vehicleId: number): Promise<MeterEvent | null>;
+export declare function getLatestVehicleMeter(client: Queryable, vehicleId: number, excludeTripId?: number | null): Promise<MeterEvent | null>;
 /** Latest accepted reading for every vehicle that has meter history. */
 export declare function listLatestVehicleMeters(): Promise<Array<{
     vehicleId: number;

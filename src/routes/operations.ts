@@ -492,6 +492,19 @@ operationsRouter.get(
 );
 
 operationsRouter.get(
+  "/collection-entry/report",
+  asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.report({
+      fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+      toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+      shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
+      collector: typeof req.query.collector === "string" ? req.query.collector : undefined,
+      paymentMode: typeof req.query.paymentMode === "string" ? req.query.paymentMode : undefined,
+    }));
+  })
+);
+
+operationsRouter.get(
   "/collection-entry/:id",
   asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.getById(Number(req.params.id)));

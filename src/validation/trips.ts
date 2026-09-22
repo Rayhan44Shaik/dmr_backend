@@ -100,9 +100,17 @@ const dieselEntrySchema = z.object({
   rate: z.coerce.number().nonnegative().nullable().optional(),
   meter: z.coerce.number().nonnegative().nullable().optional(),
   bunkName: z.string().nullable().optional(),
+  bunkSource: z.enum(["MASTER", "OTHER"]).optional(),
+  fuelBunkId: z.coerce.number().int().positive().nullable().optional(),
   bunkGps: z.string().nullable().optional(),
+  gpsLat: z.coerce.number().min(-90).max(90).nullable().optional(),
+  gpsLon: z.coerce.number().min(-180).max(180).nullable().optional(),
+  gpsAccuracy: z.coerce.number().nonnegative().nullable().optional(),
+  gpsCapturedAt: z.string().nullable().optional(),
   imageData: z.string().nullable().optional(),
   imageName: z.string().nullable().optional(),
+  clientKey: z.string().max(120).nullable().optional(),
+  submittedAt: z.string().nullable().optional(),
 });
 
 export const tripAutosaveSchema = z

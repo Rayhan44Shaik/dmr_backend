@@ -10,7 +10,7 @@ const configs = {
   farms: { table: "farms", name: "farm_name", no: "farm_no", search: ["farm_name", "owner_name", "supervisor_name", "phone_number", "village"], filters: ["village"], map: mapFarm },
   shops: { table: "shops", name: "shop_name", no: "shop_no", search: ["shop_name", "shop_number", "owner_name", "phone_number", "city"], filters: ["city", "association_type"], map: mapShop },
   banks: { table: "banks", name: "bank_name", no: "bank_no", search: ["bank_name", "branch", "account_number", "ifsc_code", "upi_id"], filters: ["branch"], map: mapBank },
-  "bird-types": { table: "bird_types", name: "bird_type", no: "bird_type_no", search: ["bird_type", "description"], filters: [], map: mapBirdType },
+  "bird-types": { table: "bird_types", name: "bird_type", no: "bird_type_no", search: ["bird_type", "description"], filters: ["category"], map: mapBirdType },
   routes: { table: "routes", name: "route_name", no: "route_no", search: ["route_name", "route_code", "description"], filters: [], map: mapRoute },
 } as const;
 export type MasterEntity = keyof typeof configs;
@@ -23,7 +23,7 @@ const listSchema = z.object({
   status: z.enum(["Active", "Inactive", "Suspended", ""]).optional(),
   sort: z.enum(["name", "number", "status"]).default("number"),
   direction: z.enum(["asc", "desc"]).default("asc"),
-  department: text, role: text, city: text, village: text, branch: text,
+  department: text, role: text, city: text, village: text, branch: text, category: text,
   vehicle_type: text, association_type: text,
   export: z.enum(["true"]).optional(),
 }).strict();
@@ -39,7 +39,7 @@ export async function listMaster(entity: MasterEntity, input: unknown) {
     conditions.push(`(${[...config.search, config.no, "status"].map(c => `${c}::text ILIKE ${term}`).join(" OR ")})`);
   }
   if (q.status) conditions.push(`status::text = ${bind(q.status)}`);
-  for (const field of ["department", "role", "city", "village", "branch", "vehicle_type", "association_type"] as const) {
+  for (const field of ["department", "role", "city", "village", "branch", "category", "vehicle_type", "association_type"] as const) {
     if (!q[field]) continue;
     if (!(config.filters as readonly string[]).includes(field)) {
       parseMaster(z.never(), q[field]);

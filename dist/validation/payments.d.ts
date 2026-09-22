@@ -46,13 +46,14 @@ export declare const paymentBodySchema: z.ZodObject<{
     paymentType: "Farmer Payment" | "Fuel Payment" | "Vehicle Maintenance" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense";
     paidTo: string;
     status?: "Draft" | "Approved" | "Cancelled" | "Paid" | undefined;
+    category?: string | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
     referenceNo?: string | undefined;
-    category?: string | undefined;
 }, {
     amount: number;
     status?: unknown;
+    category?: unknown;
     remarks?: unknown;
     createdBy?: unknown;
     paymentMode?: unknown;
@@ -60,7 +61,6 @@ export declare const paymentBodySchema: z.ZodObject<{
     paymentDate?: unknown;
     paymentType?: unknown;
     paidTo?: unknown;
-    category?: unknown;
 }>;
 /**
  * Update body — every field optional. paymentNo is deliberately NOT part of
@@ -82,6 +82,7 @@ export declare const paymentUpdateSchema: z.ZodObject<{
     createdBy: z.ZodOptional<z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>>;
 }, "strip", z.ZodTypeAny, {
     status?: "Draft" | "Approved" | "Cancelled" | "Paid" | undefined;
+    category?: string | undefined;
     remarks?: string | null | undefined;
     createdBy?: string | undefined;
     amount?: number | undefined;
@@ -90,9 +91,9 @@ export declare const paymentUpdateSchema: z.ZodObject<{
     paymentDate?: string | undefined;
     paymentType?: "Farmer Payment" | "Fuel Payment" | "Vehicle Maintenance" | "Salary Payment" | "EMI Payment" | "FASTag Recharge" | "Office Expense" | "Tax Payment" | "Other Expense" | undefined;
     paidTo?: string | undefined;
-    category?: string | undefined;
 }, {
     status?: unknown;
+    category?: unknown;
     remarks?: unknown;
     createdBy?: unknown;
     amount?: number | undefined;
@@ -101,7 +102,6 @@ export declare const paymentUpdateSchema: z.ZodObject<{
     paymentDate?: unknown;
     paymentType?: unknown;
     paidTo?: unknown;
-    category?: unknown;
 }>;
 export interface PaymentListQuery {
     fromDate?: string;

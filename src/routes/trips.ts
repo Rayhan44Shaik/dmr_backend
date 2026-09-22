@@ -73,7 +73,8 @@ tripsRouter.get(
   "/vehicle/:vehicleId/last-meter",
   asyncHandler(async (req, res) => {
     requireTripPermission(res, "trip.view");
-    res.json(await tripsService.lastClosingMeter(positiveId(req.params.vehicleId, "Vehicle id")));
+    const excludeTripId = typeof req.query.excludeTripId === "string" ? Number(req.query.excludeTripId) : NaN;
+    res.json(await tripsService.lastClosingMeter(positiveId(req.params.vehicleId, "Vehicle id"), Number.isSafeInteger(excludeTripId) && excludeTripId > 0 ? excludeTripId : undefined));
   })
 );
 

@@ -1,3 +1,4 @@
+
 -- =============================================================================
 -- Trip farm payment settlement fields (Accounts → Farmer Payments)
 -- Persists paid amount / date / mode / reference on the trip row itself.

@@ -34,12 +34,11 @@ if (freeCode !== 0) {
   console.warn(`free-port exited with code ${freeCode} — continuing anyway`);
 }
 
-const tsxCli = path.resolve(root, "../node_modules/tsx/dist/cli.mjs");
-const entry = path.resolve(root, "../src/index.ts");
+const watchScript = path.resolve(root, "watch.mjs");
 
 const child = spawn(
   process.execPath,
-  [tsxCli, "watch", "--clear-screen=false", entry],
+  [watchScript],
   {
     stdio: "inherit",
     env: process.env,

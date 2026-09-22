@@ -91,6 +91,12 @@ export interface BirdType {
     birdType: string;
     averageWeight: number;
     description: string;
+    category: "Bird" | "Fuel Bunk";
+    ownerName: string;
+    mobileNumber: string;
+    address: string;
+    latitude: number | null;
+    longitude: number | null;
     status: ActiveStatus;
 }
 export interface Route {

@@ -5,10 +5,14 @@ const { Pool } = pg;
 
 // Shared pool for runtime, migrations, and seed scripts.
 // Connection target comes from DATABASE_URL (default: dmr_poultries @ localhost:5432 / user dmr).
+// P3 (pool-exhaustion closure): connectionTimeoutMillis bounds the wait for a
+// free client, so an exhausted pool surfaces a timely controlled error (via
+// errorHandler, sanitized + correlated) instead of hanging the request.
 export const pool = new Pool({
   connectionString: env.databaseUrl,
   max: 20,
   idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000,
 });
 
 pool.on("error", (err) => {

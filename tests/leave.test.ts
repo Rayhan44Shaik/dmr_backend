@@ -201,7 +201,7 @@ describe("Leave — list filtering & pagination", () => {
 describe("Leave — delete rules", () => {
   it("deletes a Pending leave", async () => {
     const created = await createLeave();
-    const del = await fetch(`${baseUrl}/api/staff/leaves/${created.body.id}`, { method: "DELETE" });
+    const del = await fetch(`${baseUrl}/api/staff/leaves/${created.body.id}`, { method: "DELETE", headers: app.authHeaders });
     assert.equal(del.status, 200);
     const json = await del.json();
     assert.equal(json.deleted, true);
@@ -210,20 +210,21 @@ describe("Leave — delete rules", () => {
   it("refuses to delete an Approved leave (leave controls duty/salary)", async () => {
     const created = await createLeave();
     await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Approved" });
-    const del = await fetch(`${baseUrl}/api/staff/leaves/${created.body.id}`, { method: "DELETE" });
+    const del = await fetch(`${baseUrl}/api/staff/leaves/${created.body.id}`, { method: "DELETE", headers: app.authHeaders });
     assert.equal(del.status, 409);
   });
 
   it("refuses to delete a Rejected leave", async () => {
     const created = await createLeave();
     await patchJson(baseUrl, `/api/staff/leaves/${created.body.id}/status`, { status: "Rejected", rejectionReason: "Not eligible" });
-    const del = await fetch(`${baseUrl}/api/staff/leaves/${created.body.id}`, { method: "DELETE" });
+    const del = await fetch(`${baseUrl}/api/staff/leaves/${created.body.id}`, { method: "DELETE", headers: app.authHeaders });
     assert.equal(del.status, 409);
   });
 
   it("404s deleting a nonexistent leave", async () => {
     const del = await fetch(`${baseUrl}/api/staff/leaves/00000000-0000-0000-0000-000000000000`, {
       method: "DELETE",
+      headers: app.authHeaders,
     });
     assert.equal(del.status, 404);
   });

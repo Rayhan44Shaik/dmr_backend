@@ -24,6 +24,7 @@ import {
   leaveReportQuerySchema,
   leaveStatusSchema,
 } from "../validation/leave.js";
+import { staffRateLimit } from "../middleware/staffRateLimit.js";
 import { staffBoundary } from "../middleware/staffBoundary.js";
 import { authUser } from "../middleware/auth.js";
 import type {
@@ -34,6 +35,8 @@ import type {
 } from "../validation/leave.js";
 
 export const staffRouter = Router();
+// Shed abusive load before auth/DB work; Staff scope only.
+staffRouter.use(staffRateLimit);
 staffRouter.use(staffBoundary);
 
 function performanceParams(req: Request, key: "driverId" | "supervisorId") {

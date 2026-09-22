@@ -215,7 +215,7 @@ export const salaryDeliverySchema = z.object({
   ids: z.array(z.string().uuid()).min(1).max(200),
   language: z.enum(["en", "te"]).optional().default("en"),
   subject: z.preprocess(trimmed, z.string().max(300).optional()),
-  body: z.preprocess(trimmed, z.string().min(1).max(10000)),
+  body: z.preprocess(trimmed, z.string().max(10000).optional()).default(""),
 });
 
 export { parseBody };

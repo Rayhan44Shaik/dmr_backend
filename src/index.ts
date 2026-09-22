@@ -5,8 +5,13 @@ import { env } from "./config/env.js";
 import { pool } from "./config/db.js";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
+import { requestId } from "./middleware/requestId.js";
+import { securityHeaders } from "./middleware/securityHeaders.js";
 
 const app = express();
+
+app.use(requestId);
+app.use(securityHeaders);
 
 app.use(
   cors({

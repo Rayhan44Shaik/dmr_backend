@@ -83,15 +83,29 @@ export async function lockVehicleForMeterWrite(client: Client, vehicleId: number
  * "actually happened at" timestamp (event_instant) — never MAX(meter). */
 export async function getLatestVehicleMeter(
   client: Queryable,
-  vehicleId: number
+  vehicleId: number,
+  excludeTripId?: number | null
 ): Promise<MeterEvent | null> {
+  // Editing a trip must never report the trip's own start/end meter - or the
+  // fuel synced from its own diesel rows - as the "previous" reading.
+  const params: unknown[] = [vehicleId];
+  let exclude = "";
+  if (excludeTripId != null && excludeTripId > 0) {
+    params.push(String(excludeTripId), excludeTripId);
+    exclude = `AND NOT (source_type IN ('TRIP_START', 'TRIP_END') AND record_id = $2)
+     AND NOT (source_type = 'FUEL' AND EXISTS (
+       SELECT 1 FROM fuel_expenses fe
+       WHERE fe.id::text = vehicle_meter_events.record_id AND fe.trip_id = $3
+     ))`;
+  }
   const result = await run(
     client,
     `SELECT * FROM vehicle_meter_events
      WHERE vehicle_id = $1
+     ${exclude}
      ORDER BY event_date DESC, event_instant DESC, created_at DESC, record_id DESC
      LIMIT 1`,
-    [vehicleId]
+    params
   );
   if (!result.rowCount) return null;
   return mapEvent(result.rows[0]);

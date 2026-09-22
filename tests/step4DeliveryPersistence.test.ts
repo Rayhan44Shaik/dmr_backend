@@ -29,6 +29,7 @@ const app: TestApp = await startApp({ DATABASE_URL: testDb.url });
 const { pool } = await import("../src/config/db.js");
 const { mastersService } = await import("../src/services/mastersService.js");
 const { tripsService } = await import("../src/services/tripsService.js");
+const { assertWithinCapacity } = await import("../src/utils/tripDeliverySync.js");
 import type { ShopDelivery } from "../src/types/models.js";
 
 after(async () => {
@@ -159,6 +160,17 @@ async function rowsFor(tripId: number) {
 }
 
 describe("Step 4 per-shop persistence (saveDeliveries)", () => {
+  it("accepts equal two-decimal weight despite floating-point accumulation noise", () => {
+    assert.doesNotThrow(() =>
+      assertWithinCapacity({
+        label: "weight",
+        available: 3492.6,
+        alreadyAllocated: 0,
+        requested: 3492.6000000000004,
+      })
+    );
+  });
+
   it("saving one shop preserves shops already saved (no wipe)", async () => {
     const m = await seedMasters();
     const trip = await makePickupTrip(m, {

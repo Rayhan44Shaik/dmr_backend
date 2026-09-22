@@ -202,10 +202,21 @@ export function validateBirdTypeFields(raw: Record<string, unknown>): FieldError
   const errors: FieldError[] = [];
   const birdType = str(raw.birdType ?? raw.bird_type).trim();
   const averageWeight = raw.averageWeight ?? raw.averageWeightKg ?? raw.average_weight;
+  const category = str(raw.category || "Bird");
 
-  if (isMissing(birdType)) errors.push({ field: "birdType", message: "Bird Type is required." });
-  if (!isPositiveNumber(averageWeight)) {
+  if (isMissing(birdType)) errors.push({ field: "birdType", message: "Name is required." });
+  if (category === "Bird" && !isPositiveNumber(averageWeight)) {
     errors.push({ field: "averageWeight", message: "Average Weight must be a positive number." });
+  }
+  if (!["Bird", "Fuel Bunk"].includes(category)) errors.push({ field: "category", message: "Category must be Bird or Fuel Bunk." });
+  if (category === "Fuel Bunk") {
+    if (isMissing(raw.ownerName)) errors.push({ field: "ownerName", message: "Owner name is required." });
+    if (isMissing(raw.mobileNumber)) errors.push({ field: "mobileNumber", message: "Mobile number is required." });
+    else if (!/^[0-9]{10}$/.test(str(raw.mobileNumber))) errors.push({ field: "mobileNumber", message: "Mobile number must be exactly 10 digits." });
+    if (isMissing(raw.address)) errors.push({ field: "address", message: "Bunk address is required." });
+    const lat = Number(raw.latitude);
+    const lon = Number(raw.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) errors.push({ field: "latitude", message: "Valid GPS is required." });
   }
   if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {
     errors.push({ field: "status", message: "Status must be Active or Inactive." });

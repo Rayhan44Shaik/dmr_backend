@@ -73,6 +73,71 @@ import {
 
 type Client = pg.PoolClient;
 
+type ResolvedDieselBunk = {
+  bunkName: string;
+  bunkSource: "MASTER" | "OTHER";
+  fuelBunkId: number | null;
+  gpsLat: number;
+  gpsLon: number;
+  gpsAccuracy: number | null;
+  gpsCapturedAt: string | null;
+};
+
+async function resolveDieselBunk(
+  client: Client,
+  body: Record<string, unknown>
+): Promise<ResolvedDieselBunk> {
+  const requestedSource = str(body.bunkSource).toUpperCase();
+  const fuelBunkId = numOrNull(body.fuelBunkId);
+
+  if (requestedSource === "MASTER" || fuelBunkId != null) {
+    if (!(fuelBunkId != null && fuelBunkId > 0)) {
+      throw new AppError(422, "A valid Fuel Bunk master selection is required");
+    }
+    const master = await client.query(
+      `SELECT id, bird_type, latitude, longitude
+         FROM bird_types
+        WHERE id = $1 AND category = 'Fuel Bunk' AND status = 'Active'`,
+      [fuelBunkId]
+    );
+    if (!master.rowCount) {
+      throw new AppError(422, "Selected Fuel Bunk is not active or does not exist");
+    }
+    const row = master.rows[0];
+    const gpsLat = numOrNull(row.latitude);
+    const gpsLon = numOrNull(row.longitude);
+    if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
+      throw new AppError(422, "Selected Fuel Bunk has no valid GPS in Others master");
+    }
+    return {
+      bunkName: str(row.bird_type).trim(),
+      bunkSource: "MASTER",
+      fuelBunkId,
+      gpsLat,
+      gpsLon,
+      gpsAccuracy: 0,
+      gpsCapturedAt: new Date().toISOString(),
+    };
+  }
+
+  const bunkName = body.bunkName != null ? str(body.bunkName).trim() : "";
+  if (!bunkName) throw new AppError(422, "Other diesel bunk / location details are required");
+  const gpsLat = numOrNull(body.gpsLat);
+  const gpsLon = numOrNull(body.gpsLon);
+  if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
+    throw new AppError(422, "Other diesel bunk GPS is required");
+  }
+  return {
+    bunkName,
+    bunkSource: "OTHER",
+    fuelBunkId: null,
+    gpsLat,
+    gpsLon,
+    gpsAccuracy: numOrNull(body.gpsAccuracy),
+    gpsCapturedAt: body.gpsCapturedAt != null ? str(body.gpsCapturedAt) : null,
+  };
+}
+
 function mapTripBase(row: Record<string, unknown>): Omit<
   Trip,
   "helpers" | "loaders" | "boxDetails" | "deliveries" | "dieselEntries"
@@ -574,6 +639,8 @@ async function loadTripExtras(client: Client, tripId: number, legId?: number | n
     rate: numOrNull(r.rate),
     meter: numOrNull(r.meter),
     bunkName: r.bunk_name == null ? null : str(r.bunk_name),
+    bunkSource: str(r.bunk_source) === "MASTER" ? "MASTER" : "OTHER",
+    fuelBunkId: numOrNull(r.fuel_bunk_id),
     bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
     imageData: r.image_data == null ? null : str(r.image_data),
     imageName: r.image_name == null ? null : str(r.image_name),
@@ -1086,7 +1153,7 @@ async function assertDeliveriesWithinCapacity(
     // do not consume pickup capacity until a real Step 4 capture exists.
     if (!isOrderRow || isCapturedOrderRow) {
       totalBirds += birds + Number(d.mortality ?? 0);
-      totalWeight += weight + Number(d.mortKg ?? 0);
+      totalWeight = Number((totalWeight + weight + Number(d.mortKg ?? 0)).toFixed(2));
     }
   }
   for (const [key, balance] of orderBalances) {
@@ -1267,9 +1334,10 @@ async function replaceDiesel(
         : null);
     await client.query(
       `INSERT INTO trip_diesel_entries (
-         trip_id, row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name,
-         client_key, gps_lat, gps_lon, gps_accuracy, gps_captured_at, submitted_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15::timestamptz, NOW()))`,
+         trip_id, row_index, litres, rate, meter, bunk_name, bunk_source, fuel_bunk_id,
+         bunk_gps, image_data, image_name, client_key, gps_lat, gps_lon, gps_accuracy,
+         gps_captured_at, submitted_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,COALESCE($17::timestamptz, NOW()))`,
       [
         tripId,
         e.rowIndex,
@@ -1277,6 +1345,8 @@ async function replaceDiesel(
         e.rate ?? null,
         e.meter ?? null,
         e.bunkName ?? null,
+        e.bunkSource ?? "OTHER",
+        e.fuelBunkId ?? null,
         bunkGps,
         e.imageData ?? null,
         e.imageName ?? null,
@@ -1312,6 +1382,8 @@ function extractDieselFromBody(body: Record<string, unknown>): DieselEntry[] {
       bunkName: body[`dieselBunk${rowIndex}`]
         ? str(body[`dieselBunk${rowIndex}`])
         : null,
+      bunkSource: body[`dieselBunkSource${rowIndex}`] === "MASTER" ? "MASTER" : "OTHER",
+      fuelBunkId: numOrNull(body[`dieselFuelBunkId${rowIndex}`]),
       bunkGps: body[`dieselBunkGps${rowIndex}`]
         ? str(body[`dieselBunkGps${rowIndex}`])
         : null,
@@ -1341,6 +1413,8 @@ function flattenDiesel(entries: DieselEntry[]): Record<string, unknown> {
     out[`dieselRate${e.rowIndex}`] = e.rate;
     out[`dieselMeter${e.rowIndex}`] = e.meter;
     out[`dieselBunk${e.rowIndex}`] = e.bunkName;
+    out[`dieselBunkSource${e.rowIndex}`] = e.bunkSource ?? "OTHER";
+    out[`dieselFuelBunkId${e.rowIndex}`] = e.fuelBunkId ?? null;
     // Never duplicate full base64 into flat keys — FE reads dieselEntries /
     // keeps local sheet images. Flat keys only carry the file name + flag.
     out[`dieselImageName${e.rowIndex}`] = e.imageName;
@@ -2862,7 +2936,7 @@ export const tripsService = {
         // Cross-shop totals — only real captures count against pickup capacity.
         if (enforceBoxCapacity) {
           totalBirds += birds + mortality;
-          totalWeight += weight + mortKg;
+          totalWeight = Number((totalWeight + weight + mortKg).toFixed(2));
           assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
           assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
         }
@@ -3323,6 +3397,7 @@ export const tripsService = {
         [id, reason ?? null]
       );
       if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
+      await client.query(`UPDATE fuel_expenses SET deleted = TRUE WHERE trip_id = $1 AND source_type = 'TRIP' AND COALESCE(deleted, FALSE) = FALSE`, [id]);
       return { id, deleted: true };
     });
   },
@@ -3379,6 +3454,7 @@ export const tripsService = {
              WHERE id = $1 RETURNING *`,
             [id, body.reason ?? body.rejectedReason ?? null]
           );
+          await client.query(`UPDATE fuel_expenses SET deleted = TRUE WHERE trip_id = $1 AND source_type = 'TRIP' AND COALESCE(deleted, FALSE) = FALSE`, [id]);
         } else {
           result = await client.query(
             `UPDATE trips SET status = $2::trip_status, deleted = FALSE WHERE id = $1 RETURNING *`,
@@ -3415,9 +3491,9 @@ export const tripsService = {
    * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
    * maintenance), not just trip closing meters, while keeping the same
    * response shape the frontend already consumes. */
-  async lastClosingMeter(vehicleId: number) {
+  async lastClosingMeter(vehicleId: number, excludeTripId?: number | null) {
     await validateTripForeignKeys({ vehicleId });
-    const latest = await getLatestVehicleMeter(null, vehicleId);
+    const latest = await getLatestVehicleMeter(null, vehicleId, excludeTripId);
     if (!latest) return null;
 
     const ref = String(latest.ref || "").trim();
@@ -3583,8 +3659,6 @@ export const tripsService = {
       const litres = numOrNull(body.litres);
       const rate = numOrNull(body.rate);
       const meter = numOrNull(body.meter);
-      const gpsLat = numOrNull(body.gpsLat);
-      const gpsLon = numOrNull(body.gpsLon);
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
       if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
       if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
@@ -3594,9 +3668,6 @@ export const tripsService = {
         [tripId]
       );
       const farmFloor = num(destMax.rows[0]?.m);
-      if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
-        throw new AppError(422, "Diesel bunk GPS is required");
-      }
       const imageData = body.imageData != null ? str(body.imageData) : "";
       if (!imageData || imageData.length < 40) {
         throw new AppError(422, "Diesel bill image is required");
@@ -3660,22 +3731,31 @@ export const tripsService = {
         throw new AppError(422, `Diesel meter (${meter} KM) cannot exceed the end meter (${closingMeter} KM).`);
       }
 
-      const bunkName = body.bunkName != null ? str(body.bunkName) : null;
+      const {
+        bunkName,
+        bunkSource,
+        fuelBunkId,
+        gpsLat,
+        gpsLon,
+        gpsAccuracy,
+        gpsCapturedAt,
+      } = await resolveDieselBunk(client, body);
       const bunkGps = `${gpsLat.toFixed(6)},${gpsLon.toFixed(6)}`;
-      const gpsAccuracy = numOrNull(body.gpsAccuracy);
-      const gpsCapturedAt = body.gpsCapturedAt != null ? str(body.gpsCapturedAt) : null;
       const imageName = body.imageName != null ? str(body.imageName) : null;
 
       await client.query(
         `INSERT INTO trip_diesel_entries (
-           trip_id, row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name,
-           client_key, gps_lat, gps_lon, gps_accuracy, gps_captured_at, submitted_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+           trip_id, row_index, litres, rate, meter, bunk_name, bunk_source, fuel_bunk_id,
+           bunk_gps, image_data, image_name, client_key, gps_lat, gps_lon, gps_accuracy,
+           gps_captured_at, submitted_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
          ON CONFLICT (trip_id, row_index) DO UPDATE SET
            litres = EXCLUDED.litres,
            rate = EXCLUDED.rate,
            meter = EXCLUDED.meter,
            bunk_name = EXCLUDED.bunk_name,
+           bunk_source = EXCLUDED.bunk_source,
+           fuel_bunk_id = EXCLUDED.fuel_bunk_id,
            bunk_gps = EXCLUDED.bunk_gps,
            image_data = EXCLUDED.image_data,
            image_name = EXCLUDED.image_name,
@@ -3692,6 +3772,8 @@ export const tripsService = {
           rate,
           meter,
           bunkName,
+          bunkSource,
+          fuelBunkId,
           bunkGps,
           imageData,
           imageName,
@@ -3735,8 +3817,6 @@ export const tripsService = {
       const litres = numOrNull(body.litres);
       const rate = numOrNull(body.rate);
       const meter = numOrNull(body.meter);
-      const gpsLat = numOrNull(body.gpsLat);
-      const gpsLon = numOrNull(body.gpsLon);
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
       if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
       if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
@@ -3770,9 +3850,6 @@ export const tripsService = {
       if (closingMeter > 0 && meter > closingMeter) {
         throw new AppError(422, `Diesel meter (${meter} KM) cannot exceed the end meter (${closingMeter} KM).`);
       }
-      if (gpsLat == null || gpsLon == null || (gpsLat === 0 && gpsLon === 0)) {
-        throw new AppError(422, "Diesel bunk GPS is required");
-      }
       const imageData = body.imageData != null ? str(body.imageData) : "";
       if (!imageData || imageData.length < 40) {
         throw new AppError(422, "Diesel bill image is required");
@@ -3787,10 +3864,16 @@ export const tripsService = {
         throw new AppError(422, `Diesel bill image is already used in row ${num(duplicateBill.rows[0].row_index)}.`);
       }
 
-      const bunkName = body.bunkName != null ? str(body.bunkName) : null;
+      const {
+        bunkName,
+        bunkSource,
+        fuelBunkId,
+        gpsLat,
+        gpsLon,
+        gpsAccuracy,
+        gpsCapturedAt,
+      } = await resolveDieselBunk(client, body);
       const bunkGps = `${gpsLat.toFixed(6)},${gpsLon.toFixed(6)}`;
-      const gpsAccuracy = numOrNull(body.gpsAccuracy);
-      const gpsCapturedAt = body.gpsCapturedAt != null ? str(body.gpsCapturedAt) : null;
       const imageName = body.imageName != null ? str(body.imageName) : null;
       const clientKey = body.clientKey != null && String(body.clientKey).trim()
         ? str(body.clientKey).trim()
@@ -3802,14 +3885,16 @@ export const tripsService = {
            rate = $4,
            meter = $5,
            bunk_name = $6,
-           bunk_gps = $7,
-           image_data = $8,
-           image_name = $9,
-           client_key = COALESCE($10, client_key),
-           gps_lat = $11,
-           gps_lon = $12,
-           gps_accuracy = $13,
-           gps_captured_at = $14,
+           bunk_source = $7,
+           fuel_bunk_id = $8,
+           bunk_gps = $9,
+           image_data = $10,
+           image_name = $11,
+           client_key = COALESCE($12, client_key),
+           gps_lat = $13,
+           gps_lon = $14,
+           gps_accuracy = $15,
+           gps_captured_at = $16,
            submitted_at = NOW()
          WHERE id = $1 AND trip_id = $2`,
         [
@@ -3819,6 +3904,8 @@ export const tripsService = {
           rate,
           meter,
           bunkName,
+          bunkSource,
+          fuelBunkId,
           bunkGps,
           imageData,
           imageName,
