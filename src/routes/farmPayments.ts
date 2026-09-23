@@ -4,6 +4,7 @@
  */
 import { Router } from "express";
 import { asyncHandler } from "../middleware/errorHandler.js";
+import { parsePagination } from "../utils/pagination.js";
 import {
   farmPaymentsService,
   parseFarmPaymentUpsertBody,
@@ -13,8 +14,14 @@ export const farmPaymentsRouter = Router();
 
 farmPaymentsRouter.get(
   "/",
-  asyncHandler(async (_req, res) => {
-    res.json(await farmPaymentsService.list());
+  asyncHandler(async (req, res) => {
+    const { params: pagination, enabled } = parsePagination({
+      page: req.query.page,
+      limit: req.query.limit,
+    });
+    res.json(
+      await farmPaymentsService.list({ pagination: enabled ? pagination : null })
+    );
   })
 );
 

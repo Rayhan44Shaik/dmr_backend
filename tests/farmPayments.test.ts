@@ -77,5 +77,34 @@ describe("farmPaymentsService", () => {
     // Unknown trip ids are skipped (no throw).
     const skipped = await farmPaymentsService.upsertMany([{ tripId: 99999999, rate: 1 }]);
     assert.equal(skipped.length, 0);
+
+    // Optional server pagination (production volumes): the default list stays
+    // a bare array; page/limit returns { data, meta } with no overlap.
+    for (let i = 0; i < 3; i += 1) {
+      await pool.query(
+        `INSERT INTO trips (trip_no, trip_date, status, deleted, pickup_step_submitted,
+           source_farm, vehicle_no, supervisor_name, total_birds, dc_weight)
+         VALUES ($1, '2026-09-12', 'Completed', FALSE, TRUE,
+           'Page Farm', 'TS09PG1234', 'Sup Page', 10, 20)`,
+        [`TRP-FP-PAGE-${Date.now()}-${i}`]
+      );
+    }
+    const full = await farmPaymentsService.list();
+    assert.ok(Array.isArray(full), "default list stays a bare array");
+    assert.ok(full.length >= 4);
+
+    const page1 = await farmPaymentsService.list({ pagination: { page: 1, limit: 2, offset: 0 } });
+    assert.ok(!Array.isArray(page1) && "data" in page1, "paginated list has meta");
+    assert.equal(page1.data.length, 2);
+    assert.equal(page1.meta.total, full.length);
+    assert.equal(page1.meta.page, 1);
+    assert.equal(page1.meta.limit, 2);
+
+    const page2 = await farmPaymentsService.list({ pagination: { page: 2, limit: 2, offset: 2 } });
+    assert.ok(!Array.isArray(page2) && "data" in page2);
+    const ids1 = new Set(page1.data.map((r) => r.tripId));
+    for (const row of page2.data) {
+      assert.ok(!ids1.has(row.tripId), "pages do not overlap");
+    }
   });
 });

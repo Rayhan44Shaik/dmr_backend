@@ -1,0 +1,601 @@
+﻿
+> dmr-poultries-backend@1.0.0 test
+> node -r ./tests/helpers/osUserInfoShim.cjs --import tsx --test tests/tripAuthorization.test.ts tests/tripValidation.test.ts tests/tripNumbering.test.ts tests/tripList.test.ts tests/bulkImport.test.ts tests/mastersValidation.test.ts tests/salaryLifecycle.test.ts tests/dutyPlannerWeekly.test.ts tests/rateEntryShopSales.test.ts tests/tripDeliveryCapacity.test.ts tests/shopSalesFlow.test.ts tests/collectionEntry.test.ts tests/shopLedger.test.ts tests/step4DeliveryPersistence.test.ts tests/tripMultiLoad.test.ts tests/deletedTripMeterExclusion.test.ts tests/tripMeterLock.test.ts
+
+Γû╢ POST /api/masters/shops/bulk
+  Γ£ö 1. accepts a valid single-row batch and returns the batch result (156.3599ms)
+  Γ£ö 2. accepts a valid multi-row batch and inserts every row (78.0344ms)
+  Γ£ö 3. rejects an empty array with 400 (37.792ms)
+  Γ£ö 4. rejects a non-array request body with 400 (29.7685ms)
+  Γ£ö 5. rejects a row missing the required field with 400 and useful details (34.4733ms)
+  Γ£ö 6. rejects an invalid data type with 400 (27.5126ms)
+  Γ£ö 7. rejects an invalid status value with 400 (26.3183ms)
+  Γ£ö 8. rejects an invalid phone number with 400 (25.3296ms)
+  Γ£ö 10. rejects duplicate rows inside the uploaded batch with 409 (28.4557ms)
+  Γ£ö 11. rejects duplicated master numbers inside the batch with 409 (25.4222ms)
+  Γ£ö 12. rejects conflicts with existing database records with 409 (78.5419ms)
+  Γ£ö 13. rolls back the whole batch when any row is invalid, then imports all valid rows (81.3177ms)
+  Γ£ö 14. rolls back the transaction when a database constraint fails mid-batch (33.128ms)
+  Γ£ö 15. auto-assigns master numbers when omitted and never collides with provided ones (67.4751ms)
+  Γ£ö 17. ignores unknown/obsolete fields instead of persisting them (49.9568ms)
+Γ£ö POST /api/masters/shops/bulk (788.8855ms)
+Γû╢ POST /api/masters/vehicles/bulk
+  Γ£ö 1. accepts a valid single-row batch and returns the batch result (60.4106ms)
+  Γ£ö 2. accepts a valid multi-row batch and inserts every row (142.2036ms)
+  Γ£ö 3. rejects an empty array with 400 (26.5644ms)
+  Γ£ö 4. rejects a non-array request body with 400 (20.971ms)
+  Γ£ö 5. rejects a row missing the required field with 400 and useful details (22.5123ms)
+  Γ£ö 6. rejects an invalid data type with 400 (22.2568ms)
+  Γ£ö 7. rejects an invalid status value with 400 (20.2841ms)
+  Γ£ö 9. rejects an invalid date with 400 (27.382ms)
+  Γ£ö 10. rejects duplicate rows inside the uploaded batch with 409 (25.5838ms)
+  Γ£ö 11. rejects duplicated master numbers inside the batch with 409 (22.7862ms)
+  Γ£ö 12. rejects conflicts with existing database records with 409 (61.31ms)
+  Γ£ö 13. rolls back the whole batch when any row is invalid, then imports all valid rows (76.5948ms)
+  Γ£ö 14. rolls back the transaction when a database constraint fails mid-batch (23.7063ms)
+  Γ£ö 15. auto-assigns master numbers when omitted and never collides with provided ones (54.2993ms)
+  Γ£ö 16. accepts CSV-style numeric strings (32.7791ms)
+  Γ£ö 17. ignores unknown/obsolete fields instead of persisting them (53.0249ms)
+Γ£ö POST /api/masters/vehicles/bulk (696.5779ms)
+Γû╢ POST /api/masters/employees/bulk
+  Γ£ö 1. accepts a valid single-row batch and returns the batch result (54.0053ms)
+  Γ£ö 2. accepts a valid multi-row batch and inserts every row (73.1867ms)
+  Γ£ö 3. rejects an empty array with 400 (36.1189ms)
+  Γ£ö 4. rejects a non-array request body with 400 (22.7306ms)
+  Γ£ö 5. rejects a row missing the required field with 400 and useful details (21.1236ms)
+  Γ£ö 6. rejects an invalid data type with 400 (23.7524ms)
+  Γ£ö 7. rejects an invalid status value with 400 (24.7379ms)
+  Γ£ö 8. rejects an invalid phone number with 400 (20.8805ms)
+  Γ£ö 9. rejects an invalid date with 400 (20.7822ms)
+  Γ£ö 10. rejects duplicate rows inside the uploaded batch with 409 (24.3214ms)
+  Γ£ö 11. rejects duplicated master numbers inside the batch with 409 (21.6886ms)
+  Γ£ö 12. rejects conflicts with existing database records with 409 (71.7636ms)
+  Γ£ö 13. rolls back the whole batch when any row is invalid, then imports all valid rows (78.0766ms)
+  Γ£ö 14. rolls back the transaction when a database constraint fails mid-batch (37.9948ms)
+  Γ£ö 15. auto-assigns master numbers when omitted and never collides with provided ones (76.5732ms)
+  Γ£ö 16. accepts CSV-style numeric strings (33.9372ms)
+  Γ£ö 17. ignores unknown/obsolete fields instead of persisting them (41.3266ms)
+Γ£ö POST /api/masters/employees/bulk (687.1499ms)
+Γû╢ POST /api/masters/farms/bulk
+  Γ£ö 1. accepts a valid single-row batch and returns the batch result (62.9392ms)
+  Γ£ö 2. accepts a valid multi-row batch and inserts every row (53.3408ms)
+  Γ£ö 3. rejects an empty array with 400 (22.1369ms)
+  Γ£ö 4. rejects a non-array request body with 400 (27.7091ms)
+  Γ£ö 5. rejects a row missing the required field with 400 and useful details (22.4848ms)
+  Γ£ö 6. rejects an invalid data type with 400 (22.3067ms)
+  Γ£ö 7. rejects an invalid status value with 400 (23.9184ms)
+  Γ£ö 8. rejects an invalid phone number with 400 (23.3968ms)
+  Γ£ö 10. rejects duplicate rows inside the uploaded batch with 409 (22.2742ms)
+  Γ£ö 11. rejects duplicated master numbers inside the batch with 409 (22.7704ms)
+  Γ£ö 12. rejects conflicts with existing database records with 409 (115.6514ms)
+  Γ£ö 13. rolls back the whole batch when any row is invalid, then imports all valid rows (89.8748ms)
+  Γ£ö 14. rolls back the transaction when a database constraint fails mid-batch (22.7437ms)
+  Γ£ö 15. auto-assigns master numbers when omitted and never collides with provided ones (57.1518ms)
+  Γ£ö 16. accepts CSV-style numeric strings (36.0041ms)
+  Γ£ö 17. ignores unknown/obsolete fields instead of persisting them (49.9954ms)
+Γ£ö POST /api/masters/farms/bulk (678.7554ms)
+Γû╢ POST /api/masters/bird-types/bulk
+  Γ£ö 1. accepts a valid single-row batch and returns the batch result (49.1759ms)
+  Γ£ö 2. accepts a valid multi-row batch and inserts every row (61.3337ms)
+  Γ£ö 3. rejects an empty array with 400 (30.0405ms)
+  Γ£ö 4. rejects a non-array request body with 400 (25.3097ms)
+  Γ£ö 5. rejects a row missing the required field with 400 and useful details (20.5374ms)
+  Γ£ö 6. rejects an invalid data type with 400 (21.2771ms)
+  Γ£ö 7. rejects an invalid status value with 400 (25.7129ms)
+  Γ£ö 10. rejects duplicate rows inside the uploaded batch with 409 (23.4312ms)
+  Γ£ö 11. rejects duplicated master numbers inside the batch with 409 (21.448ms)
+  Γ£ö 12. rejects conflicts with existing database records with 409 (54.7844ms)
+  Γ£ö 13. rolls back the whole batch when any row is invalid, then imports all valid rows (70.2721ms)
+  Γ£ö 14. rolls back the transaction when a database constraint fails mid-batch (22.9828ms)
+  Γ£ö 15. auto-assigns master numbers when omitted and never collides with provided ones (43.3519ms)
+  Γ£ö 16. accepts CSV-style numeric strings (27.1342ms)
+  Γ£ö 17. ignores unknown/obsolete fields instead of persisting them (38.9808ms)
+Γ£ö POST /api/masters/bird-types/bulk (539.4789ms)
+Γû╢ existing singular master CRUD regression
+  Γ£ö POST/PUT/DELETE still work for all five masters (452.3219ms)
+  Γ£ö singular endpoints remain reachable and unaffected by the new /bulk routes (134.4154ms)
+Γ£ö existing singular master CRUD regression (587.7385ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ Collection numbering ΓÇö permanent, unique, no reuse
+  Γ£ö 1-3. Col-YYYYMMDD-001, -002 then delete #002, next = #003 (1690.3862ms)
+  Γ£ö 4. Status transitions (approve/reject/delete) preserve the same number (888.0065ms)
+  Γ£ö Game: concurrent creates on the same day yield distinct, gap-free numbers (695.6494ms)
+  Γ£ö DB UNIQUE enforces uniqueness of collection_no (19.3887ms)
+Γ£ö Collection numbering ΓÇö permanent, unique, no reuse (3309.7893ms)
+Γû╢ Collection approval credits the Shop and snapshots balances
+  Γ£ö 5-9. opening 10000 + sale 5000 ΓåÆ 15000; collect 2000 ΓåÆ 13000, snapshots correct (662.4388ms)
+  Γ£ö Ledger reconciles: opening + sale ΓêÆ collections = current outstanding (517.0233ms)
+Γ£ö Collection approval credits the Shop and snapshots balances (1180.6226ms)
+Γû╢ Shop Sales debit and correction synchronization
+  Γ£ö 10. Sale debit increases outstanding once at rate lock (471.8235ms)
+  Γ£ö 11. Shop Sale correction changes the Shop outstanding by the DIFFERENCE (497.4384ms)
+Γ£ö Shop Sales debit and correction synchronization (970.5847ms)
+Γû╢ Collection edit/approve/delete idempotency
+  Γ£ö 12. Editing an approved collection applies the DIFFERENCE only (529.4122ms)
+  Γ£ö 13. Approving twice never credits twice (328.1919ms)
+  Γ£ö 14. Deleting twice never reverses twice (367.8866ms)
+  Γ£ö 15. Rejecting a pending collection has no financial effect (396.7983ms)
+Γ£ö Collection edit/approve/delete idempotency (1623.2754ms)
+Γû╢ Collection prerequisite gating cannot be bypassed
+  Γ£ö 16. Collection against a non-rate-locked trip is rejected (268.2994ms)
+  Γ£ö 17. Amount > outstanding and amount = 0 are rejected (266.7658ms)
+Γ£ö Collection prerequisite gating cannot be bypassed (535.725ms)
+Γû╢ Concurrency
+  Γ£ö 18. Two simultaneous approvals for one shop end with the correct balance (315.6223ms)
+Γ£ö Concurrency (316.1316ms)
+Γû╢ HTTP API and transaction safety
+  Γ£ö 19. POST /collection-entry then live-status reasons about the number and status (286.7075ms)
+  Γ£ö 20. Transaction rollback: failed approval leaves no partial financial state (304.6867ms)
+Γ£ö HTTP API and transaction safety (592.0021ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ deleted trip meter exclusion
+  Γ£ö ignores fuel synced from a deleted trip in last-meter lookup (327.7197ms)
+  Γ£ö excludes the edited trip's own meters from last-meter lookup (212.569ms)
+  Γ£ö lets a trip close after its own diesel bills while retaining cross-trip chronology (202.538ms)
+Γ£ö deleted trip meter exclusion (751.7973ms)
+Γû╢ Duty Planner ΓÇö previous (Closed) weeks
+  Γ£ö reports a completed week as Closed even though the stored row is Open (133.36ms)
+  Γ£ö cannot submit a Closed week (43.7869ms)
+Γ£ö Duty Planner ΓÇö previous (Closed) weeks (282.784ms)
+Γû╢ Duty Planner ΓÇö current week lifecycle
+  Γ£ö submits an Open week that passes validation (309.8431ms)
+  Γ£ö cannot submit an already-submitted week again (32.7268ms)
+  Γ£ö a Submitted week rejects new duty assignments (7.697ms)
+  Γ£ö a Submitted week rejects auto-assign apply (63.6604ms)
+Γ£ö Duty Planner ΓÇö current week lifecycle (416.0056ms)
+Γû╢ Duty Planner ΓÇö date and concurrency integrity
+  Γ£ö rejects impossible month-end dates and accepts leap day (48.8219ms)
+  Γ£ö allows only one concurrent assignment for an employee and date (214.7768ms)
+Γ£ö Duty Planner ΓÇö date and concurrency integrity (266.9991ms)
+Γ£ö Masters params reject non-positive and non-numeric ids (9.8267ms)
+Γ£ö Others master validates Bird and Fuel Bunk category-specific fields (14.4632ms)
+Γ£ö employee validation rejects malformed identity and contact fields (1.8726ms)
+Γ£ö vehicle validation enforces capacities, dates, and EMI bounds (2.7857ms)
+Γ£ö vehicle validation rejects impossible calendar dates and fractional EMI terms (2.4249ms)
+Γ£ö shop validation accepts the complete API contract including WhatsApp (1.5601ms)
+Γ£ö location resolver accepts coordinates but never resolves arbitrary URLs (17.6963ms)
+Γ£ö location resolver prefers the place pin over the viewport centre (18.7405ms)
+Γ£ö bulk validation is bounded and reports invalid rows atomically (31.9658ms)
+Γû╢ Rate Entry -> Lock -> Shop Sales lifecycle
+  Γ£ö trip is hidden from Rate Entry before Completed, visible after; hidden from Shop Sales until locked (2576.2124ms)
+  Γ£ö locking twice is rejected (idempotent lock, no duplicate Shop Sales rows) (910.5791ms)
+  Γ£ö Shop Sales create is rejected while Rate Entry is unlocked, even with a valid trip/shop (509.6749ms)
+Γ£ö Rate Entry -> Lock -> Shop Sales lifecycle (4002.4198ms)
+Γû╢ Rate range validation (50-300 inclusive) is backend-enforced
+  Γ£ö Rate Entry create rejects rates outside 50-300 via direct API, accepts the boundary values (729.0383ms)
+  Γ£ö Rate Entry per-delivery rate lines are also range-checked (not just the header rate) (413.6053ms)
+  Γ£ö Shop Sales edit rejects rates outside 50-300 within the edit window (577.1021ms)
+Γ£ö Rate range validation (50-300 inclusive) is backend-enforced (1721.0807ms)
+Γû╢ Shop Sales capacity validation
+  Γ£ö rejects an edit that would push total birds/weight (incl. mortality) past the trip's loaded capacity (602.2026ms)
+  Γ£ö combined birds+weight+rate edit is all-or-nothing: an invalid rate rolls back valid birds/weight too (394.3851ms)
+Γ£ö Shop Sales capacity validation (997.6437ms)
+Γû╢ Duplicate Shop Sale prevention
+  Γ£û an identical (trip, shop, birds, weight) create is rejected as a duplicate (333.6289ms)
+Γ£û Duplicate Shop Sale prevention (336.161ms)
+Γû╢ 10-day Shop Sales edit window
+  Γ£ö day 10 (inclusive) still allows edits; day 11 rejects everything, including delete (513.8227ms)
+Γ£ö 10-day Shop Sales edit window (514.457ms)
+Γû╢ Shop Sales soft-delete is permanently rejected once Rate Entry is locked
+  Γ£ö A. locked, within the correction window (day 0): DELETE is rejected and delivery stays active (363.5683ms)
+  Γ£ö B. locked exactly 10 days (inclusive boundary): DELETE is rejected with 409 (350.9489ms)
+  Γ£ö C. locked 11 days: DELETE is rejected with 409 (280.2097ms)
+  Γ£ö D. delivery remains active after a rejected DELETE (in-window case) (324.4158ms)
+  Γ£ö E. normal existing Shop Sales behavior is unchanged: create/list/update still work within the window (349.7783ms)
+Γ£ö Shop Sales soft-delete is permanently rejected once Rate Entry is locked (1669.8056ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ Salary lifecycle ΓÇö Draft
+  Γ£ö creates an editable Pending record with backend-computed totals (141.3606ms)
+  Γ£ö edits a Draft record and recomputes totals from the supplied components (117.5634ms)
+Γ£ö Salary lifecycle ΓÇö Draft (396.0989ms)
+Γû╢ Salary lifecycle ΓÇö Submit freezes
+  Γ£ö a Submitted record rejects edits (31.1584ms)
+  Γ£ö a Submitted record cannot be submitted again (15.0081ms)
+  Γ£ö a Submitted record cannot be deleted (20.1047ms)
+  Γ£ö un-submit (Submitted ΓåÆ Pending) makes it editable again (85.9452ms)
+Γ£ö Salary lifecycle ΓÇö Submit freezes (416.8273ms)
+Γû╢ Salary lifecycle ΓÇö Pay
+  Γ£ö pays a Pending record, writing the payment reference atomically (142.8728ms)
+  Γ£ö cannot pay the same salary twice (idempotency) (23.466ms)
+  Γ£ö pays a Submitted record directly (Pending/Submitted ΓåÆ Paid) (182.3431ms)
+Γ£ö Salary lifecycle ΓÇö Pay (384.3581ms)
+Γû╢ Salary lifecycle ΓÇö Mark-Unpaid correction window
+  Γ£ö reverts a Paid record to Pending inside the window and clears the linkage (109.3404ms)
+  Γ£ö rejects Mark-Unpaid once the 7-day correction window expired (29.6825ms)
+Γ£ö Salary lifecycle ΓÇö Mark-Unpaid correction window (469.4099ms)
+Γû╢ Salary lifecycle ΓÇö closed payroll month
+  Γ£ö generateForMonth is rejected for a closed month (11.2676ms)
+  Γ£ö createSalary is rejected for a closed month (22.3324ms)
+  Γ£ö updateSalaryById and deletion are rejected for a closed month (32.6635ms)
+Γ£ö Salary lifecycle ΓÇö closed payroll month (182.3934ms)
+Γû╢ Salary lifecycle HTTP surface
+  Γ£ö POST /api/staff/salaries/:id/submit is wired and validated (114.1043ms)
+  Γ£ö the GET week-status endpoint agrees with the service (104.9089ms)
+  Γ£ö submits and summarizes a whole month transactionally (107.3442ms)
+  Γ£ö bulk-pays all selected records atomically and creates unique Accounts payments (135.6808ms)
+  Γ£ö queues payslip email/WhatsApp idempotently and serves a valid canonical PDF (147.2194ms)
+Γ£ö Salary lifecycle HTTP surface (610.9814ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ Shop Ledger ΓÇö complete history with shop + custom date range
+  Γ£ö 1. Recent-10 is display-only: backend can still return all 12 collections (1548.549ms)
+  Γ£ö 2. Ledger includes BOTH the sale DEBIT and the collection CREDIT with running balances (552.3469ms)
+  Γ£ö 3. Custom date range is complete ΓÇö a late range returns only its matching tail (537.6766ms)
+  Γ£ö 4. Pagination never breaks the running balance (opening is full-history-derived) (534.2479ms)
+  Γ£ö 5. Pending collection is NOT a ledger credit; approval adds it exactly once (464.9286ms)
+  Γ£ö 6. HTTP GET /operations/shop-ledger returns opening + complete range (367.8844ms)
+  Γ£ö 7. REQUIRED ΓÇö 11 approved collections: view = latest 10 only, ledger = all 11 credits + sale, transaction #1 never deleted (981.7669ms)
+Γ£ö Shop Ledger ΓÇö complete history with shop + custom date range (4993.7885ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ Shop Sales visibility requires Rate Entry lock
+  Γ£ö 1. Completed + rate_completed FALSE: Shop Sales list does NOT show the trip (398.1515ms)
+  Γ£ö 2. Completed + rate_completed TRUE: Shop Sales list DOES show the trip (330.8641ms)
+  Γ£ö 3. Shop Sales getById before Rate Lock is not visible (404) (189.8187ms)
+  Γ£ö 4. Shop Sales create before Rate Lock is rejected (243.7334ms)
+  Γ£ö 5. Shop Sales update after Rate Lock is allowed during the window (278.1594ms)
+Γ£ö Shop Sales visibility requires Rate Entry lock (1444.033ms)
+Γû╢ Shop Sales pickup aggregate limits
+  Γ£ö 6. Pickup birds 10000; aggregate 10001 -> rejected (422) (265.5814ms)
+  Γ£ö 7. Pickup weight 8000; aggregate 8001 -> rejected (422) (273.2071ms)
+  Γ£ö 8. Valid aggregate edit within pickup limits -> allowed (238.5492ms)
+Γ£ö Shop Sales pickup aggregate limits (778.0311ms)
+Γû╢ Shop Sales amount recalculation
+  Γ£ö 9. Changing weight recalculates amount = ROUND(weight * rate, 2) (276.3053ms)
+  Γ£ö 10. Changing rate recalculates amount = ROUND(weight * rate, 2) (233.2856ms)
+Γ£ö Shop Sales amount recalculation (510.0574ms)
+Γû╢ Shop Sales corrections reflect in Trip List
+  Γ£û 11. Trip List delivery row reflects new birds/weight/rate/amount after Shop Sales edit (301.0217ms)
+  Γ£ö 12. Trip List summary totals reflect new values after Shop Sales edit (335.5244ms)
+Γ£û Shop Sales corrections reflect in Trip List (637.003ms)
+Γû╢ 10-day correction window
+  Γ£ö 13. Day 9: birds/weight/rate editable (297.0197ms)
+  Γ£ö 14. Day 10 exactly: birds/weight/rate/amount rejected (247.4675ms)
+  Γ£ö 15. Day 11: same rejection (241.769ms)
+Γ£ö 10-day correction window (786.9294ms)
+Γû╢ Collections never creates or reopens the Rate Entry lock
+  Γ£ö 16. Collections cannot unlock Rate Entry (TRUE -> FALSE impossible) (226.9921ms)
+  Γ£ö 16b. Collections cannot independently create a Rate Entry lock (194.6884ms)
+Γ£ö Collections never creates or reopens the Rate Entry lock (422.2715ms)
+Γû╢ Database-level lock guards
+  Γ£ö 17. Direct DB update after 10 days rejected (DB trigger) (195.9779ms)
+  Γ£ö 18. Delete after Rate Entry lock rejected (219.8842ms)
+Γ£ö Database-level lock guards (416.3962ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ Step 4 per-shop persistence (saveDeliveries)
+  Γ£ö accepts equal two-decimal weight despite floating-point accumulation noise (5.6548ms)
+  Γ£ö saving one shop preserves shops already saved (no wipe) (1566.2261ms)
+  Γ£ö retrying the same client_key updates instead of duplicating (1236.8529ms)
+  Γ£ö updates a legacy row by server id when no client_key is present (3864.5698ms)
+  Γ£ö rejects a new delivery to an Inactive shop but allows keeping an existing one (2179.062ms)
+  Γ£ö enforces Step 3 pickup capacity (birds + mortality) (1663.1929ms)
+  Γ£ö enforces Step 3 pickup capacity (weight + mortality weight) (2160.9281ms)
+  Γ£ö a box may hold MORE weight than the delivery; delivery may not exceed it (1157.9601ms)
+  Γ£ö rejects using a box already assigned to another shop delivery (2021.3186ms)
+  Γ£ö weight-mode per-box breakdown cannot exceed each box capacity (2331.2118ms)
+  Γ£ö rejects impossible negative values (1813.1365ms)
+  Γ£ö rejects saving deliveries before Step 3 (Pickup) provides capacity (1344.7308ms)
+  Γ£ö rejects saving deliveries on a soft-deleted trip (1182.5881ms)
+Γ£ö Step 4 per-shop persistence (saveDeliveries) (22543.7582ms)
+Γû╢ Step 4 timestamp semantics
+  Γ£ö Save Progress never captures the timestamp; submit captures once; edits keep it (1814.0077ms)
+  Γ£ö final submit rejects an incomplete shop delivery (zero birds/weight) (919.3299ms)
+Γ£ö Step 4 timestamp semantics (2735.0252ms)
+Γû╢ Step 4 API endpoint (PUT /trips/:id/deliveries)
+  Γ£ö returns the hydrated trip with the saved delivery and KPIs (1285.9377ms)
+Γ£ö Step 4 API endpoint (PUT /trips/:id/deliveries) (1287.691ms)
+Γû╢ Orders partial-delivery integrity
+  Γ£ö persists equal partial captures and rejects capture totals above assignment (1962.6997ms)
+  Γ£ö rejects a second vehicle assignment above the collected shop balance (3114.9836ms)
+Γ£ö Orders partial-delivery integrity (5079.0933ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ Trip authentication and IDOR protection
+  Γ£ö rejects anonymous Trip methods and invalid credentials (1059.6682ms)
+  Γ£ö second login ends the previous session for the same account (1281.7616ms)
+  Γ£ö allows assigned Supervisor access and hides other trips (768.2599ms)
+  Γ£ö allows Senior Account viewing but not deletion (440.1126ms)
+  Γ£ö logout revokes the server session (1436.649ms)
+  Γ£ö rejects revoked bearer sessions (2183.0066ms)
+  Γ£ö rejects expired sessions (1495.7362ms)
+  Γ£ö ignores client-supplied roles, users and employee IDs (79.0014ms)
+  Γ£ö allows Owner access through the same authorization layer (785.6082ms)
+  Γ£ö hides another Supervisor's delivery mutation behind the Trip boundary (184.4473ms)
+Γ£ö Trip authentication and IDOR protection (11837.8332ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ Trip Delivery capacity validation (birds)
+  Γ£ö accepts exactly-at-capacity, below-capacity; rejects one-over (3140.5435ms)
+  Γ£ö counts mortality toward the bird total (1535.0791ms)
+  Γ£ö accepts zero birds; rejects negative birds (1152.1651ms)
+  Γ£ö rejects a non-integer (decimal) bird count (678.2569ms)
+  Γ£ö sums birds across multiple shops on the same submission (1551.3831ms)
+  Γ£ö editing (resubmitting) an existing delivery set re-validates the new total (1236.524ms)
+  Γ£ö two concurrent delivery submissions for the same trip never crash and each is individually capacity-valid (1380.8742ms)
+Γ£ö Trip Delivery capacity validation (birds) (10685.574ms)
+Γû╢ Trip Delivery capacity validation (weight)
+  Γ£û accepts exactly-at-capacity, below-capacity; rejects one-over (1849.2332ms)
+  Γ£û sums weight across multiple shops; accepts NUMERIC(12,3) decimal precision (900.1295ms)
+  Γ£ö editing an existing delivery set re-validates the new weight total (960.0015ms)
+  Γ£ö accepts zero weight; rejects negative weight (913.122ms)
+  Γ£ö two concurrent updates to the same trip's deliveries never crash and leave a valid single-submission state (900.975ms)
+  Γ£ö combined birds+weight failure: both invalid together leaves the DB row unchanged (atomicity) (930.9412ms)
+Γ£û Trip Delivery capacity validation (weight) (6461.7779ms)
+Γû╢ Trip 52 regression ΓÇö the exact scenario that was previously accepted is now rejected
+  Γ£ö 100 loaded birds, 2000 attempted -> 422, without touching Trip 52 itself (535.0797ms)
+Γ£ö Trip 52 regression ΓÇö the exact scenario that was previously accepted is now rejected (536.6908ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ Trip List eligibility
+  Γ£ö returns only completed/approved trips (excludes Draft, Pending) (131.2663ms)
+  Γ£ö excludes every deleted trip, including legacy inconsistent states (54.6572ms)
+  Γ£ö direct API request is the only source ΓÇö refresh yields identical results (162.0286ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+  Γ£ö a second server instance (backend restart / new machine) sees the same data (5249.2376ms)
+Γ£ö Trip List eligibility (10887.0379ms)
+Γû╢ Trip List filters and pagination
+  Γ£ö search never surfaces non-eligible trips (329.5566ms)
+  Γ£ö date-range filter is enforced server-side (54.8306ms)
+  Γ£ö vehicle filter is enforced server-side (45.4409ms)
+  Γ£ö supervisor, driver and farm filters are enforced server-side (106.38ms)
+  Γ£ö pagination returns correct totals and pages (69.9159ms)
+Γ£ö Trip List filters and pagination (609.1952ms)
+Γû╢ Trip List detail endpoint
+  Γ£ö returns full detail for an eligible trip (139.2269ms)
+  Γ£ö returns 404 for Draft, Pending and Deleted trips (151.5888ms)
+Γ£ö Trip List detail endpoint (291.6708ms)
+Γû╢ Deleted trips stay deleted
+  Γ£ö status PATCH cannot restore a deleted trip (43.6226ms)
+  Γ£ö status PATCH cannot restore a flag-deleted trip (legacy state) (27.7667ms)
+  Γ£ö autosave cannot modify a deleted trip (31.7605ms)
+  Γ£ö saving a new trip with status Deleted persists both status and flag (179.1476ms)
+Γ£ö Deleted trips stay deleted (283.9515ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γ£ö meter lock sends PostgreSQL an ISO timestamptz instead of a GMT+0530 Date string (17.8427ms)
+Γû╢ trip multi-load (same Draft trip)
+  Γ£ö Recent Trips counts Step 2 loads and totals only Step 4 submitted loads (6084.1162ms)
+  Γ£ö single-load trip still completes through expenses (2333.2126ms)
+  Γ£ö rejects load-2 farm meter Γëñ diesel meter; accepts higher; expenses need all loads (4455.8782ms)
+  Γ£ö allows four loads and cannot add a 5th load (4914.6005ms)
+  Γ£ö closes only the latest accidentally opened empty load (527.0244ms)
+  Γ£ö blocks expenses while a load is incomplete (407.9118ms)
+Γ£ö trip multi-load (same Draft trip) (18743.4005ms)
+Γû╢ trip numbering by selected date
+  Γ£ö formats TR-YYYYMMDD-NNN from business date + sequence (19.5941ms)
+  Γ£ö rejects invalid / out-of-range trip dates (205.0873ms)
+  Γ£ö allocates next number for a selected past date across draft/pending/completed/deleted (3614.827ms)
+  Γ£ö uses an independent sequence per selected date (1328.6567ms)
+  Γ£ö re-numbers an existing trip when Step 1 changes its date (1901.6912ms)
+  Γ£ö preview next-number API matches create allocation rule (1057.064ms)
+  Γ£ö POST /steps/start assigns number from selected body.tripDate (846.25ms)
+Γ£ö trip numbering by selected date (9007.5917ms)
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20) {
+  errno: -4077,
+  code: 'ECONNRESET',
+  syscall: 'read'
+}
+Γû╢ Trip step boundary validation
+  Γ£ö rejects invalid dates, non-positive IDs, missing crew and duplicate crew (52.3798ms)
+  Γ£ö accepts a complete Step 1 payload with a selectable business date (5.7202ms)
+  Γ£û requires Step 2 address, bird type and a valid non-zero GPS location (16.4758ms)
+  Γ£ö requires positive shop and bird-type IDs on final Step 4 submission (8.0232ms)
+  Γ£ö ignores pending [ORDER] plan stubs when submitting Step 4 (1.9849ms)
+  Γ£ö allows Step 5 expenses submit without client endTime (server stamps it) (1.3944ms)
+Γ£û Trip step boundary validation (105.5681ms)
+Γä╣ tests 255
+Γä╣ suites 52
+Γä╣ pass 250
+Γä╣ fail 5
+Γä╣ cancelled 0
+Γä╣ skipped 0
+Γä╣ todo 0
+Γä╣ duration_ms 151627.9851
+
+Γ£û failing tests:
+
+test at tests\rateEntryShopSales.test.ts:2:9066
+Γ£û an identical (trip, shop, birds, weight) create is rejected as a duplicate (333.6289ms)
+  AssertionError [ERR_ASSERTION]: {"error":"Trip TR-20260709-001 has no locked Rate Entry ΓÇö Shop Sales requires the trip's Rate Entry to be saved & locked first.","message":"Trip TR-20260709-001 has no locked Rate Entry ΓÇö Shop Sales requires the trip's Rate Entry to be saved & locked first.","requestId":"effd6480-e09f-49ab-90a8-0e13d8e19b91"}
+  
+  409 !== 201
+  
+      at TestContext.<anonymous> (D:\Development\DMR-Poultries-ERP\backend\tests\rateEntryShopSales.test.ts:494:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async Promise.all (index 0)
+      at async Suite.run (node:internal/test_runner/test:1889:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 409,
+    expected: 201,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\shopSalesFlow.test.ts:2:6084
+Γ£û 11. Trip List delivery row reflects new birds/weight/rate/amount after Shop Sales edit (301.0217ms)
+  AssertionError [ERR_ASSERTION]: Trip List detail must include the delivery
+      at TestContext.<anonymous> (D:\Development\DMR-Poultries-ERP\backend\tests\shopSalesFlow.test.ts:406:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async Promise.all (index 0)
+      at async Suite.run (node:internal/test_runner/test:1889:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at tests\tripDeliveryCapacity.test.ts:1:7509
+Γ£û accepts exactly-at-capacity, below-capacity; rejects one-over (1849.2332ms)
+  AssertionError [ERR_ASSERTION]: Missing expected rejection.
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async TestContext.<anonymous> (D:\Development\DMR-Poultries-ERP\backend\tests\tripDeliveryCapacity.test.ts:296:5)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async Promise.all (index 0)
+      at async Suite.run (node:internal/test_runner/test:1889:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: /exceed/i,
+    operator: 'rejects',
+    diff: 'simple'
+  }
+
+test at tests\tripDeliveryCapacity.test.ts:1:8354
+Γ£û sums weight across multiple shops; accepts NUMERIC(12,3) decimal precision (900.1295ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  66.33 !== 66.333
+  
+      at TestContext.<anonymous> (D:\Development\DMR-Poultries-ERP\backend\tests\tripDeliveryCapacity.test.ts:319:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1404:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 66.33,
+    expected: 66.333,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\tripValidation.test.ts:1:1257
+Γ£û requires Step 2 address, bird type and a valid non-zero GPS location (16.4758ms)
+  AssertionError [ERR_ASSERTION]: Missing expected exception.
+      at TestContext.<anonymous> (D:\Development\DMR-Poultries-ERP\backend\tests\tripValidation.test.ts:51:12)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1397:25)
+      at Suite.processPendingSubtests (node:internal/test_runner/test:969:18)
+      at Test.postRun (node:internal/test_runner/test:1537:19)
+      at Test.run (node:internal/test_runner/test:1462:12)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:969:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: undefined,
+    operator: 'throws',
+    diff: 'simple'
+  }

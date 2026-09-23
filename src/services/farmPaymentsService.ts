@@ -7,6 +7,11 @@
  */
 import type pg from "pg";
 import { query, withTransaction } from "../config/db.js";
+import {
+  paginatedResult,
+  type PaginatedResult,
+  type PaginationParams,
+} from "../utils/pagination.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { dateOnly, num, str } from "../utils/coerce.js";
 
@@ -199,11 +204,33 @@ async function fetchMappedByIds(
 }
 
 export const farmPaymentsService = {
-  async list(): Promise<TripFarmPaymentRow[]> {
+  async list(filters: {
+    pagination?: PaginationParams | null;
+  } = {}): Promise<TripFarmPaymentRow[] | PaginatedResult<TripFarmPaymentRow>> {
+    const where = `WHERE COALESCE(t.deleted, FALSE) = FALSE
+        AND t.status = 'Completed'`;
+    if (filters.pagination) {
+      const countResult = await query<{ c: string }>(
+        `SELECT COUNT(*)::text AS c FROM trips t ${where}`
+      );
+      const total = Number(countResult.rows[0]?.c ?? 0);
+      const result = await query(
+        `${LIST_SELECT}
+         ${where}
+         ORDER BY t.trip_date DESC, t.id DESC
+         LIMIT $1 OFFSET $2`,
+        [filters.pagination.limit, filters.pagination.offset]
+      );
+      return paginatedResult(
+        result.rows.map((row) => mapRow(row as Record<string, unknown>)),
+        total,
+        filters.pagination
+      );
+    }
     const result = await query(
       `${LIST_SELECT}
-       WHERE COALESCE(t.deleted, FALSE) = FALSE
-         AND t.status = 'Completed'
+       ${where}
+
        ORDER BY t.trip_date DESC, t.id DESC`
     );
     return result.rows.map((row) => mapRow(row as Record<string, unknown>));
