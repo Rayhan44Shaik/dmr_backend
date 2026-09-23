@@ -18,6 +18,7 @@ await applySchema();
 const { pool } = await import("../src/config/db.js");
 const { mastersService } = await import("../src/services/mastersService.js");
 const { tripsService } = await import("../src/services/tripsService.js");
+const { validateVehicleMeter } = await import("../src/utils/vehicleMeterLedger.js");
 
 after(async () => {
   await testDb.close();
@@ -106,5 +107,53 @@ describe("deleted trip meter exclusion", () => {
     // Editing that trip must not see its own start meter or its own fuel.
     const excluded = await tripsService.lastClosingMeter(vehicle.id, tripId);
     assert.equal(excluded, null);
+  });
+
+  it("lets a trip close after its own diesel bills while retaining cross-trip chronology", async () => {
+    const vehicle = await mastersService.upsertVehicle({
+      vehicleNumber: "TN38DMR003",
+      vehicleType: "Lorry",
+      noOfBoxes: 40,
+      birdCapacity: 2000,
+      capacityKg: 3000,
+      engineNumber: "TNENGDEL003",
+      chassisNumber: "TNCHSDEL003",
+      status: "Active",
+    });
+    const trip = await pool.query(
+      `INSERT INTO trips
+         (trip_no, trip_date, vehicle_id, opening_meter, closing_meter, created_at)
+       VALUES ('TR-SELF-FUEL-001', CURRENT_DATE, $1, 800, 1000, NOW() - INTERVAL '2 hours')
+       RETURNING id`,
+      [vehicle.id]
+    );
+    const tripId = Number(trip.rows[0].id);
+    await pool.query(
+      `INSERT INTO fuel_expenses
+         (bill_no, expense_date, vehicle_id, trip_id, source_type, meter_reading,
+          litres, rate, amount, created_at)
+       VALUES
+         ('TRF-SELF-001', CURRENT_DATE, $1, $2, 'TRIP', 900, 10, 90, 900, NOW() - INTERVAL '1 hour'),
+         ('TRF-SELF-002', CURRENT_DATE, $1, $2, 'TRIP', 999, 10, 90, 900, NOW())`,
+      [vehicle.id, tripId]
+    );
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await assert.doesNotReject(() =>
+        validateVehicleMeter(client, {
+          vehicleId: vehicle.id,
+          newMeter: 1000,
+          eventDate: new Date().toISOString().slice(0, 10),
+          eventInstant: new Date(Date.now() - 90 * 60 * 1000).toISOString(),
+          excludeTripId: tripId,
+          context: "Trip closing meter",
+        })
+      );
+      await client.query("ROLLBACK");
+    } finally {
+      client.release();
+    }
   });
 });

@@ -5,6 +5,7 @@ import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
 import {
   assertEmployeeExists,
   assertTripExists,
+  assertVehicleActive,
   assertVehicleExists,
 } from "../utils/fkValidation.js";
 import { nextDocNo } from "../utils/operationsHelpers.js";
@@ -200,6 +201,8 @@ export const fuelExpensesService = {
    * syncDieselToFuelExpenses (tripFuelSync.ts) during Step 5 submission. */
   async create(body: unknown) {
     const data = parseBody(fuelExpenseBodySchema, body);
+    // Inactive vehicles accept no new fuel activity (historical rows keep working).
+    await assertVehicleActive(data.vehicleId);
 
     return withTransaction(async (client) => {
       try {
@@ -225,7 +228,10 @@ export const fuelExpensesService = {
         const fuelRate = data.fuelRate ?? 0;
         // Amount is always server-computed — never trust a client-supplied amount.
         const amount = Number((liters * fuelRate).toFixed(2));
+        // Serialize same-day manual allocations (MAX-then-insert needs the day lock).
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`fuel_bill_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`]);
         const billNo =
+          // (day lock held above; number allocated below)
           data.billNo || (await nextDocNo(client, "FUEL", "fuel_expenses", "bill_no"));
         const pumpName = data.pumpName ?? "";
 
@@ -275,6 +281,9 @@ export const fuelExpensesService = {
 
   async update(id: string, body: unknown) {
     const data = parseBody(fuelExpenseBodySchema.partial(), body);
+    // Reassigning to an inactive vehicle is new activity and is rejected;
+    // untouched historical rows keep working.
+    await assertVehicleActive(data.vehicleId);
 
     return withTransaction(async (client) => {
       try {

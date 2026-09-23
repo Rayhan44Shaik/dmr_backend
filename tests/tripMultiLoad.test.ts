@@ -289,6 +289,27 @@ describe("trip multi-load (same Draft trip)", () => {
       clientKey: `diesel-${trip.id}`,
       rowIndex: 1,
     });
+    await tripsService.upsertDieselEntry(trip.id, {
+      litres: 10,
+      rate: 96,
+      meter: 2090,
+      bunkName: "Bunk",
+      gpsLat: 12.98,
+      gpsLon: 77.6,
+      gpsAccuracy: 5,
+      imageData: `data:image/jpeg;base64,${"D".repeat(80)}`,
+      imageName: "bill-2.jpg",
+      clientKey: `diesel-${trip.id}-2`,
+      rowIndex: 2,
+    });
+
+    const savedFuel = await pool.query(
+      `SELECT trip_fuel_entry_index FROM fuel_expenses
+        WHERE trip_id = $1 AND source_type = 'TRIP' AND deleted = FALSE
+        ORDER BY trip_fuel_entry_index`,
+      [trip.id]
+    );
+    assert.deepEqual(savedFuel.rows.map((row) => Number(row.trip_fuel_entry_index)), [1, 2]);
 
     const added = await tripsService.addLeg(trip.id);
     assert.equal(added.legCount, 2);
@@ -326,8 +347,6 @@ describe("trip multi-load (same Draft trip)", () => {
     const done = await tripsService.submitStep(trip.id, "expenses", {
       closingMeter: 2150,
       deliveryTolls: 2,
-      // Closing must chronologically follow mid-trip diesel synced to fuel_expenses.
-      endTime: new Date(Date.now() + 120_000).toISOString(),
     });
     assert.equal(done.status, "Pending");
   });

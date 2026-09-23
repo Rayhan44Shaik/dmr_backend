@@ -38,6 +38,29 @@ export async function assertVehicleExists(
   }
 }
 
+/** Stricter than assertVehicleExists: also rejects an Inactive (soft-deleted /
+ * cancelled) vehicle. Mirrors assertShopActive — new trip/fuel/meter activity
+ * against an inactive vehicle is rejected, while historical records that
+ * already reference it keep working. Backend-enforced; frontend filtering
+ * alone is insufficient. */
+export async function assertVehicleActive(
+  id: number | null | undefined,
+  client: Client | null = null
+) {
+  if (id == null) return;
+  const sql = `SELECT status FROM vehicles WHERE id = $1`;
+  const result = client ? await client.query(sql, [id]) : await query(sql, [id]);
+  if (!result.rowCount) {
+    throw new AppError(422, "Vehicle not found", { vehicleId: id });
+  }
+  if (result.rows[0].status !== "Active") {
+    throw new AppError(422, "Vehicle is inactive and cannot be used for a new trip or fuel entry.", {
+      code: "VEHICLE_INACTIVE",
+      vehicleId: id,
+    });
+  }
+}
+
 export async function assertFarmExists(
   id: number | null | undefined,
   client: Client | null = null

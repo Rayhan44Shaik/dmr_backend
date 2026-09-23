@@ -28,7 +28,10 @@ export function mapPgError(err: unknown): AppError | null {
         detail && /already exists/i.test(detail)
           ? `Duplicate record: ${detail.replace(/^Key \(/, "(")}`
           : "Duplicate record";
+      // A fuel bill_no collision (per-trip FNNN allocator race residue) carries a
+      // stable business code so the UI can explain/retry in English + Telugu.
       return new AppError(409, message, {
+        code: err.constraint === "fuel_expenses_bill_no_key" ? "DUPLICATE_FUEL_REQUEST" : undefined,
         constraint: err.constraint,
         detail: err.detail,
       });

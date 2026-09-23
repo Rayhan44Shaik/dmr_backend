@@ -16,6 +16,7 @@ import {
   resolveTripDateForNumbering,
 } from "../utils/tripNumbering.js";
 import {
+  assertVehicleActive,
   resolveEmployeeNames,
   validateTripForeignKeys,
 } from "../utils/fkValidation.js";
@@ -62,6 +63,7 @@ import {
   type TripLegRow,
 } from "../utils/tripLegs.js";
 import { assertTripResourcesAvailable } from "../validation/tripResourceValidation.js";
+import { assertTripCompletionGates, assertTripMetersEditable, getTripMeterLock, revalidateTripMetersForCompletion } from "../utils/tripMeterLock.js";
 import { assertTripStatus } from "../validation/operations.js";
 import {
   assertTripReadyForCompletion,
@@ -1825,6 +1827,11 @@ export const tripsService = {
     try {
       return await withTransaction(async (client) => {
         const trip = await hydrateTrip(client, result.rows[0], { includeDcPhoto: true, viewLegIndex });
+        // Proactive lock state for the editor: meters render read-only when a
+        // later same-vehicle approval exists. Enforcement stays backend-side.
+        const meterLock = await getTripMeterLock(client, id);
+        (trip as unknown as Record<string, unknown>).meterLocked = meterLock.locked;
+        (trip as unknown as Record<string, unknown>).meterLockReason = meterLock.reason;
         const flags = {
           startStepSubmitted: trip.startStepSubmitted,
           farmStepSubmitted: trip.farmStepSubmitted,
@@ -1937,6 +1944,38 @@ export const tripsService = {
         // the new date. Old numbers remain consumed because allocation is
         // MAX+1 across every status (including soft-deleted rows).
         await validateTripForeignKeys(body, client);
+        // Inactive vehicles accept no new trip activity (historical rows keep working).
+        if (body.vehicleId != null) {
+          await assertVehicleActive(numOrNull(body.vehicleId), client);
+        }
+
+        // Meter-lock enforcement (Steps 1/2/5, diesel table, trip-date moves).
+        // Runs on every meter-CHANGING write — including autosave, which
+        // bypasses submit-time validation — so a stale page can never
+        // overwrite meters after a later same-vehicle approval. Writes that
+        // change no meter value are never blocked here.
+        if (tripId && existing) {
+          const prev = existing.rows[0];
+          const meterTouched =
+            (body.openingMeter !== undefined &&
+              numOrNull(body.openingMeter) !== numOrNull(prev.opening_meter)) ||
+            (body.closingMeter !== undefined &&
+              numOrNull(body.closingMeter) !== numOrNull(prev.closing_meter)) ||
+            (body.endMeter !== undefined &&
+              numOrNull(body.endMeter) !== numOrNull(prev.end_meter)) ||
+            body.destMeter !== undefined ||
+            (body.tripDate != null &&
+              (dateOnly(str(body.tripDate)) ?? "") !== (dateOnly(prev.trip_date) ?? "")) ||
+            extractDieselFromBody(body).length > 0;
+          if (meterTouched) {
+            const lockVehicleId =
+              numOrNull(body.vehicleId) ?? numOrNull(prev.vehicle_id);
+            if (lockVehicleId != null) {
+              await lockVehicleForMeterWrite(client, lockVehicleId);
+            }
+            await assertTripMetersEditable(client, tripId);
+          }
+        }
         await enrichMasterDenorm(client, body);
 
         // Resource availability is DB-backed and transaction-safe. A single
@@ -2075,6 +2114,7 @@ export const tripsService = {
                 eventDate: tripBusinessDate,
                 eventInstant: openingInstant,
                 exclude: { sourceType: ["TRIP_START", "TRIP_END"], recordId: tripId },
+                excludeTripId: tripId,
                 context: "Trip start meter",
               });
             }
@@ -2114,6 +2154,7 @@ export const tripsService = {
                 eventDate: tripBusinessDate,
                 eventInstant: closingEventInstant,
                 exclude: { sourceType: ["TRIP_START", "TRIP_END"], recordId: tripId },
+                excludeTripId: tripId,
                 context: "Trip closing meter",
               });
             }
@@ -2127,20 +2168,12 @@ export const tripsService = {
             for (const entry of dieselEntries) {
               const meter = numOrNull(entry.meter);
               if (meter == null || meter <= 0) continue;
-              const existingSynced = await client.query<{ id: string }>(
-                `SELECT id FROM fuel_expenses
-                 WHERE trip_id = $1 AND trip_fuel_entry_index = $2
-                   AND source_type = 'TRIP' AND deleted = FALSE`,
-                [tripId, entry.rowIndex]
-              );
               await validateVehicleMeter(client, {
                 vehicleId: vehicleIdForMeter,
                 newMeter: meter,
                 eventDate: tripBusinessDate,
                 eventInstant: closingEventInstant,
-                exclude: existingSynced.rowCount
-                  ? { sourceType: "FUEL", recordId: existingSynced.rows[0].id }
-                  : undefined,
+                excludeTripId: tripId,
                 context: `Diesel entry #${entry.rowIndex} meter reading`,
               });
             }
@@ -3443,6 +3476,18 @@ export const tripsService = {
       let result;
       try {
         if (status === "Completed") {
+          // Serialize against concurrent same-vehicle approvals/updates: the
+          // fuel sync below WRITES meter events, so completion must queue
+          // behind (and observe) any in-flight approval for this vehicle.
+          const completionVehicleId = numOrNull(existing.rows[0].vehicle_id);
+          if (completionVehicleId != null) {
+            await lockVehicleForMeterWrite(client, completionVehicleId);
+          }
+          // Prerequisite approvals (manual fuel + maintenance) gate completion.
+          await assertTripCompletionGates(client, id, completionVehicleId);
+          // Close the submit-to-complete stale window: re-validate every meter
+          // against the current cross-module timeline before finalizing.
+          await revalidateTripMetersForCompletion(client, existing.rows[0]);
           result = await client.query(
             `UPDATE trips SET status = $2, approved_by = $3, approved_at = NOW(), deleted = FALSE
              WHERE id = $1 RETURNING *`,
@@ -3651,7 +3696,7 @@ export const tripsService = {
    */
   async upsertDieselEntry(tripId: number, body: Record<string, unknown>) {
     return withTransaction(async (client) => {
-      const existing = await client.query(`SELECT id, trip_date, closing_meter FROM trips WHERE id = $1 AND deleted = FALSE`, [
+      const existing = await client.query(`SELECT id, trip_date, closing_meter, vehicle_id FROM trips WHERE id = $1 AND deleted = FALSE`, [
         tripId,
       ]);
       if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
@@ -3696,6 +3741,14 @@ export const tripsService = {
         rowIndex = num(maxRow.rows[0].m) + 1;
       }
 
+      // Serialize per vehicle and enforce the meter lock: a stale Step 5 page
+      // that validated before a later same-vehicle approval must fail here,
+      // and inactive vehicles are rejected by the lock itself.
+      const upsertVehicleId = numOrNull(existing.rows[0].vehicle_id);
+      if (upsertVehicleId != null) {
+        await lockVehicleForMeterWrite(client, upsertVehicleId);
+      }
+      await assertTripMetersEditable(client, tripId);
       const priorDiesel = await client.query<{ meter: string; row_index: number }>(
         `SELECT meter, row_index FROM trip_diesel_entries
           WHERE trip_id = $1 AND row_index < $2 AND meter IS NOT NULL
@@ -3714,6 +3767,26 @@ export const tripsService = {
         [tripId, rowIndex]
       );
       const nextMeter = num(laterDiesel.rows[0]?.meter);
+      // Universal cross-module meter validation for this diesel reading (the
+      // checks above are trip-local only). Self-excluded via the already-synced
+      // fuel row so resubmitting the same value never compares against itself.
+      const upsertTripDate = dateOnly(existing.rows[0].trip_date) ?? "";
+      if (upsertVehicleId != null && upsertTripDate) {
+        const syncedFuel = await client.query<{ id: string }>(
+          `SELECT id FROM fuel_expenses WHERE trip_id = $1 AND trip_fuel_entry_index = $2 AND source_type = 'TRIP' AND COALESCE(deleted, FALSE) = FALSE LIMIT 1`,
+          [tripId, rowIndex]
+        );
+        await validateVehicleMeter(client, {
+          vehicleId: upsertVehicleId,
+          newMeter: meter,
+          eventDate: upsertTripDate,
+          exclude: syncedFuel.rowCount
+            ? { sourceType: "FUEL" as const, recordId: str(syncedFuel.rows[0].id) }
+            : undefined,
+          excludeTripId: tripId,
+          context: `Diesel entry #${rowIndex} meter reading`,
+        });
+      }
       if (nextMeter > 0 && meter >= nextMeter) {
         throw new AppError(422, `Diesel meter (${meter} KM) must be less than the next entered meter (${nextMeter} KM).`);
       }
@@ -3806,7 +3879,7 @@ export const tripsService = {
   async updateDieselEntry(tripId: number, entryId: number, body: Record<string, unknown>) {
     return withTransaction(async (client) => {
       const existing = await client.query(
-        `SELECT d.id, d.row_index, t.closing_meter
+        `SELECT d.id, d.row_index, t.closing_meter, t.vehicle_id, t.trip_date
            FROM trip_diesel_entries d
            JOIN trips t ON t.id = d.trip_id
           WHERE d.id = $1 AND d.trip_id = $2`,
@@ -3838,8 +3911,38 @@ export const tripsService = {
         farmFloor,
         ...neighbors.rows.filter((r) => num(r.row_index) < rowIndex).map((r) => num(r.meter))
       );
+      // Serialize per vehicle and enforce the meter lock (stale Step 5 edits
+      // after a later same-vehicle approval fail here).
+      const updateVehicleId = numOrNull(existing.rows[0].vehicle_id);
+      if (updateVehicleId != null) {
+        await lockVehicleForMeterWrite(client, updateVehicleId);
+      }
+      await assertTripMetersEditable(client, tripId);
       const next = neighbors.rows.find((r) => num(r.row_index) > rowIndex);
       const nextMeter = next ? num(next.meter) : 0;
+      // Universal cross-module meter validation, excluding this row's own
+      // synced fuel bill and preserving its original instant so an unchanged
+      // resubmit never compares against newer same-day neighbors.
+      const updateTripDate = dateOnly(existing.rows[0].trip_date) ?? "";
+      if (updateVehicleId != null && updateTripDate) {
+        const ownFuel = await client.query<{ id: string; created_at: unknown }>(
+          `SELECT id, created_at FROM fuel_expenses WHERE trip_id = $1 AND trip_fuel_entry_index = $2 AND source_type = 'TRIP' AND COALESCE(deleted, FALSE) = FALSE LIMIT 1`,
+          [tripId, rowIndex]
+        );
+        await validateVehicleMeter(client, {
+          vehicleId: updateVehicleId,
+          newMeter: meter,
+          eventDate: updateTripDate,
+          eventInstant: ownFuel.rowCount
+            ? preciseIsoOrUndefined(ownFuel.rows[0].created_at)
+            : undefined,
+          exclude: ownFuel.rowCount
+            ? { sourceType: "FUEL" as const, recordId: str(ownFuel.rows[0].id) }
+            : undefined,
+          excludeTripId: tripId,
+          context: `Diesel entry #${rowIndex} meter reading`,
+        });
+      }
       if (priorMeter > 0 && meter <= priorMeter) {
         throw new AppError(422, `Diesel meter (${meter} KM) must be greater than the last entered meter (${priorMeter} KM).`);
       }
@@ -3943,6 +4046,14 @@ export const tripsService = {
       if (!existing.rowCount) throw new AppError(404, `Diesel entry ${entryId} not found`);
       const rowIndex = num(existing.rows[0].row_index);
 
+      // Serialize per vehicle and enforce the meter lock: removing a diesel row
+      // (and its synced fuel bill) on a locked trip is rejected.
+      const delTrip = await client.query(`SELECT vehicle_id FROM trips WHERE id = $1`, [tripId]);
+      const delVehicleId = delTrip.rowCount ? numOrNull(delTrip.rows[0].vehicle_id) : null;
+      if (delVehicleId != null) {
+        await lockVehicleForMeterWrite(client, delVehicleId);
+      }
+      await assertTripMetersEditable(client, tripId);
       await client.query(`DELETE FROM trip_diesel_entries WHERE id = $1 AND trip_id = $2`, [
         entryId,
         tripId,

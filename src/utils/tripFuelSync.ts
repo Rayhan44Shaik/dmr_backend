@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { dateOnly, num, numOrNull, str } from "./coerce.js";
-import { nextDocNo } from "./operationsHelpers.js";
+import { AppError } from "../middleware/errorHandler.js";
 import type { DieselEntry } from "../types/models.js";
 
 type Client = pg.PoolClient;
@@ -14,6 +14,44 @@ type Client = pg.PoolClient;
  * submissions (INSERT ... ON CONFLICT) instead of relying on bill_no text
  * matching. Manual entries (source_type='MANUAL') are never touched here.
  */
+/**
+ * Allocate the next backend-authoritative fuel bill number for a trip:
+ * <trip_no>-F001, -F002, ... (supports 5/10/100+ records; width grows).
+ *
+ * The per-trip sequence lives in trip_fuel_bill_counters. The atomic upsert
+ * below takes the row lock for (trip_id) — and the caller holds
+ * pg_advisory_xact_lock('trip_fuel_<id>') for the whole sync — so concurrent
+ * creates for the SAME trip serialize and each gets a distinct increment.
+ * The counter never decreases, so deleted/cancelled/rejected numbers stay
+ * permanently consumed and are never re-issued.
+ *
+ * fuel_expenses.bill_no UNIQUE is the final guard; any residual collision
+ * surfaces as 23505 (409) and the whole transaction rolls back.
+ */
+export async function allocateTripFuelBillNo(
+  client: Client,
+  tripId: number,
+  tripNo: string
+): Promise<string> {
+  const cleanNo = str(tripNo).trim();
+  if (!cleanNo) {
+    throw new AppError(422, "Trip number is required to generate a fuel bill number.", {
+      code: "FUEL_NUMBER_CONFLICT",
+      tripId,
+    });
+  }
+  const counter = await client.query<{ last_sequence: string }>(
+    `INSERT INTO trip_fuel_bill_counters (trip_id, last_sequence)
+     VALUES ($1, 1)
+     ON CONFLICT (trip_id)
+     DO UPDATE SET last_sequence = trip_fuel_bill_counters.last_sequence + 1
+     RETURNING last_sequence`,
+    [tripId]
+  );
+  const seq = Number(counter.rows[0].last_sequence);
+  return `${cleanNo}-F${String(seq).padStart(3, "0")}`;
+}
+
 export async function syncDieselToFuelExpenses(
   client: Client,
   tripId: number,
@@ -30,7 +68,13 @@ export async function syncDieselToFuelExpenses(
   }
 ) {
   const activeIndices: number[] = [];
-  const ymd = (tripDate || "").replace(/-/g, "") || new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  // Serialize every fuel sync for this trip: concurrent Step 5 submissions for
+  // the same trip queue here, so per-trip sequence allocation below can never
+  // collide (the global UNIQUE bill_no stays the final guard).
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`trip_fuel_${tripId}`]);
+  const tripNoRow = await client.query<{ trip_no: string }>(
+    `SELECT trip_no FROM trips WHERE id = $1`, [tripId]);
+  const tripNo = tripNoRow.rowCount ? str(tripNoRow.rows[0].trip_no) : "";
 
   for (const entry of entries) {
     const litres = Number(entry.litres ?? 0);
@@ -54,8 +98,8 @@ export async function syncDieselToFuelExpenses(
     if (existingFuel.rowCount) {
       billNo = existingFuel.rows[0].bill_no;
     } else {
-      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`fuel_bill_${ymd}`]);
-      billNo = await nextDocNo(client, "TRF", "fuel_expenses", "bill_no");
+      billNo = await allocateTripFuelBillNo(client, tripId, tripNo);
+      // (bill number allocated on the line above)
     }
 
     await client.query(
