@@ -215,6 +215,8 @@ export interface DieselEntry {
     rate?: number | null;
     meter?: number | null;
     bunkName?: string | null;
+    bunkSource?: "MASTER" | "OTHER";
+    fuelBunkId?: number | null;
     bunkGps?: string | null;
     imageData?: string | null;
     imageName?: string | null;
@@ -294,6 +296,15 @@ export interface Trip {
     closingMeter: number | null;
     endMeter?: number | null;
     endTime: string | null;
+    /** Proactive meter-lock state (detail reads): meters render read-only when true. */
+    meterLocked?: boolean;
+    /** Lock reason when meterLocked (locking event kind + ref). */
+    meterLockReason?: {
+        kind: "trip" | "maintenance" | "fuel";
+        ref: string;
+        eventDate: string;
+        approvedAt: string | null;
+    } | null;
     deliveryTolls: number;
     destinationTolls?: number;
     meals?: number;

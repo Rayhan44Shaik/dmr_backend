@@ -12,16 +12,16 @@ export declare const statusPatchSchema: z.ZodObject<{
     reason: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
     status: string;
+    reason?: string | undefined;
     approvedBy?: string | undefined;
     rejectedBy?: string | undefined;
     rejectedReason?: string | undefined;
-    reason?: string | undefined;
 }, {
     status: string;
+    reason?: string | undefined;
     approvedBy?: string | undefined;
     rejectedBy?: string | undefined;
     rejectedReason?: string | undefined;
-    reason?: string | undefined;
 }>;
 export declare const shopRateBodySchema: z.ZodObject<{
     shopId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;

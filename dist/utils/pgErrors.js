@@ -18,11 +18,19 @@ export function mapPgError(err) {
             const message = detail && /already exists/i.test(detail)
                 ? `Duplicate record: ${detail.replace(/^Key \(/, "(")}`
                 : "Duplicate record";
+            // A fuel bill_no collision (per-trip FNNN allocator race residue) carries a
+            // stable business code so the UI can explain/retry in English + Telugu.
             return new AppError(409, message, {
+                code: err.constraint === "fuel_expenses_bill_no_key" ? "DUPLICATE_FUEL_REQUEST" : undefined,
                 constraint: err.constraint,
                 detail: err.detail,
             });
         }
+        case "23P01":
+            return new AppError(409, "Overlapping pending or approved leave already exists for this employee", {
+                constraint: err.constraint,
+                detail: err.detail ?? err.message,
+            });
         case "23503":
             return new AppError(422, "Referenced record does not exist", {
                 constraint: err.constraint,

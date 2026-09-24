@@ -137,11 +137,18 @@ export function assertWithinCapacity(opts) {
     // Completed — a Completed trip's capacity is never legitimately "not
     // tracked". If it resolves to 0, that is a real data problem and any
     // positive delivery is correctly rejected rather than silently allowed.
-    const total = opts.alreadyAllocated + opts.requested;
-    if (total > opts.available) {
+    // Weight is stored and displayed at two-decimal precision. Normalize before
+    // comparing so mathematically equal values such as 3492.6 and
+    // 3492.6000000000004 cannot fail because of IEEE-754 accumulation noise.
+    const normalize = (value) => opts.label === "weight" ? Number(value.toFixed(2)) : value;
+    const available = normalize(opts.available);
+    const alreadyAllocated = normalize(opts.alreadyAllocated);
+    const requested = normalize(opts.requested);
+    const total = normalize(alreadyAllocated + requested);
+    if (total > available) {
         const noun = opts.label === "birds" ? "birds" : "weight";
         throw new AppError(422, `Shop delivery ${noun} exceed the trip available ${noun}. ` +
-            `Available: ${opts.available}, already allocated: ${opts.alreadyAllocated}, requested: ${opts.requested}.`);
+            `Available: ${available}, already allocated: ${alreadyAllocated}, requested: ${requested}.`);
     }
 }
 //# sourceMappingURL=tripDeliverySync.js.map

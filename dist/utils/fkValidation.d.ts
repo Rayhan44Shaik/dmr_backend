@@ -2,6 +2,12 @@ import type pg from "pg";
 type Client = pg.PoolClient;
 export declare function assertEmployeeExists(id: number | null | undefined, label?: string, client?: Client | null): Promise<void>;
 export declare function assertVehicleExists(id: number | null | undefined, client?: Client | null): Promise<void>;
+/** Stricter than assertVehicleExists: also rejects an Inactive (soft-deleted /
+ * cancelled) vehicle. Mirrors assertShopActive — new trip/fuel/meter activity
+ * against an inactive vehicle is rejected, while historical records that
+ * already reference it keep working. Backend-enforced; frontend filtering
+ * alone is insufficient. */
+export declare function assertVehicleActive(id: number | null | undefined, client?: Client | null): Promise<void>;
 export declare function assertFarmExists(id: number | null | undefined, client?: Client | null): Promise<void>;
 export declare function assertShopExists(id: number | null | undefined, client?: Client | null): Promise<void>;
 /** Stricter than assertShopExists: also rejects a soft-deleted (Inactive)

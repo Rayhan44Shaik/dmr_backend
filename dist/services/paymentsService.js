@@ -4,6 +4,28 @@ import { dateOnly, num, str } from "../utils/coerce.js";
 import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import { parseBody, paymentBodySchema, paymentUpdateSchema, } from "../validation/payments.js";
+/**
+ * 10-day edit/delete window (matches the Payment Register UI rule in
+ * frontend dateUtils.canEditItem/canDeleteItem, which gates on createdAt).
+ * Records older than 10 days are locked: update/delete via the API fail even
+ * when the caller bypasses the UI. Missing created_at fails open (the UI
+ * treats a missing date as editable, so the server must agree).
+ */
+async function assertWithinEditWindow(id) {
+    const existing = await query(`SELECT created_at FROM payments
+     WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`, [id]);
+    if (!existing.rowCount)
+        throw new AppError(404, "Payment not found");
+    const createdAt = existing.rows[0].created_at;
+    if (createdAt == null)
+        return;
+    const ageMs = Date.now() - new Date(createdAt).getTime();
+    if (!Number.isFinite(ageMs))
+        return;
+    if (Math.floor(ageMs / 86_400_000) > 10) {
+        throw new AppError(403, "Payment is older than 10 days and cannot be modified or deleted");
+    }
+}
 const PAYMENT_SELECT = `SELECT p.* FROM payments p`;
 function mapPayment(row) {
     const paymentMode = str(row.payment_mode);
@@ -160,6 +182,10 @@ export const paymentsService = {
     },
     async update(id, body) {
         const data = parseBody(paymentUpdateSchema, body);
+        // 10-day window enforced before the transaction: created_at is immutable,
+        // so the pool-level check cannot go stale; the in-transaction guards below
+        // still own the deleted/missing cases.
+        await assertWithinEditWindow(id);
         return withTransaction(async (client) => {
             try {
                 // Prevent updates to deleted records: the existence check and the
@@ -207,6 +233,8 @@ export const paymentsService = {
     /** Soft delete — the row (and its number) stays; it just disappears from
      * normal queries. Repeated delete returns a clean 404. */
     async softDelete(id) {
+        // 10-day window: a direct-API delete of a locked record fails here.
+        await assertWithinEditWindow(id);
         return withTransaction(async (client) => {
             const result = await client.query(`UPDATE payments SET
            deleted = TRUE,

@@ -6,9 +6,12 @@ import { staffPerformanceService } from "../services/staffPerformanceService.js"
 import { parseBody, salaryGenerateSchema, salaryListQuerySchema, salaryStatusPatchSchema, salarySubmitSchema, salaryMonthSchema, salaryBulkStatusSchema, salaryDeliverySchema, } from "../validation/salary.js";
 import { textPdf } from "../utils/simplePdf.js";
 import { leaveCreateSchema, leaveListQuerySchema, leaveReportQuerySchema, leaveStatusSchema, } from "../validation/leave.js";
+import { staffRateLimit } from "../middleware/staffRateLimit.js";
 import { staffBoundary } from "../middleware/staffBoundary.js";
 import { authUser } from "../middleware/auth.js";
 export const staffRouter = Router();
+// Shed abusive load before auth/DB work; Staff scope only.
+staffRouter.use(staffRateLimit);
 staffRouter.use(staffBoundary);
 function performanceParams(req, key) {
     const rawId = req.query[key];

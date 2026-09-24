@@ -10,6 +10,21 @@ type Client = pg.PoolClient;
  * submissions (INSERT ... ON CONFLICT) instead of relying on bill_no text
  * matching. Manual entries (source_type='MANUAL') are never touched here.
  */
+/**
+ * Allocate the next backend-authoritative fuel bill number for a trip:
+ * <trip_no>-F001, -F002, ... (supports 5/10/100+ records; width grows).
+ *
+ * The per-trip sequence lives in trip_fuel_bill_counters. The atomic upsert
+ * below takes the row lock for (trip_id) — and the caller holds
+ * pg_advisory_xact_lock('trip_fuel_<id>') for the whole sync — so concurrent
+ * creates for the SAME trip serialize and each gets a distinct increment.
+ * The counter never decreases, so deleted/cancelled/rejected numbers stay
+ * permanently consumed and are never re-issued.
+ *
+ * fuel_expenses.bill_no UNIQUE is the final guard; any residual collision
+ * surfaces as 23505 (409) and the whole transaction rolls back.
+ */
+export declare function allocateTripFuelBillNo(client: Client, tripId: number, tripNo: string): Promise<string>;
 export declare function syncDieselToFuelExpenses(client: Client, tripId: number, tripDate: string, entries: DieselEntry[], context: {
     vehicleId?: number | null;
     vehicleNo?: string | null;

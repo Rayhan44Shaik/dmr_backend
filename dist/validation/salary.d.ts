@@ -228,7 +228,7 @@ export declare const salaryDeliverySchema: z.ZodObject<{
     ids: z.ZodArray<z.ZodString, "many">;
     language: z.ZodDefault<z.ZodOptional<z.ZodEnum<["en", "te"]>>>;
     subject: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
-    body: z.ZodEffects<z.ZodString, string, unknown>;
+    body: z.ZodDefault<z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>>;
 }, "strip", z.ZodTypeAny, {
     ids: string[];
     language: "en" | "te";

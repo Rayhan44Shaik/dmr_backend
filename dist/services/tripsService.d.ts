@@ -109,6 +109,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -226,6 +233,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -342,6 +356,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -459,6 +480,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -601,6 +629,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -717,6 +752,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -830,6 +872,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -944,6 +993,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -1067,6 +1123,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -1121,7 +1184,7 @@ export declare const tripsService: {
      * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
      * maintenance), not just trip closing meters, while keeping the same
      * response shape the frontend already consumes. */
-    lastClosingMeter(vehicleId: number): Promise<{
+    lastClosingMeter(vehicleId: number, excludeTripId?: number | null): Promise<{
         closingMeter: number;
         source: import("../utils/vehicleMeterLedger.js").MeterSourceType;
         ref: string;
@@ -1231,6 +1294,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -1344,6 +1414,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;
@@ -1456,6 +1533,13 @@ export declare const tripsService: {
         closingMeter: number | null;
         endMeter?: number | null;
         endTime: string | null;
+        meterLocked?: boolean;
+        meterLockReason?: {
+            kind: "trip" | "maintenance" | "fuel";
+            ref: string;
+            eventDate: string;
+            approvedAt: string | null;
+        } | null;
         deliveryTolls: number;
         destinationTolls?: number;
         meals?: number;

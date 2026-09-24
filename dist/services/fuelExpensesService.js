@@ -1,7 +1,7 @@
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
-import { assertEmployeeExists, assertTripExists, assertVehicleExists, } from "../utils/fkValidation.js";
+import { assertEmployeeExists, assertTripExists, assertVehicleActive, assertVehicleExists, } from "../utils/fkValidation.js";
 import { nextDocNo } from "../utils/operationsHelpers.js";
 import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
@@ -134,6 +134,8 @@ export const fuelExpensesService = {
      * syncDieselToFuelExpenses (tripFuelSync.ts) during Step 5 submission. */
     async create(body) {
         const data = parseBody(fuelExpenseBodySchema, body);
+        // Inactive vehicles accept no new fuel activity (historical rows keep working).
+        await assertVehicleActive(data.vehicleId);
         return withTransaction(async (client) => {
             try {
                 await assertVehicleExists(data.vehicleId, client);
@@ -156,7 +158,11 @@ export const fuelExpensesService = {
                 const fuelRate = data.fuelRate ?? 0;
                 // Amount is always server-computed — never trust a client-supplied amount.
                 const amount = Number((liters * fuelRate).toFixed(2));
-                const billNo = data.billNo || (await nextDocNo(client, "FUEL", "fuel_expenses", "bill_no"));
+                // Serialize same-day manual allocations (MAX-then-insert needs the day lock).
+                await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`fuel_bill_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`]);
+                const billNo = 
+                // (day lock held above; number allocated below)
+                data.billNo || (await nextDocNo(client, "FUEL", "fuel_expenses", "bill_no"));
                 const pumpName = data.pumpName ?? "";
                 const result = await client.query(`INSERT INTO fuel_expenses (
              bill_no, expense_date, vehicle_id, vehicle_no, driver_id, driver_name,
@@ -201,6 +207,9 @@ export const fuelExpensesService = {
     },
     async update(id, body) {
         const data = parseBody(fuelExpenseBodySchema.partial(), body);
+        // Reassigning to an inactive vehicle is new activity and is rejected;
+        // untouched historical rows keep working.
+        await assertVehicleActive(data.vehicleId);
         return withTransaction(async (client) => {
             try {
                 const existing = await client.query(`SELECT source_type, ops_status, vehicle_id, expense_date, created_at

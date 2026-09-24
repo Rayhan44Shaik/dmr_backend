@@ -45,11 +45,20 @@ async function run(client, sql, params) {
  * what makes "read latest -> validate -> write" atomic (see db.ts withTransaction).
  */
 export async function lockVehicleForMeterWrite(client, vehicleId) {
-    const result = await client.query(`SELECT id FROM vehicles WHERE id = $1 FOR UPDATE`, [
+    const result = await client.query(`SELECT id, status FROM vehicles WHERE id = $1 FOR UPDATE`, [
         vehicleId,
     ]);
     if (!result.rowCount) {
         throw new AppError(422, "Vehicle not found", { vehicleId });
+    }
+    // Inactive (soft-deleted/cancelled) vehicles can never anchor a meter write.
+    // This is the single choke point for trip saves, diesel entries, fuel and
+    // maintenance writes, so one check guards every meter path.
+    if (result.rows[0].status !== "Active") {
+        throw new AppError(422, "Vehicle is inactive and cannot be used for a new trip or fuel entry.", {
+            code: "VEHICLE_INACTIVE",
+            vehicleId,
+        });
     }
 }
 /** Advisory read: the single latest accepted meter reading for a vehicle,
@@ -62,11 +71,11 @@ export async function getLatestVehicleMeter(client, vehicleId, excludeTripId) {
     const params = [vehicleId];
     let exclude = "";
     if (excludeTripId != null && excludeTripId > 0) {
-        params.push(excludeTripId);
+        params.push(String(excludeTripId), excludeTripId);
         exclude = `AND NOT (source_type IN ('TRIP_START', 'TRIP_END') AND record_id = $2)
      AND NOT (source_type = 'FUEL' AND EXISTS (
        SELECT 1 FROM fuel_expenses fe
-       WHERE fe.id::text = vehicle_meter_events.record_id AND fe.trip_id = $2
+       WHERE fe.id::text = vehicle_meter_events.record_id AND fe.trip_id = $3
      ))`;
     }
     const result = await run(client, `SELECT * FROM vehicle_meter_events
@@ -112,7 +121,21 @@ function excludeClause(exclude, paramOffset) {
  */
 export async function validateVehicleMeter(client, opts) {
     const eventInstant = opts.eventInstant ?? new Date().toISOString();
-    const { clause, params } = excludeClause(opts.exclude, 4);
+    const excludedRecord = excludeClause(opts.exclude, 4);
+    const params = [...excludedRecord.params];
+    let clause = excludedRecord.clause;
+    if (opts.excludeTripId != null && opts.excludeTripId > 0) {
+        const tripParam = 4 + params.length;
+        params.push(opts.excludeTripId);
+        clause += ` AND NOT (
+      (source_type IN ('TRIP_START', 'TRIP_END') AND record_id = $${tripParam}::text)
+      OR (source_type = 'FUEL' AND EXISTS (
+        SELECT 1 FROM fuel_expenses own_fuel
+         WHERE own_fuel.id::text = vehicle_meter_events.record_id
+           AND own_fuel.trip_id = $${tripParam}::bigint
+      ))
+    )`;
+    }
     const prevResult = await client.query(`SELECT * FROM vehicle_meter_events
      WHERE vehicle_id = $1
        AND (event_date, event_instant) <= ($2::date, $3::timestamptz)
@@ -121,7 +144,7 @@ export async function validateVehicleMeter(client, opts) {
      LIMIT 1`, [opts.vehicleId, opts.eventDate, eventInstant, ...params]);
     const prev = prevResult.rowCount ? mapEvent(prevResult.rows[0]) : null;
     if (prev && opts.newMeter < prev.meter) {
-        throw new AppError(422, `${opts.context} cannot be less than the vehicle's latest recorded reading of ${prev.meter} KM (${SOURCE_LABELS[prev.sourceType]} ${prev.ref}).`, { latestMeter: prev.meter, latestSource: prev.sourceType, latestRef: prev.ref });
+        throw new AppError(422, `${opts.context} cannot be less than the vehicle's latest recorded reading of ${prev.meter} KM (${SOURCE_LABELS[prev.sourceType]} ${prev.ref}).`, { code: "METER_CONFLICT", latestMeter: prev.meter, latestSource: prev.sourceType, latestRef: prev.ref });
     }
     const nextResult = await client.query(`SELECT * FROM vehicle_meter_events
      WHERE vehicle_id = $1
@@ -131,7 +154,7 @@ export async function validateVehicleMeter(client, opts) {
      LIMIT 1`, [opts.vehicleId, opts.eventDate, eventInstant, ...params]);
     const next = nextResult.rowCount ? mapEvent(nextResult.rows[0]) : null;
     if (next && opts.newMeter > next.meter) {
-        throw new AppError(422, `${opts.context} of ${opts.newMeter} KM exceeds a later recorded reading of ${next.meter} KM (${SOURCE_LABELS[next.sourceType]} ${next.ref}) and would break the vehicle's chronological meter history.`, { nextMeter: next.meter, nextSource: next.sourceType, nextRef: next.ref });
+        throw new AppError(422, `${opts.context} of ${opts.newMeter} KM exceeds a later recorded reading of ${next.meter} KM (${SOURCE_LABELS[next.sourceType]} ${next.ref}) and would break the vehicle's chronological meter history.`, { code: "INVALID_METER_SEQUENCE", nextMeter: next.meter, nextSource: next.sourceType, nextRef: next.ref });
     }
 }
 /** Full ordered timeline for a vehicle — backs the Vehicle History UI. */

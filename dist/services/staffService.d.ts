@@ -156,7 +156,7 @@ export declare const staffService: {
     queuePayslipDelivery(channel: "email" | "whatsapp", ids: string[], payload: {
         language: string;
         subject?: string;
-        body: string;
+        body?: string;
     }, queuedBy: string): Promise<{
         sent: number;
         failed: number;
