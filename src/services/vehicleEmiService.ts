@@ -186,7 +186,12 @@ async function existingPaidStamps(
      ORDER BY installment_no`,
     [emiId]
   );
-  return result.rows.map((r) => (r.paid_at == null ? null : str(r.paid_at)));
+  return result.rows.map((r) => {
+    if (r.paid_at == null) return null;
+    // node-postgres returns timestamptz as a Date; String(date) is a locale
+    // string PostgreSQL cannot parse back, so persist the ISO form.
+    return r.paid_at instanceof Date ? r.paid_at.toISOString() : str(r.paid_at);
+  });
 }
 
 async function fetchEmi(client: Client, emiId: number): Promise<VehicleEMI> {

@@ -42,6 +42,8 @@ interface DeliveryRow extends Record<string, unknown> {
   box_no: number | null;
   shop_id: number | null;
   shop_name: string;
+  sub_shop_name: string | null;
+  load_no: number;
   bird_type_id: number | null;
   bird_type: string;
   birds: number;
@@ -204,12 +206,18 @@ async function loadDeliveries(
   tripId: number
 ): Promise<RateEntryDelivery[]> {
   const result = await client.query<DeliveryRow>(
-    `SELECT id, serial_no, box_no, shop_id, shop_name, bird_type_id, bird_type,
-            birds, weight, mortality, mort_kg, rate, amount, remarks, delivery_mode,
-            auto_capture_time
-     FROM trip_deliveries
-     WHERE ${RATEABLE_DELIVERY_WHERE}
-     ORDER BY auto_capture_time ASC NULLS LAST, serial_no ASC NULLS LAST, id ASC`,
+    `SELECT d.id, d.serial_no, d.box_no, d.shop_id, d.shop_name, d.sub_shop_name,
+            d.bird_type_id, d.bird_type, d.birds, d.weight, d.mortality, d.mort_kg,
+            d.rate, d.amount, d.remarks, d.delivery_mode, d.auto_capture_time,
+            COALESCE(l.leg_index, 1) AS load_no
+       FROM trip_deliveries d
+       LEFT JOIN trip_legs l ON l.id = d.leg_id AND l.trip_id = d.trip_id
+      WHERE d.trip_id = $1
+        AND COALESCE(d.shop_id, 0) > 0
+        AND COALESCE(d.birds, 0) > 0
+        AND COALESCE(d.weight, 0) > 0
+      ORDER BY COALESCE(l.leg_index, 1), d.auto_capture_time ASC NULLS LAST,
+               d.serial_no ASC NULLS LAST, d.id ASC`,
     [tripId]
   );
 
@@ -228,6 +236,8 @@ async function loadDeliveries(
       boxNo: numOrNull(r.box_no),
       shopId: numOrNull(r.shop_id),
       shopName: str(r.shop_name),
+      subShopName: str(r.sub_shop_name),
+      load: Math.max(1, num(r.load_no)),
       birdTypeId: numOrNull(r.bird_type_id),
       birdType: str(r.bird_type),
       birds: num(r.birds),
@@ -254,6 +264,8 @@ function mapTrip(
   const totalAmount = deliveries
     .filter((d) => d.rate != null)
     .reduce((sum, d) => sum + d.amount, 0);
+  const totalBirds = deliveries.reduce((sum, delivery) => sum + delivery.birds, 0);
+  const totalWeight = deliveries.reduce((sum, delivery) => sum + delivery.weight, 0);
 
   return {
     id: num(row.id),
@@ -264,8 +276,8 @@ function mapTrip(
     driverName: row.driver_name == null ? null : str(row.driver_name),
     supervisorName: row.supervisor_name == null ? null : str(row.supervisor_name),
     sourceFarm: row.source_farm == null ? null : str(row.source_farm),
-    totalBirds: num(row.total_birds),
-    totalWeight: num(row.total_weight),
+    totalBirds: deliveries.length ? totalBirds : num(row.total_birds),
+    totalWeight: deliveries.length ? Number(totalWeight.toFixed(2)) : num(row.total_weight),
     // Prefer Step-4 rateable shop count over the trip summary field (which can
     // still include pending `[ORDER]` plan stubs).
     totalShops: deliveries.length > 0 ? deliveries.length : num(row.total_shops),

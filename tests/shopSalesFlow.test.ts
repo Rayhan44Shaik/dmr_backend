@@ -148,10 +148,20 @@ async function addDelivery(
   birds: number,
   weight: number
 ): Promise<number> {
+  // Trip Entry (tripsService.save) always creates a leg-1 row and scopes
+  // trip_deliveries to it — mirror that here so hydrateLegs/loadTripExtras
+  // (leg-scoped queries) can actually find these seeded rows, matching real
+  // Trip Entry behavior instead of leaving leg_id NULL (invisible in
+  // Trip List once trip_legs exists for the trip).
+  const legRow = await pool.query<{ id: number }>(
+    `SELECT id FROM trip_legs WHERE trip_id = $1 AND leg_index = 1`,
+    [tripId]
+  );
+  const legId = legRow.rowCount ? legRow.rows[0].id : null;
   const result = await pool.query<{ id: number }>(
-    `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, mortality, rate, amount)
-     VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0) RETURNING id`,
-    [tripId, `SF-SALE-${seq}-${shopId}`, shopId, shopName, birds, weight]
+    `INSERT INTO trip_deliveries (trip_id, leg_id, sale_no, shop_id, shop_name, birds, weight, mortality, rate, amount)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0) RETURNING id`,
+    [tripId, legId, `SF-SALE-${seq}-${shopId}`, shopId, shopName, birds, weight]
   );
   return result.rows[0].id;
 }

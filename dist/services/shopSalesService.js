@@ -49,6 +49,7 @@ function mapDeliverySale(row) {
         saleDate: tripDate,
         shopId: row.shop_id == null ? null : num(row.shop_id),
         shopName: str(row.shop_name),
+        subShopName: str(row.sub_shop_name),
         birdTypeId: row.bird_type_id == null ? null : num(row.bird_type_id),
         birdType: str(row.bird_type),
         tripId: row.trip_id == null ? null : num(row.trip_id),
@@ -306,19 +307,25 @@ export const shopSalesService = {
             const weight = data.weight ?? num(cur.weight);
             const mortalityCount = data.mortality ?? num(cur.mortality);
             const mortalityWeight = num(cur.mort_kg ?? 0);
-            const others = await sumActiveDeliveries(client, trip.id, id);
-            assertWithinCapacity({
-                label: "birds",
-                available: trip.capacityBirds,
-                alreadyAllocated: others.birds + others.mortalityCount,
-                requested: birds + mortalityCount,
-            });
-            assertWithinCapacity({
-                label: "weight",
-                available: trip.capacityWeight,
-                alreadyAllocated: others.weight + others.mortalityWeight,
-                requested: weight + mortalityWeight,
-            });
+            // Quantity constraints are relevant only when a quantity changes.
+            // Re-validating unchanged quantities during a rate-only correction can
+            // reject legitimate legacy/multi-load rows whose trip header contains
+            // only the active load's pickup totals.
+            if (data.birds != null || data.weight != null || data.mortality != null) {
+                const others = await sumActiveDeliveries(client, trip.id, id);
+                assertWithinCapacity({
+                    label: "birds",
+                    available: trip.capacityBirds,
+                    alreadyAllocated: others.birds + others.mortalityCount,
+                    requested: birds + mortalityCount,
+                });
+                assertWithinCapacity({
+                    label: "weight",
+                    available: trip.capacityWeight,
+                    alreadyAllocated: others.weight + others.mortalityWeight,
+                    requested: weight + mortalityWeight,
+                });
+            }
             const result = await client.query(`UPDATE trip_deliveries SET
            bird_type_id = COALESCE($2, bird_type_id),
            bird_type = COALESCE($3, bird_type),

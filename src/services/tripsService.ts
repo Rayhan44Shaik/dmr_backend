@@ -484,6 +484,19 @@ function toTripSummary(row: Record<string, unknown>): TripSummary {
     }),
     { birds: 0, weight: 0, mortality: 0, mortalityWeight: 0, weightLoss: 0, shops: 0 }
   );
+  // Older completed trips and endpoints that do not attach the per-load
+  // aggregate must retain their persisted trip totals. Never replace valid
+  // list data with a synthetic all-zero reduction of an empty array.
+  const totals = loadSummaries.length > 0
+    ? completedTotals
+    : {
+        birds: base.totalBirdsDelivered || base.totalBirds,
+        weight: base.totalDeliveredWeight || base.totalWeight,
+        mortality: base.totalMortalityCount || base.totalMortality,
+        mortalityWeight: base.totalMortalityWeight,
+        weightLoss: base.weightLoss,
+        shops: base.totalShops,
+      };
   const flags = {
     startStepSubmitted: base.startStepSubmitted,
     farmStepSubmitted: base.farmStepSubmitted,
@@ -499,15 +512,15 @@ function toTripSummary(row: Record<string, unknown>): TripSummary {
     ...base,
     submittedLoadCount: Math.max(1, num(row.submitted_load_count) || 1),
     loadSummaries,
-    totalBirds: completedTotals.birds,
-    totalBirdsDelivered: completedTotals.birds,
-    totalWeight: completedTotals.weight,
-    totalDeliveredWeight: completedTotals.weight,
-    totalMortality: completedTotals.mortality,
-    totalMortalityCount: completedTotals.mortality,
-    totalMortalityWeight: completedTotals.mortalityWeight,
-    weightLoss: completedTotals.weightLoss,
-    totalShops: completedTotals.shops,
+    totalBirds: totals.birds,
+    totalBirdsDelivered: totals.birds,
+    totalWeight: totals.weight,
+    totalDeliveredWeight: totals.weight,
+    totalMortality: totals.mortality,
+    totalMortalityCount: totals.mortality,
+    totalMortalityWeight: totals.mortalityWeight,
+    weightLoss: totals.weightLoss,
+    totalShops: totals.shops,
     helpers: [],
     loaders: [],
     boxDetails: [],
@@ -1763,7 +1776,9 @@ export const tripsService = {
         filters.pagination.offset,
       ];
       const result = await query(
-        `SELECT * FROM trips ${where}
+        `SELECT trips.*
+                ${recentLoadSummarySelect}
+           FROM trips ${where}
          ORDER BY trip_date DESC, id DESC
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         pagedParams
@@ -1776,7 +1791,9 @@ export const tripsService = {
     }
 
     const result = await query(
-      `SELECT * FROM trips ${where} ORDER BY trip_date DESC, id DESC`,
+      `SELECT trips.*
+              ${recentLoadSummarySelect}
+         FROM trips ${where} ORDER BY trip_date DESC, id DESC`,
       params
     );
     return result.rows.map(toTripSummary);

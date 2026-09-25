@@ -36,8 +36,8 @@ async function cleanup(f: Fixture): Promise<void> {
 }
 async function makeShop(f: Fixture): Promise<number> {
   const r = await pool.query<{ id: number }>(
-    `INSERT INTO shops (shop_no, shop_name) VALUES ($1, $2) RETURNING id`,
-    [uniqueInt(), `rate-edit-shop-${uniqueInt()}`]
+    `INSERT INTO shops (shop_no, shop_number, shop_name, phone_number) VALUES ($1, $2, $3, $4) RETURNING id`,
+    [uniqueInt(), `S-${uniqueInt()}`, `rate-edit-shop-${uniqueInt()}`, `9${String(uniqueInt()).slice(-9).padStart(9, "0")}`]
   );
   f.shopIds.push(r.rows[0].id);
   return r.rows[0].id;
@@ -61,16 +61,28 @@ async function makeRateEditableTrip(
   );
   const tripId = t.rows[0].id;
   f.tripIds.push(tripId);
-  const d = await pool.query<{ id: number }>(
-    `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, rate)
-     VALUES ($1, $2, $3, $4, $5, $6, NULL)
+  const leg = await pool.query<{ id: number }>(
+    `INSERT INTO trip_legs (trip_id, leg_index, total_birds, dc_weight)
+     VALUES ($1, 1, 1000, 2000)
      RETURNING id`,
-    [tripId, `SALE-${uniqueInt()}`, shopId, "rate-edit-shop", opts.birds ?? 25, opts.weight ?? 48]
+    [tripId]
+  );
+  const d = await pool.query<{ id: number }>(
+    `INSERT INTO trip_deliveries (trip_id, leg_id, sale_no, shop_id, shop_name, birds, weight, rate)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)
+     RETURNING id`,
+    [tripId, leg.rows[0].id, `SALE-${uniqueInt()}`, shopId, "rate-edit-shop", opts.birds ?? 25, opts.weight ?? 48]
   );
   const deliveryId = d.rows[0].id;
   const rate = opts.initialRate ?? 90;
   await rateEntryService.save(tripId, { rates: [{ deliveryId, rate }] });
   await rateEntryService.lock(tripId, { lockedBy: "rate-edit-tester" });
+  if ((opts.ageOffsetMs ?? 0) > 0) {
+    await pool.query(
+      `UPDATE trips SET rate_locked_at = NOW() - ($2 || ' milliseconds')::interval WHERE id = $1`,
+      [tripId, String(opts.ageOffsetMs)]
+    );
+  }
   return { tripId, shopId, deliveryId };
 }
 
@@ -225,9 +237,29 @@ describe("Shop Sales rate editing (corrected rule): locked + within 10 days + â‚
     // Loaded capacity 50 birds; delivery already at 50.
     const { deliveryId } = await makeRateEditableTrip(f, { birds: 50 });
     await pool.query(`UPDATE trips SET total_birds = 50 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`, [deliveryId]);
+    await pool.query(`UPDATE trip_legs SET total_birds = 50 WHERE id = (SELECT leg_id FROM trip_deliveries WHERE id = $1)`, [deliveryId]);
     // A rate-only-labelled request that also sneaks in an over-capacity
     // birds value must still be rejected on the birds check.
     await assertStatus(shopSalesService.update(deliveryId, { rate: 100, birds: 999 }), 422);
+  });
+
+  test("16. Birds and weight edits use the delivery's own load capacity", async (t) => {
+    const f = newFixture();
+    t.after(() => cleanup(f));
+    const { tripId, deliveryId } = await makeRateEditableTrip(f, { birds: 25, weight: 48 });
+    await pool.query(
+      `UPDATE trip_legs SET total_birds = 30, dc_weight = 60
+        WHERE id = (SELECT leg_id FROM trip_deliveries WHERE id = $1)`,
+      [deliveryId]
+    );
+    // Simulate a multi-load trip header pointing at a different/current load.
+    // Validation must use this delivery's leg, not these header values.
+    await pool.query(`UPDATE trips SET total_birds = 0, dc_weight = 0 WHERE id = $1`, [tripId]);
+    const updated = await shopSalesService.update(deliveryId, { birds: 30, weight: 60 });
+    assert.equal(updated.birds, 30);
+    assert.equal(updated.weight, 60);
+    await assertStatus(shopSalesService.update(deliveryId, { birds: 31 }), 422);
+    await assertStatus(shopSalesService.update(deliveryId, { weight: 60.01 }), 422);
   });
 });
 

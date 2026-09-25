@@ -91,6 +91,7 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
     saleDate: tripDate,
     shopId: row.shop_id == null ? null : num(row.shop_id),
     shopName: str(row.shop_name),
+    subShopName: str(row.sub_shop_name),
     birdTypeId: row.bird_type_id == null ? null : num(row.bird_type_id),
     birdType: str(row.bird_type),
     tripId: row.trip_id == null ? null : num(row.trip_id),
@@ -134,7 +135,7 @@ const SALE_SELECT = `
 
 const PROTECTED_FIELDS = ["birds", "weight", "rate", "amount"] as const;
 
-async function lockTrip(client: Client, tripId: number): Promise<TripRow> {
+async function lockTrip(client: Client, tripId: number, legId?: number | null): Promise<TripRow> {
   const result = await client.query(
     `SELECT id, trip_no, status, deleted, approved_at, trip_date,
             total_birds, dc_weight
@@ -143,8 +144,19 @@ async function lockTrip(client: Client, tripId: number): Promise<TripRow> {
   );
   if (!result.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
   const row = result.rows[0];
-  const totalBirds = num(row.total_birds);
-  const dcWeight = num(row.dc_weight);
+  let totalBirds = num(row.total_birds);
+  let dcWeight = num(row.dc_weight);
+  if (legId != null) {
+    const leg = await client.query<{ total_birds: number | null; dc_weight: string | null }>(
+      `SELECT total_birds, dc_weight
+         FROM trip_legs
+        WHERE id = $1 AND trip_id = $2`,
+      [legId, tripId]
+    );
+    if (!leg.rowCount) throw new AppError(422, `Trip load for Shop Sale ${tripId} was not found`);
+    totalBirds = num(leg.rows[0].total_birds);
+    dcWeight = num(leg.rows[0].dc_weight);
+  }
   return {
     id: num(row.id),
     tripNo: str(row.trip_no),
@@ -425,26 +437,33 @@ export const shopSalesService = {
 
     return withTransaction(async (client) => {
       const tripId = await getDeliveryTripId(client, id);
-      const trip = await lockTrip(client, tripId);
+      const legId = cur.leg_id == null ? null : num(cur.leg_id);
+      const trip = await lockTrip(client, tripId, legId);
 
       const birds = data.birds ?? num(cur.birds);
       const weight = data.weight ?? num(cur.weight);
       const mortalityCount = data.mortality ?? num(cur.mortality);
       const mortalityWeight = num(cur.mort_kg ?? 0);
 
-      const others = await sumActiveDeliveries(client, trip.id, id);
-      assertWithinCapacity({
-        label: "birds",
-        available: trip.capacityBirds,
-        alreadyAllocated: others.birds + others.mortalityCount,
-        requested: birds + mortalityCount,
-      });
-      assertWithinCapacity({
-        label: "weight",
-        available: trip.capacityWeight,
-        alreadyAllocated: others.weight + others.mortalityWeight,
-        requested: weight + mortalityWeight,
-      });
+      // Quantity constraints are relevant only when a quantity changes.
+      // Re-validating unchanged quantities during a rate-only correction can
+      // reject legitimate legacy/multi-load rows whose trip header contains
+      // only the active load's pickup totals.
+      if (data.birds != null || data.weight != null || data.mortality != null) {
+        const others = await sumActiveDeliveries(client, trip.id, id, legId);
+        assertWithinCapacity({
+          label: "birds",
+          available: trip.capacityBirds,
+          alreadyAllocated: others.birds + others.mortalityCount,
+          requested: birds + mortalityCount,
+        });
+        assertWithinCapacity({
+          label: "weight",
+          available: trip.capacityWeight,
+          alreadyAllocated: others.weight + others.mortalityWeight,
+          requested: weight + mortalityWeight,
+        });
+      }
 
       const result = await client.query(
         `UPDATE trip_deliveries SET

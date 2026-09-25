@@ -167,7 +167,8 @@ export async function recalcTripDeliveryTotals(client: Client, tripId: number): 
 export async function sumActiveDeliveries(
   client: Client,
   tripId: number,
-  excludeId?: number
+  excludeId?: number,
+  legId?: number | null
 ): Promise<{ birds: number; weight: number; mortalityCount: number; mortalityWeight: number }> {
   const result = await client.query<{
     birds: string;
@@ -180,8 +181,11 @@ export async function sumActiveDeliveries(
             COALESCE(SUM(mortality), 0)::text AS mortality_count,
             COALESCE(SUM(mort_kg), 0)::text AS mortality_weight
        FROM trip_deliveries
-      WHERE trip_id = $1 AND deleted = FALSE ${excludeId ? "AND id <> $2" : ""}`,
-    excludeId ? [tripId, excludeId] : [tripId]
+      WHERE trip_id = $1
+        AND deleted = FALSE
+        ${excludeId ? `AND id <> $2` : ""}
+        ${legId != null ? `AND leg_id = $${excludeId ? 3 : 2}` : ""}`,
+    [tripId, ...(excludeId ? [excludeId] : []), ...(legId != null ? [legId] : [])]
   );
   const row = result.rows[0];
   return {

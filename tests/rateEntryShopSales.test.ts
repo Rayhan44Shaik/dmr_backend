@@ -478,11 +478,12 @@ describe("Duplicate Shop Sale prevention", () => {
       totalBirds: 1000,
       dcWeight: 1800,
     });
-    const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 0, 0);
+    const dA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 200, 350);
     await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
       rates: [{ deliveryId: dA, rate: 100 }],
     });
-    await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
+    const lock = await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
+    assert.equal(lock.status, 200, JSON.stringify(lock.body));
 
     const first = await postJson(baseUrl, "/api/operations/shop-sales", {
       tripId: trip.id,

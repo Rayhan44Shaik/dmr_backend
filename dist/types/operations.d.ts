@@ -23,6 +23,7 @@ export interface ShopRate {
     id: number;
     shopId: number | null;
     shopName: string;
+    subShopName?: string;
     birdTypeId: number | null;
     birdType: string;
     rate: number;
@@ -47,6 +48,7 @@ export interface ShopSale {
     saleDate: string;
     shopId: number | null;
     shopName: string;
+    subShopName?: string;
     birdTypeId: number | null;
     birdType: string;
     tripId: number | null;
@@ -205,6 +207,8 @@ export interface RateEntryDelivery {
     boxNo: number | null;
     shopId: number | null;
     shopName: string;
+    subShopName: string;
+    load: number;
     birdTypeId: number | null;
     birdType: string;
     birds: number;

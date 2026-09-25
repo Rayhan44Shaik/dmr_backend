@@ -47,7 +47,7 @@ describe("farmPaymentsService", () => {
     const tripId = trip.rows[0].id;
 
     const listed = await farmPaymentsService.list();
-    const row = listed.find((r) => r.tripId === tripId);
+    assert.ok(Array.isArray(listed), "default list stays a bare array"); const row = listed.find((r) => r.tripId === tripId);
     assert.ok(row);
     assert.equal(row.rate, 90);
     assert.equal(row.amount, 22545);
