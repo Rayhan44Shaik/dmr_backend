@@ -149,6 +149,7 @@ describe("Mortality analysis", () => {
     await addDelivery(trip.id, shop2.id, shop2.shopName,
       { birds: 300, weight: 500, mortality: 5, mortKg: 10, amount: 28000, rate: 56 });
     await recalcTripDeliveryTotals(pool as never, trip.id);
+    await pool.query(`UPDATE trips SET weight_loss = -57621 WHERE id = $1`, [trip.id]);
 
     const { status, body } = await getJson(
       baseUrl, `/api/operations/mortality-analysis?fromDate=2026-04-10&toDate=2026-04-10`
@@ -229,10 +230,14 @@ describe("Mortality analysis", () => {
 
   it("3. pending, unsubmitted and soft-deleted trips are excluded", async () => {
     const sup = await seedSupport("C");
-    const pending = await seedTrip(sup, { tripDate: "2026-04-12", status: "Pending", expenses: false, totalBirds: 100, dcWeight: 200 });
+    const pending = await seedTrip(sup, { tripDate: "2026-04-12", status: "Pending", expenses: true, totalBirds: 100, dcWeight: 200 });
     const before = await getJson(baseUrl, "/api/operations/mortality-analysis?fromDate=2026-04-12&toDate=2026-04-12");
     assert.equal(before.body.data.length, 0);
     assert.equal(before.body.kpis.totalTrips, 0);
+
+    const unsubmitted = await seedTrip(sup, { tripDate: "2026-04-12", status: "Completed", expenses: false, totalBirds: 100, dcWeight: 200 });
+    const afterUnsubmitted = await getJson(baseUrl, "/api/operations/mortality-analysis?fromDate=2026-04-12&toDate=2026-04-12");
+    assert.ok(!afterUnsubmitted.body.data.some((r: { tripId: number }) => r.tripId === unsubmitted.id));
 
     const gone = await seedTrip(sup, { tripDate: "2026-04-12", totalBirds: 100, dcWeight: 200 });
     await pool.query(`UPDATE trips SET deleted = TRUE WHERE id = $1`, [gone.id]);

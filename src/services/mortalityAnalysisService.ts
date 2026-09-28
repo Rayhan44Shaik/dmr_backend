@@ -44,12 +44,15 @@ export interface MortalityAnalysisQuery {
   pagination?: PaginationParams | null;
 }
 
+const FARM_WEIGHT_SQL = "COALESCE(NULLIF(t.farm_load_weight, 0), t.dc_weight, 0)";
+const WEIGHT_LOSS_SQL = `GREATEST(0, ${FARM_WEIGHT_SQL} - COALESCE(t.total_delivered_weight, 0) - COALESCE(t.total_mortality_weight, 0))`;
+
 const SORT_COLUMNS: Record<string, string> = {
   tripDate: "t.trip_date",
   tripNo: "t.trip_no",
   farmBirds: "COALESCE(NULLIF(t.farm_bird_count, 0), t.total_birds)",
   farmWeight: "COALESCE(NULLIF(t.farm_load_weight, 0), t.dc_weight)",
-  weightLoss: "t.weight_loss",
+  weightLoss: WEIGHT_LOSS_SQL,
   mortalityCount: "t.total_mortality_count",
   sourceFarm: "t.source_farm",
   supervisorName: "t.supervisor_name",
@@ -112,7 +115,7 @@ export const mortalityAnalysisService = {
   async list(filters: MortalityAnalysisQuery = {}) {
     const clauses = [
       `COALESCE(t.deleted, FALSE) = FALSE`,
-      `t.status IN ('Completed', 'Pending')`,
+      `t.status = 'Completed'`,
       `t.expenses_step_submitted = TRUE`,
     ];
     const params: unknown[] = [];
@@ -145,7 +148,7 @@ export const mortalityAnalysisService = {
          COALESCE(SUM(COALESCE(NULLIF(t.farm_load_weight, 0), t.dc_weight)), 0)::float AS farm_weight,
          COALESCE(SUM(t.total_delivered_weight), 0)::float AS delivered_weight,
          COALESCE(SUM(t.total_mortality_weight), 0)::float AS mortality_weight,
-         COALESCE(SUM(t.weight_loss), 0)::float AS weight_loss
+         COALESCE(SUM(${WEIGHT_LOSS_SQL}), 0)::float AS weight_loss
        FROM trips t
        ${where}`,
       params
@@ -165,7 +168,7 @@ export const mortalityAnalysisService = {
       weightLossPercentage: num(kpi.farm_weight) > 0 ? Number(((num(kpi.weight_loss) / num(kpi.farm_weight)) * 100).toFixed(2)) : 0,
     };
 
-    const optionRows = await query(`SELECT DISTINCT source_farm, supervisor_name FROM trips WHERE COALESCE(deleted,FALSE)=FALSE AND expenses_step_submitted=TRUE`);
+    const optionRows = await query(`SELECT DISTINCT source_farm, supervisor_name FROM trips WHERE COALESCE(deleted,FALSE)=FALSE AND status='Completed' AND expenses_step_submitted=TRUE`);
     const filterOptions = {
       farms: [...new Set(optionRows.rows.map((row) => String(row.source_farm ?? "")).filter(Boolean))].sort(),
       supervisors: [...new Set(optionRows.rows.map((row) => String(row.supervisor_name ?? "")).filter(Boolean))].sort(),
@@ -177,10 +180,10 @@ export const mortalityAnalysisService = {
         COALESCE(NULLIF(t.farm_bird_count, 0), t.total_birds) AS farm_birds,
         COALESCE(NULLIF(t.farm_load_weight, 0), t.dc_weight) AS farm_weight,
         t.total_birds_delivered, t.total_delivered_weight,
-        t.total_mortality_count, t.total_mortality_weight, t.weight_loss,
+        t.total_mortality_count, t.total_mortality_weight, ${WEIGHT_LOSS_SQL} AS weight_loss,
         (SELECT COUNT(DISTINCT d.shop_id) FROM trip_deliveries d WHERE d.trip_id=t.id AND COALESCE(d.deleted,FALSE)=FALSE) AS delivery_shops,
         CASE WHEN COALESCE(NULLIF(t.farm_bird_count,0),t.total_birds,0)>0 THEN (t.total_mortality_count*100.0/COALESCE(NULLIF(t.farm_bird_count,0),t.total_birds)) ELSE 0 END AS mortality_percentage,
-        CASE WHEN COALESCE(NULLIF(t.farm_load_weight,0),t.dc_weight,0)>0 THEN (t.weight_loss*100.0/COALESCE(NULLIF(t.farm_load_weight,0),t.dc_weight)) ELSE 0 END AS weight_loss_percentage
+        CASE WHEN ${FARM_WEIGHT_SQL}>0 THEN (${WEIGHT_LOSS_SQL}*100.0/${FARM_WEIGHT_SQL}) ELSE 0 END AS weight_loss_percentage
       FROM trips t
       ${where}
       ORDER BY ${sortCol} ${sortDir}, t.id ASC`;

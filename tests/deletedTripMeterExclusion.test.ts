@@ -18,7 +18,7 @@ await applySchema();
 const { pool } = await import("../src/config/db.js");
 const { mastersService } = await import("../src/services/mastersService.js");
 const { tripsService } = await import("../src/services/tripsService.js");
-const { validateVehicleMeter } = await import("../src/utils/vehicleMeterLedger.js");
+const { getLatestVehicleMeter, validateVehicleMeter } = await import("../src/utils/vehicleMeterLedger.js");
 
 after(async () => {
   await testDb.close();
@@ -40,8 +40,8 @@ describe("deleted trip meter exclusion", () => {
 
     // Live trip with a modest opening meter (today's business date).
     const live = await pool.query(
-      `INSERT INTO trips (trip_no, trip_date, vehicle_id, opening_meter)
-       VALUES ('TR-LIVE-001', CURRENT_DATE, $1, 90000)
+      `INSERT INTO trips (trip_no, trip_date, vehicle_id, opening_meter, status)
+       VALUES ('TR-LIVE-001', CURRENT_DATE, $1, 90000, 'Pending')
        RETURNING id`,
       [vehicle.id]
     );
@@ -72,6 +72,12 @@ describe("deleted trip meter exclusion", () => {
     assert.ok(latest, "expected a latest meter reading");
     assert.notEqual(latest!.closingMeter, 205005);
     assert.equal(latest!.closingMeter, 90000);
+
+    // Fleet Maintenance uses the universal endpoint directly and must observe
+    // the exact same deleted-trip exclusion as Trip Step 1.
+    const maintenanceLatest = await getLatestVehicleMeter(null, vehicle.id);
+    assert.ok(maintenanceLatest);
+    assert.equal(maintenanceLatest!.meter, 90000);
   });
 
   it("excludes the edited trip's own meters from last-meter lookup", async () => {

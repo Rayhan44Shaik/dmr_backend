@@ -59,7 +59,7 @@ export declare function recalcTripDeliveryTotals(client: Client, tripId: number)
  * (the sale being edited). Farm capacity is consumed by delivered birds/
  * weight AND mortality together — a bird/kg either reaches a shop or is
  * recorded as mortality, but either way it came out of the farm load. */
-export declare function sumActiveDeliveries(client: Client, tripId: number, excludeId?: number): Promise<{
+export declare function sumActiveDeliveries(client: Client, tripId: number, excludeId?: number, legId?: number | null): Promise<{
     birds: number;
     weight: number;
     mortalityCount: number;

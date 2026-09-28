@@ -116,13 +116,16 @@ export async function recalcTripDeliveryTotals(client, tripId) {
  * (the sale being edited). Farm capacity is consumed by delivered birds/
  * weight AND mortality together — a bird/kg either reaches a shop or is
  * recorded as mortality, but either way it came out of the farm load. */
-export async function sumActiveDeliveries(client, tripId, excludeId) {
+export async function sumActiveDeliveries(client, tripId, excludeId, legId) {
     const result = await client.query(`SELECT COALESCE(SUM(birds), 0)::text AS birds,
             COALESCE(SUM(weight), 0)::text AS weight,
             COALESCE(SUM(mortality), 0)::text AS mortality_count,
             COALESCE(SUM(mort_kg), 0)::text AS mortality_weight
        FROM trip_deliveries
-      WHERE trip_id = $1 AND deleted = FALSE ${excludeId ? "AND id <> $2" : ""}`, excludeId ? [tripId, excludeId] : [tripId]);
+      WHERE trip_id = $1
+        AND deleted = FALSE
+        ${excludeId ? `AND id <> $2` : ""}
+        ${legId != null ? `AND leg_id = $${excludeId ? 3 : 2}` : ""}`, [tripId, ...(excludeId ? [excludeId] : []), ...(legId != null ? [legId] : [])]);
     const row = result.rows[0];
     return {
         birds: Number(row.birds),

@@ -144,12 +144,9 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
       supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int().positive(),
       helpers: crewNames,
       loaders: crewNames,
-      // Starting Meter / Advance are OPTIONAL. Empty/blank/null must pass through
-      // as null so the backend meter validator is skipped (and the value is
-      // persisted as NULL). A non-null value is still checked as a number.
       openingMeter: z.preprocess(
-        (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-        z.number().nonnegative().nullable().optional()
+        (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+        z.coerce.number({ required_error: "Opening meter is required" }).positive("Opening meter is required")
       ),
       advanceAmount: z.preprocess(
         (v) => (typeof v === "string" && v.trim() === "" ? null : v),

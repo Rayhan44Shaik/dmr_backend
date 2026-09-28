@@ -5,7 +5,7 @@ import { assertEmployeeExists, assertVehicleExists, } from "../utils/fkValidatio
 import { detectFileMimeType, MAINTENANCE_DOCUMENT_MAX_BYTES, MAINTENANCE_DOCUMENT_MAX_FILES, sanitizeFileName, } from "../utils/fleetMultipart.js";
 import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
-import { assertMaintenanceDateEditable } from "../utils/fleetMaintenanceLock.js";
+import { assertMaintenanceRecordEditable } from "../utils/fleetMaintenanceLock.js";
 import { lockVehicleForMeterWrite, preciseIsoOrUndefined, validateVehicleMeter, } from "../utils/vehicleMeterLedger.js";
 import { fleetMaintenanceApproveSchema, fleetMaintenanceBodySchema, fleetMaintenanceRejectSchema, fleetMaintenanceUpdateSchema, parseBody, } from "../validation/fleet.js";
 function mapDocumentMeta(row) {
@@ -338,9 +338,6 @@ export const fleetMaintenanceService = {
                 }
                 await assertVehicleExists(data.vehicleId, client);
                 await assertEmployeeExists(data.driverId, "Driver", client);
-                // 10-day lock: cannot backdate-create a maintenance record for a date
-                // more than EDIT_WINDOW_DAYS in the past (mirrors Shop Sales' window).
-                assertMaintenanceDateEditable(data.date);
                 const maintenanceType = normalizeMaintenanceType(data.maintenanceType);
                 if (!maintenanceType) {
                     throw new AppError(400, "Maintenance type is required.");
@@ -408,14 +405,11 @@ export const fleetMaintenanceService = {
                 const existingRow = existing.rows[0];
                 await assertVehicleExists(data.vehicleId, client);
                 await assertEmployeeExists(data.driverId, "Driver", client);
-                // 10-day lock: the existing record's date must still be within the
-                // edit window, and (if being changed) the new date must be too.
+                // The correction window starts when this bill was entered, not on its
+                // maintenance date. A historical bill date therefore remains valid.
                 const originalDate = dateOnly(existingRow.maintenance_date) ?? "";
                 const effectiveDate = data.date ?? originalDate;
-                assertMaintenanceDateEditable(originalDate, str(existingRow.bill_no));
-                if (effectiveDate !== originalDate) {
-                    assertMaintenanceDateEditable(effectiveDate, str(existingRow.bill_no));
-                }
+                assertMaintenanceRecordEditable(existingRow.created_at, str(existingRow.bill_no));
                 // Universal vehicle meter validation, excluding this record's own
                 // previously-persisted reading so an edit never compares against itself.
                 if (data.currentKM != null || data.vehicleId != null) {
@@ -556,11 +550,11 @@ export const fleetMaintenanceService = {
     },
     async softDelete(id, reason) {
         return withTransaction(async (client) => {
-            const existing = await client.query(`SELECT maintenance_date, bill_no FROM fleet_maintenance
+            const existing = await client.query(`SELECT created_at, bill_no FROM fleet_maintenance
          WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`, [id]);
             if (!existing.rowCount)
                 throw new AppError(404, "Maintenance record not found");
-            assertMaintenanceDateEditable(dateOnly(existing.rows[0].maintenance_date) ?? "", str(existing.rows[0].bill_no));
+            assertMaintenanceRecordEditable(existing.rows[0].created_at, str(existing.rows[0].bill_no));
             const result = await client.query(`UPDATE fleet_maintenance SET
            deleted = TRUE,
            deleted_reason = $2,

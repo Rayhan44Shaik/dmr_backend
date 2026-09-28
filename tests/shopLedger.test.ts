@@ -224,6 +224,35 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     assert.equal(ledger.data[1].referenceNo, c.collectionNo);
   });
 
+  it("2b. Sale rows carry the Step 4 sub-shop name and remark into the ledger", async () => {
+    const { shop, tripId } = await seedShopWithDebit(0, 5000, "2026-08-07");
+    const delivery = await pool.query<{ id: number }>(
+      `UPDATE trip_deliveries
+          SET sub_shop_name = $2, remarks = $3
+        WHERE trip_id = $1 AND shop_id = $4
+        RETURNING id`,
+      [tripId, "Counter B", "Morning delivery", shop.id]
+    );
+    await pool.query(
+      `INSERT INTO shop_ledger
+         (shop_id, entry_date, entry_type, reference_type, reference_id, debit, credit, note)
+       VALUES ($1, '2026-08-07', 'correction', 'shop_sale', $2, 100, 0, 'Rate adjusted')`,
+      [shop.id, delivery.rows[0].id]
+    );
+
+    const ledger = await shopLedgerService.list({
+      shopId: shop.id,
+      fromDate: "2026-08-07",
+      toDate: "2026-08-07",
+    });
+
+    assert.equal(ledger.data.length, 1, "sale corrections must not create duplicate ledger rows");
+    assert.equal(ledger.data[0].subShopName, "Counter B");
+    assert.equal(ledger.data[0].remarks, "Morning delivery");
+    assert.equal(ledger.data[0].type, "sale");
+    assert.equal(ledger.data[0].debit, 5100, "original sale and adjustment are merged");
+  });
+
   it("3. Custom date range is complete — a late range returns only its matching tail", async () => {
     const { shop } = await seedShopWithDebit(10000, 5000, "2026-08-06");
     const c = await collectionEntryService.create({

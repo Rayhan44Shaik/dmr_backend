@@ -33,6 +33,10 @@ export interface ShopLedgerRow {
   id: number;
   shopId: number | null;
   shopName: string;
+  /** Step 4 delivery sub-name, present for sale rows only. */
+  subShopName: string;
+  /** Step 4 delivery remark, present for sale rows only. */
+  remarks: string;
   date: string;
   type: LedgerEntryType;
   referenceType: string;
@@ -64,14 +68,27 @@ export interface ShopLedgerResponse {
 }
 
 function mapRow(row: Record<string, unknown>, openingBalance: number): ShopLedgerRow {
-  const type = str(row.entry_type) as LedgerEntryType;
+  const storedType = str(row.entry_type) as LedgerEntryType;
+  const referenceType = str(row.reference_type);
+  // Adjustments remain separate accounting rows internally, but the ledger is
+  // a business statement: a Shop Sales adjustment is still a Sale and a
+  // collection adjustment is still a Collection. Never expose "Correction"
+  // as a third transaction kind to ledger consumers.
+  const type: LedgerEntryType =
+    storedType !== "correction"
+      ? storedType
+      : referenceType === "collection"
+        ? "collection"
+        : "sale";
   return {
     id: num(row.id),
     shopId: row.shop_id == null ? null : num(row.shop_id),
     shopName: str(row.shop_name),
+    subShopName: str(row.sub_shop_name),
+    remarks: str(row.delivery_remarks),
     date: dateOnly(row.entry_date) ?? "",
     type,
-    referenceType: str(row.reference_type),
+    referenceType,
     referenceId: num(row.reference_id),
     referenceNo: str(row.ref_no),
     description: str(row.note),
@@ -92,8 +109,21 @@ function mapRow(row: Record<string, unknown>, openingBalance: number): ShopLedge
 const DATA_SELECT = `
   WITH txs AS (
     SELECT l.id, l.shop_id, l.entry_date, l.entry_type, l.reference_type,
-           l.reference_id, l.debit, l.credit, l.note, l.created_at,
+           l.reference_id,
+           CASE WHEN l.reference_type = 'shop_sale'
+                THEN GREATEST(COALESCE(lsa.net_amount, 0), 0)
+                WHEN l.reference_type = 'trip'
+                THEN GREATEST((l.debit - l.credit) + COALESCE(lta.net_adjustment, 0), 0)
+                ELSE l.debit END AS debit,
+           CASE WHEN l.reference_type = 'shop_sale'
+                THEN GREATEST(-COALESCE(lsa.net_amount, 0), 0)
+                WHEN l.reference_type = 'trip'
+                THEN GREATEST(-((l.debit - l.credit) + COALESCE(lta.net_adjustment, 0)), 0)
+                ELSE l.credit END AS credit,
+           l.note, l.created_at,
            s.shop_name,
+           COALESCE(dd.sub_shop_name, dt.sub_shop_name, '') AS sub_shop_name,
+           COALESCE(dd.remarks, dt.delivery_remarks, '') AS delivery_remarks,
            COALESCE(NULLIF(dd.sale_no, ''), NULLIF(tt.trip_no, ''),
                     NULLIF(c.collection_no, ''), '') AS ref_no,
            COALESCE(dd.birds, dt.birds, 0)::numeric AS birds,
@@ -108,9 +138,27 @@ const DATA_SELECT = `
     LEFT JOIN trip_deliveries dd
            ON l.reference_type = 'shop_sale' AND dd.id = l.reference_id
     LEFT JOIN LATERAL (
+      SELECT COALESCE(SUM(l2.debit - l2.credit), 0)::numeric AS net_amount
+      FROM shop_ledger l2
+      WHERE l2.shop_id = l.shop_id
+        AND l2.reference_type = 'shop_sale'
+        AND l2.reference_id = l.reference_id
+    ) lsa ON l.reference_type = 'shop_sale'
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(SUM(l4.debit - l4.credit), 0)::numeric AS net_adjustment
+      FROM shop_ledger l4
+      JOIN trip_deliveries d4 ON d4.id = l4.reference_id
+      WHERE l4.shop_id = l.shop_id
+        AND l4.reference_type = 'shop_sale'
+        AND l4.entry_type = 'correction'
+        AND d4.trip_id = l.reference_id
+    ) lta ON l.reference_type = 'trip'
+    LEFT JOIN LATERAL (
       SELECT COALESCE(SUM(d3.birds), 0)::numeric AS birds,
              COALESCE(SUM(d3.weight), 0)::numeric AS weight,
-             COALESCE(MAX(d3.rate), 0)::numeric AS rate
+             COALESCE(MAX(d3.rate), 0)::numeric AS rate,
+             COALESCE(STRING_AGG(DISTINCT NULLIF(BTRIM(d3.sub_shop_name), ''), ', '), '') AS sub_shop_name,
+             COALESCE(STRING_AGG(DISTINCT NULLIF(BTRIM(d3.remarks), ''), ', '), '') AS delivery_remarks
       FROM trip_deliveries d3
       WHERE d3.trip_id = l.reference_id
         AND d3.shop_id = l.shop_id
@@ -121,6 +169,36 @@ const DATA_SELECT = `
     WHERE ($1::int IS NULL OR l.shop_id = $1::int)
       AND ($2::date IS NULL OR l.entry_date >= $2::date)
       AND ($3::date IS NULL OR l.entry_date <= $3::date)
+      AND (
+        l.reference_type <> 'shop_sale'
+        OR (
+          l.id = (
+            SELECT MIN(l3.id)
+            FROM shop_ledger l3
+            WHERE l3.shop_id = l.shop_id
+              AND l3.reference_type = 'shop_sale'
+              AND l3.reference_id = l.reference_id
+          )
+          AND (
+            EXISTS (
+              SELECT 1 FROM shop_ledger ls
+              WHERE ls.shop_id = l.shop_id
+                AND ls.reference_type = 'shop_sale'
+                AND ls.reference_id = l.reference_id
+                AND ls.entry_type = 'sale'
+            )
+            OR NOT EXISTS (
+              SELECT 1
+              FROM trip_deliveries dx
+              JOIN shop_ledger lt
+                ON lt.shop_id = l.shop_id
+               AND lt.reference_type = 'trip'
+               AND lt.reference_id = dx.trip_id
+              WHERE dx.id = l.reference_id
+            )
+          )
+        )
+      )
   )
   SELECT t.*,
          SUM(t.debit - t.credit) OVER (
@@ -137,6 +215,36 @@ const COUNT_SELECT = `
   WHERE ($1::int IS NULL OR l.shop_id = $1::int)
     AND ($2::date IS NULL OR l.entry_date >= $2::date)
     AND ($3::date IS NULL OR l.entry_date <= $3::date)
+    AND (
+      l.reference_type <> 'shop_sale'
+      OR (
+        l.id = (
+          SELECT MIN(l2.id)
+          FROM shop_ledger l2
+          WHERE l2.shop_id = l.shop_id
+            AND l2.reference_type = 'shop_sale'
+            AND l2.reference_id = l.reference_id
+        )
+        AND (
+          EXISTS (
+            SELECT 1 FROM shop_ledger ls
+            WHERE ls.shop_id = l.shop_id
+              AND ls.reference_type = 'shop_sale'
+              AND ls.reference_id = l.reference_id
+              AND ls.entry_type = 'sale'
+          )
+          OR NOT EXISTS (
+            SELECT 1
+            FROM trip_deliveries dx
+            JOIN shop_ledger lt
+              ON lt.shop_id = l.shop_id
+             AND lt.reference_type = 'trip'
+             AND lt.reference_id = dx.trip_id
+            WHERE dx.id = l.reference_id
+          )
+        )
+      )
+    )
 `;
 
 /** Balance at the very start of the range (opening + entries strictly BEFORE fromDate). */

@@ -22,6 +22,44 @@ const SOURCE_LABELS = {
     FUEL: "Fuel bill",
     MAINTENANCE: "Maintenance entry",
 };
+/**
+ * A meter event belonging to a soft-deleted trip must never anchor another
+ * reading. Keep this guard at query time as well as in the SQL view: production
+ * databases can briefly run newer application code before the latest view
+ * migration is applied, and trip-linked fuel is otherwise especially easy to
+ * leak into the latest-reading result.
+ *
+ * All live workflow states are deliberately accepted. In business terms these
+ * are the pending/in-progress and completed trips; only deleted trip data is
+ * retired from the ledger.
+ */
+const LIVE_TRIP_EVENT_CLAUSE = `
+  AND (
+    source_type NOT IN ('TRIP_START', 'TRIP_END')
+    OR EXISTS (
+      SELECT 1 FROM trips live_trip
+       WHERE live_trip.id::text = vehicle_meter_events.record_id
+         AND COALESCE(live_trip.deleted, FALSE) = FALSE
+         AND live_trip.status <> 'Deleted'
+    )
+  )
+  AND (
+    source_type <> 'FUEL'
+    OR NOT EXISTS (
+      SELECT 1 FROM fuel_expenses linked_fuel
+       WHERE linked_fuel.id::text = vehicle_meter_events.record_id
+         AND linked_fuel.trip_id IS NOT NULL
+    )
+    OR EXISTS (
+      SELECT 1
+        FROM fuel_expenses linked_fuel
+        JOIN trips live_trip ON live_trip.id = linked_fuel.trip_id
+       WHERE linked_fuel.id::text = vehicle_meter_events.record_id
+         AND COALESCE(linked_fuel.deleted, FALSE) = FALSE
+         AND COALESCE(live_trip.deleted, FALSE) = FALSE
+         AND live_trip.status <> 'Deleted'
+    )
+  )`;
 function mapEvent(row) {
     return {
         vehicleId: num(row.vehicle_id),
@@ -80,6 +118,7 @@ export async function getLatestVehicleMeter(client, vehicleId, excludeTripId) {
     }
     const result = await run(client, `SELECT * FROM vehicle_meter_events
      WHERE vehicle_id = $1
+     ${LIVE_TRIP_EVENT_CLAUSE}
      ${exclude}
      ORDER BY event_date DESC, event_instant DESC, created_at DESC, record_id DESC
      LIMIT 1`, params);
@@ -91,6 +130,8 @@ export async function getLatestVehicleMeter(client, vehicleId, excludeTripId) {
 export async function listLatestVehicleMeters() {
     const result = await query(`SELECT DISTINCT ON (vehicle_id) vehicle_id, meter
      FROM vehicle_meter_events
+     WHERE TRUE
+     ${LIVE_TRIP_EVENT_CLAUSE}
      ORDER BY vehicle_id, event_date DESC, event_instant DESC, created_at DESC, record_id DESC`);
     return result.rows.map((row) => ({ vehicleId: num(row.vehicle_id), meter: num(row.meter) }));
 }
@@ -138,6 +179,7 @@ export async function validateVehicleMeter(client, opts) {
     }
     const prevResult = await client.query(`SELECT * FROM vehicle_meter_events
      WHERE vehicle_id = $1
+       ${LIVE_TRIP_EVENT_CLAUSE}
        AND (event_date, event_instant) <= ($2::date, $3::timestamptz)
        ${clause}
      ORDER BY event_date DESC, event_instant DESC, created_at DESC, record_id DESC
@@ -148,6 +190,7 @@ export async function validateVehicleMeter(client, opts) {
     }
     const nextResult = await client.query(`SELECT * FROM vehicle_meter_events
      WHERE vehicle_id = $1
+       ${LIVE_TRIP_EVENT_CLAUSE}
        AND (event_date, event_instant) > ($2::date, $3::timestamptz)
        ${clause}
      ORDER BY event_date ASC, event_instant ASC, created_at ASC, record_id ASC
@@ -187,8 +230,8 @@ export async function listVehicleMeterHistory(vehicleId) {
            SELECT 1
            FROM trips t
            WHERE t.id::text = vme.record_id
-             AND t.status IN ('Approved', 'Completed')
              AND COALESCE(t.deleted, FALSE) = FALSE
+             AND t.status <> 'Deleted'
          )
        )
        AND (
@@ -205,8 +248,8 @@ export async function listVehicleMeterHistory(vehicleId) {
            JOIN trips t ON t.id = fe.trip_id
            WHERE fe.id::text = vme.record_id
              AND fe.source_type = 'TRIP'
-             AND t.status IN ('Approved', 'Completed')
              AND COALESCE(t.deleted, FALSE) = FALSE
+             AND t.status <> 'Deleted'
          )
        )
      ORDER BY vme.event_date ASC, vme.event_instant ASC, vme.created_at ASC, vme.record_id ASC`, [vehicleId]);

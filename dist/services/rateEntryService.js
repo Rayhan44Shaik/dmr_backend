@@ -18,13 +18,13 @@ const ELIGIBLE_BY_ID = `
     AND COALESCE(t.rate_completed, FALSE) = FALSE
 `;
 /** Same shops as Trip List Step 4 cards: captured deliveries only.
- * Pending `[ORDER]` plan stubs (0 birds / 0 kg) stay out of Rate Entry.
+ * Pending `[ORDER]` plan stubs (0 birds AND 0 kg) stay out of Rate Entry.
  * Captured order-taken shops (`[ORDER]` + birds/weight) are included. */
 const RATEABLE_DELIVERY_WHERE = `
   trip_id = $1
   AND COALESCE(shop_id, 0) > 0
-  AND COALESCE(birds, 0) > 0
-  AND COALESCE(weight, 0) > 0
+  AND (COALESCE(birds, 0) > 0 OR COALESCE(weight, 0) > 0) AND COALESCE(deleted, FALSE) = FALSE
+
 `;
 function marketKey(shopId, birdTypeId) {
     return `${shopId ?? "null"}::${birdTypeId ?? "null"}`;
@@ -137,8 +137,8 @@ async function loadDeliveries(client, tripId) {
        LEFT JOIN trip_legs l ON l.id = d.leg_id AND l.trip_id = d.trip_id
       WHERE d.trip_id = $1
         AND COALESCE(d.shop_id, 0) > 0
-        AND COALESCE(d.birds, 0) > 0
-        AND COALESCE(d.weight, 0) > 0
+        AND (COALESCE(d.birds, 0) > 0 OR COALESCE(d.weight, 0) > 0) AND COALESCE(d.deleted, FALSE) = FALSE
+
       ORDER BY COALESCE(l.leg_index, 1), d.auto_capture_time ASC NULLS LAST,
                d.serial_no ASC NULLS LAST, d.id ASC`, [tripId]);
     const pairs = result.rows.map((r) => ({

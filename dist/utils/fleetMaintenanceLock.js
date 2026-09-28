@@ -1,34 +1,25 @@
 import { AppError } from "../middleware/errorHandler.js";
 const EDIT_WINDOW_DAYS = 10;
 /**
- * Fleet Maintenance 10-day edit/delete window, anchored on the record's
- * business date (maintenance_date) — mirrors tripDeliverySync.ts's pattern for
- * Shop Sales, which anchors on the trip's business event rather than a system
- * timestamp. "10 days after this maintenance happened" is the business rule:
- * you cannot backdate-create, edit, or delete a maintenance record for a date
- * more than EDIT_WINDOW_DAYS in the past.
- *
- * This was previously enforced only in the frontend (maintenanceHelpers.ts
- * isEditable(), keyed off createdAt) and was trivially bypassed via direct API
- * calls — this is the first backend enforcement of it.
+ * Fleet Maintenance 10-day edit/delete window, anchored on created_at — the
+ * moment the bill was entered. Historical bill dates are valid on CREATE; once
+ * saved, that record may be corrected or deleted for ten days from entry.
  */
-export function maintenanceEditWindowExpiresAt(maintenanceDate) {
-    const expires = new Date(maintenanceDate);
-    expires.setDate(expires.getDate() + EDIT_WINDOW_DAYS);
+export function maintenanceEditWindowExpiresAt(createdAt) {
+    const created = createdAt instanceof Date ? createdAt : new Date(createdAt);
+    const expires = new Date(created.getTime() + EDIT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
     return expires;
 }
-export function isMaintenanceDateWithinEditWindow(maintenanceDate) {
-    return new Date() <= maintenanceEditWindowExpiresAt(maintenanceDate);
+export function isMaintenanceWithinEditWindow(createdAt) {
+    return new Date() <= maintenanceEditWindowExpiresAt(createdAt);
 }
-/** Throws 409 if `maintenanceDate` is more than EDIT_WINDOW_DAYS in the past.
- * Used for CREATE (is the date being backdated too far?) and for
- * UPDATE/DELETE (is the existing record's date still within the window?). */
-export function assertMaintenanceDateEditable(maintenanceDate, billNo) {
-    if (!isMaintenanceDateWithinEditWindow(maintenanceDate)) {
-        const expired = maintenanceEditWindowExpiresAt(maintenanceDate);
+/** Throws 409 when an already-created record's correction window has closed. */
+export function assertMaintenanceRecordEditable(createdAt, billNo) {
+    if (!isMaintenanceWithinEditWindow(createdAt)) {
+        const expired = maintenanceEditWindowExpiresAt(createdAt);
         throw new AppError(409, `Maintenance record ${billNo ?? ""} is locked — the 10-day edit window closed on ${expired
             .toISOString()
-            .slice(0, 10)}. No creates, edits, or deletes are allowed for this date.`
+            .slice(0, 10)}. This saved record can no longer be edited or deleted.`
             .replace(/\s+/g, " ")
             .trim());
     }

@@ -301,19 +301,41 @@ function toTripSummary(row) {
         weightLoss: sum.weightLoss + load.weightLoss,
         shops: sum.shops + load.shops,
     }), { birds: 0, weight: 0, mortality: 0, mortalityWeight: 0, weightLoss: 0, shops: 0 });
+    // A Completed trip carries trip-level totals over the same rateable row
+    // set Rate Entry prices, so Trip List, Rate Entry and Farm Payment agree
+    // even with rows on an unsubmitted load, without load linkage, or beside
+    // pending `[ORDER]` plan stubs (which never count as served shops).
+    // Legacy completed trips with no live delivery rows keep their persisted
+    // totals — never replace valid list data with synthetic all-zero rows.
+    const tripTotalsRaw = (row.completed_totals ?? null);
+    const hasLiveDeliveryRows = tripTotalsRaw != null && num(tripTotalsRaw.rows) > 0;
+    const tripLevelTotals = tripTotalsRaw != null && (loadSummaries.length > 0 || hasLiveDeliveryRows)
+        ? {
+            birds: num(tripTotalsRaw.birds),
+            weight: num(tripTotalsRaw.weight),
+            mortality: num(tripTotalsRaw.mortality),
+            mortalityWeight: num(tripTotalsRaw.mortalityWeight ?? tripTotalsRaw.mortality_weight),
+            // Weight loss stays derived from the per-load pickup (DC) figures:
+            // the trip row only mirrors load 1, so a trip-level recompute
+            // would misstate multi-load trips.
+            weightLoss: completedTotals.weightLoss,
+            shops: num(tripTotalsRaw.shops),
+        }
+        : null;
     // Older completed trips and endpoints that do not attach the per-load
     // aggregate must retain their persisted trip totals. Never replace valid
     // list data with a synthetic all-zero reduction of an empty array.
-    const totals = loadSummaries.length > 0
-        ? completedTotals
-        : {
-            birds: base.totalBirdsDelivered || base.totalBirds,
-            weight: base.totalDeliveredWeight || base.totalWeight,
-            mortality: base.totalMortalityCount || base.totalMortality,
-            mortalityWeight: base.totalMortalityWeight,
-            weightLoss: base.weightLoss,
-            shops: base.totalShops,
-        };
+    const totals = tripLevelTotals ??
+        (loadSummaries.length > 0
+            ? completedTotals
+            : {
+                birds: base.totalBirdsDelivered || base.totalBirds,
+                weight: base.totalDeliveredWeight || base.totalWeight,
+                mortality: base.totalMortalityCount || base.totalMortality,
+                mortalityWeight: base.totalMortalityWeight,
+                weightLoss: base.weightLoss,
+                shops: base.totalShops,
+            });
     const flags = {
         startStepSubmitted: base.startStepSubmitted,
         farmStepSubmitted: base.farmStepSubmitted,
@@ -1212,7 +1234,10 @@ function applyComputedFields(body, boxDetails, deliveries) {
         body.farmAmount = computeFarmAmount(body.farmLoadWeight, body.farmRate);
     }
 }
-/** Canonical per-load Recent Trips metrics. Only submitted Step 4 loads count. */
+/** Canonical per-load Recent Trips metrics. Only submitted Step 4 loads count,
+ * except on a Completed trip where every load with rows is finished business
+ * and must be broken down (otherwise the per-load card hides served shops).
+ */
 const recentLoadSummarySelect = `,
   (SELECT COUNT(*) FROM trip_legs submitted
     WHERE submitted.trip_id = trips.id AND submitted.farm_step_submitted = TRUE) AS submitted_load_count,
@@ -1242,10 +1267,30 @@ const recentLoadSummarySelect = `,
          AND delivery.leg_id = leg.id
          AND COALESCE(delivery.deleted, FALSE) = FALSE
        WHERE leg.trip_id = trips.id
-         AND leg.delivery_step_submitted = TRUE
+         AND (leg.delivery_step_submitted = TRUE OR trips.status = 'Completed')
        GROUP BY leg.id, leg.leg_index, leg.dc_weight
     ) totals
-  ), '[]'::jsonb) AS load_summaries`;
+  ), '[]'::jsonb) AS load_summaries,
+  CASE WHEN trips.status = 'Completed' THEN (
+    SELECT jsonb_build_object(
+      'rows', COUNT(*),
+      'birds', COALESCE(SUM(d.birds), 0),
+      'weight', COALESCE(SUM(d.weight), 0),
+      'mortality', COALESCE(SUM(d.mortality), 0),
+      'mortalityWeight', COALESCE(SUM(d.mort_kg), 0),
+      -- Same rateable row set Rate Entry prices (loadDeliveries): a shop
+      -- counts only with a live quantity, so pending [ORDER] plan stubs
+      -- never inflate the trip total while rows on an unsubmitted load or
+      -- without load linkage are still served shops.
+      'shops', COUNT(*) FILTER (
+        WHERE COALESCE(d.shop_id, 0) > 0
+          AND (COALESCE(d.birds, 0) > 0 OR COALESCE(d.weight, 0) > 0)
+      )
+    )
+    FROM trip_deliveries d
+    WHERE d.trip_id = trips.id
+      AND COALESCE(d.deleted, FALSE) = FALSE
+  ) ELSE NULL END AS completed_totals`;
 export const tripsService = {
     /**
      * Preview the next trip number for a selected business date.

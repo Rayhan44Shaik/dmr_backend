@@ -10,6 +10,7 @@ const validStart = {
   supervisorId: 3,
   helpers: ["Helper One"],
   loaders: ["Loader One"],
+  openingMeter: 100,
 };
 
 describe("Trip step boundary validation", () => {
@@ -25,6 +26,8 @@ describe("Trip step boundary validation", () => {
     assert.throws(() => validateStepSubmit("start", { ...validStart, vehicleId: 0 }));
     assert.throws(() => validateStepSubmit("start", { ...validStart, helpers: [] }));
     assert.throws(() => validateStepSubmit("start", { ...validStart, loaders: ["A", "a"] }));
+    assert.throws(() => validateStepSubmit("start", { ...validStart, openingMeter: undefined }));
+    assert.throws(() => validateStepSubmit("start", { ...validStart, openingMeter: 0 }));
   });
 
   it("accepts a complete Step 1 payload with a selectable business date", () => {
@@ -37,7 +40,7 @@ describe("Trip step boundary validation", () => {
     );
   });
 
-  it("requires Step 2 address, bird type and a valid non-zero GPS location", () => {
+  it("allows an optional Step 2 address and requires bird type and a valid non-zero GPS location", () => {
     const validFarm = {
       sourceFarmId: 1,
       farmBirdTypeId: 2,
@@ -48,7 +51,7 @@ describe("Trip step boundary validation", () => {
       farmGpsLon: 78.4867,
     };
     assert.doesNotThrow(() => validateStepSubmit("farm", validFarm));
-    assert.throws(() => validateStepSubmit("farm", { ...validFarm, farmAddress: "  " }));
+    assert.doesNotThrow(() => validateStepSubmit("farm", { ...validFarm, farmAddress: "  " }));
     assert.throws(() => validateStepSubmit("farm", { ...validFarm, farmBirdTypeId: 0 }));
     assert.throws(() => validateStepSubmit("farm", { ...validFarm, farmGpsLat: null }));
     assert.throws(() => validateStepSubmit("farm", { ...validFarm, farmGpsLat: 0, farmGpsLon: 0 }));

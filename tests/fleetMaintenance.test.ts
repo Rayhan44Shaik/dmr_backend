@@ -251,4 +251,33 @@ describe("Fleet maintenance", () => {
     const anon = await fetch(`${baseUrl}/api/fleet/maintenance`);
     assert.equal(anon.status, 401);
   });
+
+  it("8. accepts historical bill dates and locks edits/deletes ten days after entry", async () => {
+    const vehicle = await seedVehicle("W");
+    const driver = await seedDriver("W");
+    const historicalDate = "2026-01-15";
+    const created = await postForm("/api/fleet/maintenance", maintForm({
+      date: historicalDate, vehicleId: vehicle.id, driverId: driver.id, currentKM: 95000,
+      maintenanceType: ["Engine"], serviceType: "Historical bill", idempotencyKey: randomUUID(),
+    }));
+    assert.equal(created.status, 201, "an old bill date must be accepted when entered today");
+
+    const withinWindow = await putJson(baseUrl, `/api/fleet/maintenance/${created.body.id}`, {
+      remarks: "corrected after entry",
+    });
+    assert.equal(withinWindow.status, 200);
+
+    await pool.query(
+      `UPDATE fleet_maintenance SET created_at = NOW() - INTERVAL '11 days' WHERE id = $1`,
+      [created.body.id]
+    );
+    const lockedUpdate = await putJson(baseUrl, `/api/fleet/maintenance/${created.body.id}`, {
+      remarks: "too late",
+    });
+    assert.equal(lockedUpdate.status, 409);
+    assert.match(lockedUpdate.body.message, /saved record can no longer be edited or deleted/i);
+
+    const lockedDelete = await deleteJson(`/api/fleet/maintenance/${created.body.id}`);
+    assert.equal(lockedDelete.status, 409);
+  });
 });

@@ -263,4 +263,96 @@ describe("Trip List completed data", () => {
     const anon = await fetch(`${baseUrl}/api/operations/trip-list`);
     assert.equal(anon.status, 401);
   });
+
+  it("4. completed trip totals follow the rateable row set, not the submitted-leg gate", async () => {
+    // Regression: Trip List shops/birds/weight must equal exactly what Rate
+    // Entry prices (non-deleted rows with a shop and a quantity), even when
+    // rows sit on an unsubmitted load, carry no load linkage (legacy/manual
+    // rows), or are uncaptured `[ORDER]` plan stubs. Previously the per-load
+    // aggregate dropped the first two and counted the stub as a shop.
+    const m = await seed();
+    const shopC = await mastersService.upsertShop({
+      shopName: `TL Shop C${seq}`,
+      ownerName: "Owner",
+      phoneNumber: `987900${String(seq).padStart(4, "0")}`,
+      village: "V",
+      address: "A",
+      status: "Active",
+      openingBalance: 0,
+    });
+    const trip = await tripsService.save(null, {
+      tripDate: "2026-09-22",
+      vehicleId: m.vehicle.id,
+      driverId: m.driver.id,
+      supervisorId: m.supervisor.id,
+      openingMeter: 9500 + seq * 1000,
+      startStepSubmitted: true,
+      status: "Draft",
+    });
+    await runLoad(trip.id, 1, {
+      destMeter: 9550 + seq * 1000,
+      farmId: m.farm.id, farmName: m.farm.farmName,
+      birdTypeId: m.birdType.id, birdType: m.birdType.birdType,
+      shopId: m.shopA.id, shopName: m.shopA.shopName,
+    });
+    await tripsService.submitStep(trip.id, "expenses", { closingMeter: 9600 + seq * 1000, meals: 10 });
+    await tripsService.updateStatus(trip.id, { status: "Completed", approvedBy: "test" });
+
+    const leg1 = await pool.query(
+      `SELECT id FROM trip_legs WHERE trip_id = $1 AND leg_index = 1`,
+      [trip.id]
+    );
+    const leg1Id = Number(leg1.rows[0].id);
+    // Legacy second load whose Step 4 was never submitted.
+    const leg2 = await pool.query(
+      `INSERT INTO trip_legs (trip_id, leg_index) VALUES ($1, 2) RETURNING id`,
+      [trip.id]
+    );
+    const leg2Id = Number(leg2.rows[0].id);
+    // Weight-mode shop on the unsubmitted load.
+    await pool.query(
+      `INSERT INTO trip_deliveries
+         (trip_id, leg_id, sale_no, shop_id, shop_name, birds, weight, delivery_mode, deleted)
+       VALUES ($1, $2, $3, $4, $5, 30, 60, 'weight', FALSE)`,
+      [trip.id, leg2Id, `TL-SYNC-${seq}-B`, m.shopB.id, m.shopB.shopName]
+    );
+    // Weight-mode shop with no load linkage at all.
+    await pool.query(
+      `INSERT INTO trip_deliveries
+         (trip_id, leg_id, sale_no, shop_id, shop_name, birds, weight, delivery_mode, deleted)
+       VALUES ($1, NULL, $2, $3, $4, 20, 40, 'weight', FALSE)`,
+      [trip.id, `TL-SYNC-${seq}-C`, shopC.id, shopC.shopName]
+    );
+    // Uncaptured `[ORDER]` plan stub beside the captured rows — a pending
+    // plan is not a served shop.
+    await pool.query(
+      `INSERT INTO trip_deliveries
+         (trip_id, leg_id, sale_no, shop_id, shop_name, birds, weight, remarks, deleted)
+       VALUES ($1, $2, $3, $4, $5, 0, 0, '[ORDER] O:SYNC-1 planned', FALSE)`,
+      [trip.id, leg1Id, `TL-SYNC-${seq}-S`, shopC.id, shopC.shopName]
+    );
+
+    // The rateable row set Rate Entry prices for this trip.
+    const expected = await pool.query(
+      `SELECT COUNT(*)::int AS shops,
+              COALESCE(SUM(birds), 0)::int AS birds,
+              COALESCE(SUM(weight), 0)::float AS weight
+         FROM trip_deliveries
+        WHERE trip_id = $1 AND COALESCE(deleted, FALSE) = FALSE
+          AND COALESCE(shop_id, 0) > 0
+          AND (COALESCE(birds, 0) > 0 OR COALESCE(weight, 0) > 0)`,
+      [trip.id]
+    );
+    assert.equal(expected.rows[0].shops, 3);
+    assert.equal(expected.rows[0].birds, 90);
+    assert.equal(expected.rows[0].weight, 180);
+
+    const { body } = await getJson(baseUrl, `/api/operations/trip-list?vehicleId=${m.vehicle.id}`);
+    const row = (body.data ?? body).find((t: { id: number }) => t.id === trip.id);
+    assert.ok(row, "completed trip present in Trip List");
+    assert.equal(row.totalShops, expected.rows[0].shops, "shops equal the rateable row set");
+    assert.equal(row.totalBirds, expected.rows[0].birds, "birds equal the rateable row set");
+    assert.equal(row.totalWeight, expected.rows[0].weight, "weight equals the rateable row set");
+    assert.equal(row.loadSummaries.length, 2, "both loads with rows are broken down");
+  });
 });

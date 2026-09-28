@@ -90,15 +90,24 @@ const SALE_SELECT = `
   LEFT JOIN rate_entry re ON re.trip_id = t.id
 `;
 const PROTECTED_FIELDS = ["birds", "weight", "rate", "amount"];
-async function lockTrip(client, tripId) {
+async function lockTrip(client, tripId, legId) {
     const result = await client.query(`SELECT id, trip_no, status, deleted, approved_at, trip_date,
             total_birds, dc_weight
        FROM trips WHERE id = $1 FOR UPDATE`, [tripId]);
     if (!result.rowCount)
         throw new AppError(404, `Trip ${tripId} not found`);
     const row = result.rows[0];
-    const totalBirds = num(row.total_birds);
-    const dcWeight = num(row.dc_weight);
+    let totalBirds = num(row.total_birds);
+    let dcWeight = num(row.dc_weight);
+    if (legId != null) {
+        const leg = await client.query(`SELECT total_birds, dc_weight
+         FROM trip_legs
+        WHERE id = $1 AND trip_id = $2`, [legId, tripId]);
+        if (!leg.rowCount)
+            throw new AppError(422, `Trip load for Shop Sale ${tripId} was not found`);
+        totalBirds = num(leg.rows[0].total_birds);
+        dcWeight = num(leg.rows[0].dc_weight);
+    }
     return {
         id: num(row.id),
         tripNo: str(row.trip_no),
@@ -302,7 +311,8 @@ export const shopSalesService = {
         const saleShopId = num(cur.shop_id);
         return withTransaction(async (client) => {
             const tripId = await getDeliveryTripId(client, id);
-            const trip = await lockTrip(client, tripId);
+            const legId = cur.leg_id == null ? null : num(cur.leg_id);
+            const trip = await lockTrip(client, tripId, legId);
             const birds = data.birds ?? num(cur.birds);
             const weight = data.weight ?? num(cur.weight);
             const mortalityCount = data.mortality ?? num(cur.mortality);
@@ -312,7 +322,7 @@ export const shopSalesService = {
             // reject legitimate legacy/multi-load rows whose trip header contains
             // only the active load's pickup totals.
             if (data.birds != null || data.weight != null || data.mortality != null) {
-                const others = await sumActiveDeliveries(client, trip.id, id);
+                const others = await sumActiveDeliveries(client, trip.id, id, legId);
                 assertWithinCapacity({
                     label: "birds",
                     available: trip.capacityBirds,

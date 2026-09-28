@@ -219,6 +219,10 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     others3Amt: num(row.others3_amt),
     others4Amt: num(row.others4_amt),
     others5Amt: num(row.others5_amt),
+    others2Name: str(row.others2_name),
+    others3Name: str(row.others3_name),
+    others4Name: str(row.others4_name),
+    others5Name: str(row.others5_name),
     fuel: num(row.fuel),
     expense: num(row.expense),
     driverBata: num(row.driver_bata),
@@ -484,19 +488,43 @@ function toTripSummary(row: Record<string, unknown>): TripSummary {
     }),
     { birds: 0, weight: 0, mortality: 0, mortalityWeight: 0, weightLoss: 0, shops: 0 }
   );
+  // A Completed trip carries trip-level totals over the same rateable row
+  // set Rate Entry prices, so Trip List, Rate Entry and Farm Payment agree
+  // even with rows on an unsubmitted load, without load linkage, or beside
+  // pending `[ORDER]` plan stubs (which never count as served shops).
+  // Legacy completed trips with no live delivery rows keep their persisted
+  // totals — never replace valid list data with synthetic all-zero rows.
+  const tripTotalsRaw = (row.completed_totals ?? null) as Record<string, unknown> | null;
+  const hasLiveDeliveryRows = tripTotalsRaw != null && num(tripTotalsRaw.rows) > 0;
+  const tripLevelTotals =
+    tripTotalsRaw != null && (loadSummaries.length > 0 || hasLiveDeliveryRows)
+      ? {
+          birds: num(tripTotalsRaw.birds),
+          weight: num(tripTotalsRaw.weight),
+          mortality: num(tripTotalsRaw.mortality),
+          mortalityWeight: num(tripTotalsRaw.mortalityWeight ?? tripTotalsRaw.mortality_weight),
+          // Weight loss stays derived from the per-load pickup (DC) figures:
+          // the trip row only mirrors load 1, so a trip-level recompute
+          // would misstate multi-load trips.
+          weightLoss: completedTotals.weightLoss,
+          shops: num(tripTotalsRaw.shops),
+        }
+      : null;
   // Older completed trips and endpoints that do not attach the per-load
   // aggregate must retain their persisted trip totals. Never replace valid
   // list data with a synthetic all-zero reduction of an empty array.
-  const totals = loadSummaries.length > 0
-    ? completedTotals
-    : {
+  const totals =
+    tripLevelTotals ??
+    (loadSummaries.length > 0
+      ? completedTotals
+      : {
         birds: base.totalBirdsDelivered || base.totalBirds,
         weight: base.totalDeliveredWeight || base.totalWeight,
         mortality: base.totalMortalityCount || base.totalMortality,
         mortalityWeight: base.totalMortalityWeight,
         weightLoss: base.weightLoss,
         shops: base.totalShops,
-      };
+      });
   const flags = {
     startStepSubmitted: base.startStepSubmitted,
     farmStepSubmitted: base.farmStepSubmitted,
@@ -1623,7 +1651,10 @@ function applyComputedFields(
   }
 }
 
-/** Canonical per-load Recent Trips metrics. Only submitted Step 4 loads count. */
+/** Canonical per-load Recent Trips metrics. Only submitted Step 4 loads count,
+ * except on a Completed trip where every load with rows is finished business
+ * and must be broken down (otherwise the per-load card hides served shops).
+ */
 const recentLoadSummarySelect = `,
   (SELECT COUNT(*) FROM trip_legs submitted
     WHERE submitted.trip_id = trips.id AND submitted.farm_step_submitted = TRUE) AS submitted_load_count,
@@ -1653,10 +1684,30 @@ const recentLoadSummarySelect = `,
          AND delivery.leg_id = leg.id
          AND COALESCE(delivery.deleted, FALSE) = FALSE
        WHERE leg.trip_id = trips.id
-         AND leg.delivery_step_submitted = TRUE
+         AND (leg.delivery_step_submitted = TRUE OR trips.status = 'Completed')
        GROUP BY leg.id, leg.leg_index, leg.dc_weight
     ) totals
-  ), '[]'::jsonb) AS load_summaries`;
+  ), '[]'::jsonb) AS load_summaries,
+  CASE WHEN trips.status = 'Completed' THEN (
+    SELECT jsonb_build_object(
+      'rows', COUNT(*),
+      'birds', COALESCE(SUM(d.birds), 0),
+      'weight', COALESCE(SUM(d.weight), 0),
+      'mortality', COALESCE(SUM(d.mortality), 0),
+      'mortalityWeight', COALESCE(SUM(d.mort_kg), 0),
+      -- Same rateable row set Rate Entry prices (loadDeliveries): a shop
+      -- counts only with a live quantity, so pending [ORDER] plan stubs
+      -- never inflate the trip total while rows on an unsubmitted load or
+      -- without load linkage are still served shops.
+      'shops', COUNT(*) FILTER (
+        WHERE COALESCE(d.shop_id, 0) > 0
+          AND (COALESCE(d.birds, 0) > 0 OR COALESCE(d.weight, 0) > 0)
+      )
+    )
+    FROM trip_deliveries d
+    WHERE d.trip_id = trips.id
+      AND COALESCE(d.deleted, FALSE) = FALSE
+  ) ELSE NULL END AS completed_totals`;
 
 export const tripsService = {
   /**
@@ -2336,6 +2387,10 @@ export const tripsService = {
             farm_gps_accuracy = COALESCE($71, farm_gps_accuracy),
             farm_gps_time = COALESCE($72, farm_gps_time),
             farm_completed_trips = COALESCE($73, farm_completed_trips),
+            others2_name = COALESCE($74, others2_name),
+            others3_name = COALESCE($75, others3_name),
+            others4_name = COALESCE($76, others4_name),
+            others5_name = COALESCE($77, others5_name),
             approved_by = COALESCE($66, approved_by)
            WHERE id = $1`,
           [
@@ -2427,6 +2482,10 @@ export const tripsService = {
             body.farmGpsAccuracy ?? null,
             normalizeTripTimestamp(body.farmGpsTime),
             numOrNull(body.farmCompletedTrips),
+            body.others2Name == null ? null : str(body.others2Name).trim().slice(0, 120),
+            body.others3Name == null ? null : str(body.others3Name).trim().slice(0, 120),
+            body.others4Name == null ? null : str(body.others4Name).trim().slice(0, 120),
+            body.others5Name == null ? null : str(body.others5Name).trim().slice(0, 120),
           ]
         );
 
@@ -3188,6 +3247,12 @@ export const tripsService = {
       delete autosaveBody.deliveryStepSubmitted;
       delete autosaveBody.expensesStepSubmitted;
       delete autosaveBody.endStepSubmitted;
+      // End Meter is final-submit data. A typo in the background/manual Save
+      // Progress path must never constrain diesel meters or become authoritative.
+      if (step === "expenses") {
+        delete autosaveBody.endMeter;
+        delete autosaveBody.closingMeter;
+      }
       return this.save(id, autosaveBody);
     }
 
@@ -3340,6 +3405,13 @@ export const tripsService = {
     }
 
     if (step === "expenses") {
+      for (const index of [2, 3, 4, 5] as const) {
+        const amount = num((body as Record<string, unknown>)[`others${index}Amt`]);
+        const name = str((body as Record<string, unknown>)[`others${index}Name`]).trim();
+        if (amount > 0 && !name) {
+          throw new AppError(422, `Other expense ${index - 1} requires a description.`);
+        }
+      }
       const closing =
         numOrNull(body.closingMeter) ?? numOrNull(body.endMeter) ?? numOrNull(current.closing_meter);
       if (closing != null) {
