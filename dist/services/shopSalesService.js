@@ -7,7 +7,7 @@ import { rethrowIfAppError } from "../utils/pgErrors.js";
 import { evaluateRateLock } from "../utils/rateLock.js";
 import { assertOpsStatus, assertShopSaleRateInRange, parseBody, shopSaleBodySchema, } from "../validation/operations.js";
 import { assertTripCompletedForShopSales, assertTripEditable, assertWithinCapacity, editWindowExpiresAt, generateSaleNo, isTripEditable, recalcTripDeliveryTotals, sumActiveDeliveries, } from "../utils/tripDeliverySync.js";
-import { applyCorrection, applyCredit, applyDebit, } from "../utils/shopLedger.js";
+import { applyCredit, applyDebit, recalcShopBalance, } from "../utils/shopLedger.js";
 function computeAmount(weight, rate) {
     return Number((Number(weight) * Number(rate)).toFixed(2));
 }
@@ -360,17 +360,44 @@ export const shopSalesService = {
             if (!result.rowCount)
                 throw new AppError(404, "Shop sale not found");
             if (saleShopId > 0) {
-                // Shop Sales correction sync: a sale amount change moves the shop
-                // outstanding by the DIFFERENCE only (₹5,000 → ₹5,500 bumps
-                // outstanding by exactly +₹500), never by re-applying the whole amount.
+                // Keep one financial row for one sale. Editing a Shop Sale changes the
+                // existing ledger row in place instead of appending a second
+                // "correction" row. This preserves the exact balance delta while the
+                // Shop Ledger displays one sale with its current rate and amount.
                 const diff = nextAmount - oldAmount;
-                await applyCorrection(client, saleShopId, {
-                    entryDate: trip.tripDate,
-                    entryType: "correction",
-                    referenceType: "shop_sale",
-                    referenceId: id,
-                    note: `Shop sale correction (₹${oldAmount.toFixed(2)} → ₹${nextAmount.toFixed(2)})`,
-                }, diff);
+                const ledgerRow = await client.query(`SELECT l.id, l.debit, l.credit
+             FROM shop_ledger l
+            WHERE l.shop_id = $1
+              AND (
+                (l.reference_type = 'shop_sale' AND l.reference_id = $2)
+                OR
+                (l.reference_type = 'trip' AND l.reference_id = $3)
+              )
+            ORDER BY
+              CASE
+                WHEN l.reference_type = 'shop_sale' AND l.entry_type = 'correction' THEN 0
+                WHEN l.reference_type = 'shop_sale' THEN 1
+                WHEN ABS((l.debit - l.credit) - $4::numeric) < 0.01 THEN 2
+                ELSE 3
+              END,
+              l.id DESC
+            LIMIT 1
+            FOR UPDATE`, [saleShopId, id, trip.id, oldAmount]);
+                if (!ledgerRow.rowCount) {
+                    throw new AppError(409, "Shop Sale ledger row is missing; correction was not applied");
+                }
+                const currentNet = num(ledgerRow.rows[0].debit) - num(ledgerRow.rows[0].credit);
+                const correctedNet = Number((currentNet + diff).toFixed(2));
+                await client.query(`UPDATE shop_ledger
+              SET debit = $2, credit = $3,
+                  note = $4
+            WHERE id = $1`, [
+                    ledgerRow.rows[0].id,
+                    correctedNet > 0 ? correctedNet : 0,
+                    correctedNet < 0 ? -correctedNet : 0,
+                    `Shop sale updated (₹${oldAmount.toFixed(2)} → ₹${nextAmount.toFixed(2)})`,
+                ]);
+                await recalcShopBalance(client, saleShopId);
             }
             await recalcTripDeliveryTotals(client, trip.id);
             const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [id]);

@@ -147,6 +147,112 @@ async function loadOne(client: Client, id: number): Promise<CollectionEntry> {
 }
 
 export const collectionEntryService = {
+  async recent(filters: { shopId: number; limit?: number; includeDeleted?: boolean }) {
+    if (!Number.isInteger(filters.shopId) || filters.shopId <= 0) {
+      throw new AppError(400, "A valid shopId is required");
+    }
+    const requestedLimit = Number.isFinite(filters.limit) ? Math.trunc(filters.limit as number) : 10;
+    const limit = Math.min(Math.max(requestedLimit, 1), 100);
+    const result = await query(
+      `${SEL}
+       WHERE shop_id = $1
+         AND ($2::boolean = TRUE OR COALESCE(deleted, FALSE) = FALSE)
+       ORDER BY collection_date DESC, created_at DESC, id DESC
+       LIMIT $3`,
+      [filters.shopId, Boolean(filters.includeDeleted), limit]
+    );
+    return result.rows.map((row) => ({
+      ...mapEntry(row),
+      canDelete: !Boolean(row.deleted),
+    }));
+  },
+
+  async weeklySummary(shopId: number, date?: string) {
+    if (!Number.isInteger(shopId) || shopId <= 0) {
+      throw new AppError(400, "A valid shopId is required");
+    }
+    const summaries = await this.weeklySummaries(date, shopId);
+    if (!summaries.length) throw new AppError(404, "Shop not found");
+    return summaries[0];
+  },
+
+  async weeklySummaries(date?: string, shopId?: number) {
+    const bounds = collectionWeekBounds(date);
+    const result = await query(
+      `SELECT s.id AS shop_id, s.shop_name,
+              COALESCE(s.current_balance, 0) AS balance,
+              COALESCE(s.current_balance, 0) - COALESCE(from_week.net, 0) AS opening_balance,
+              COALESCE(sales.amount, 0) AS weekly_sales,
+              COALESCE(sales.row_count, 0) AS sales_count,
+              COALESCE(approved.amount, 0) AS approved_collections,
+              COALESCE(approved.row_count, 0) AS approved_collections_count,
+              COALESCE(pending.amount, 0) AS pending_collections,
+              COALESCE(pending.row_count, 0) AS pending_collections_count
+         FROM shops s
+         LEFT JOIN LATERAL (
+           SELECT SUM(l.debit) - SUM(l.credit) AS net
+             FROM shop_ledger l
+            WHERE l.shop_id = s.id AND l.entry_date >= $1::date
+         ) from_week ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(d.amount, 0)) AS amount, COUNT(*)::int AS row_count
+             FROM trip_deliveries d
+             JOIN trips t ON t.id = d.trip_id
+            WHERE d.shop_id = s.id
+              AND COALESCE(d.deleted, FALSE) = FALSE
+              AND COALESCE(t.deleted, FALSE) = FALSE
+              AND t.status = 'Completed' AND COALESCE(t.rate_completed, FALSE) = TRUE
+              AND t.trip_date BETWEEN $1::date AND $2::date
+         ) sales ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount,
+                  COUNT(*)::int AS row_count
+             FROM collections c
+            WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
+              AND COALESCE(c.is_financial, FALSE) = TRUE
+              AND c.collection_date BETWEEN $1::date AND $2::date
+         ) approved ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount,
+                  COUNT(*)::int AS row_count
+             FROM collections c
+            WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
+              AND COALESCE(c.is_financial, FALSE) = FALSE
+              AND c.status = 'Pending Approval'
+              AND c.collection_date BETWEEN $1::date AND $2::date
+         ) pending ON TRUE
+        WHERE ($3::int IS NULL OR s.id = $3)
+          AND ($3::int IS NOT NULL OR s.status = 'Active')
+        ORDER BY s.shop_name`,
+      [bounds.weekStart, bounds.weekEnd, shopId ?? null]
+    );
+    const previousWeekEnd = new Date(`${bounds.weekStart}T00:00:00Z`);
+    previousWeekEnd.setUTCDate(previousWeekEnd.getUTCDate() - 1);
+    return result.rows.map((row) => {
+      const openingBalance = num(row.opening_balance);
+      const weeklySales = num(row.weekly_sales);
+      const approvedCollections = num(row.approved_collections);
+      return {
+        shopId: num(row.shop_id),
+        shopName: str(row.shop_name),
+        weekStart: bounds.weekStart,
+        weekEnd: bounds.weekEnd,
+        previousWeekEnd: previousWeekEnd.toISOString().slice(0, 10),
+        openingBalance,
+        balance: num(row.balance),
+        closingBalance: openingBalance + weeklySales - approvedCollections,
+        weeklySales,
+        pendingSales: 0,
+        salesCount: num(row.sales_count),
+        approvedCollections,
+        pendingCollections: num(row.pending_collections),
+        approvedCollectionsCount: num(row.approved_collections_count),
+        pendingCollectionsCount: num(row.pending_collections_count),
+        isCurrentWeek: bounds.isCurrentWeek,
+      };
+    });
+  },
+
   async report(filters: {
     fromDate?: string;
     toDate?: string;

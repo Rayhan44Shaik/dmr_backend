@@ -470,6 +470,38 @@ operationsRouter.get(
   })
 );
 
+// Keep named collection routes above /collection-entry/:id. Otherwise Express
+// treats values such as "recent" as an id and the database receives NaN.
+operationsRouter.get(
+  "/collection-entry/recent",
+  asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.recent({
+      shopId: Number(req.query.shopId),
+      limit: req.query.limit == null ? undefined : Number(req.query.limit),
+      includeDeleted: req.query.includeDeleted === "true",
+    }));
+  })
+);
+
+operationsRouter.get(
+  "/collection-entry/weekly-summary",
+  asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.weeklySummary(
+      Number(req.query.shopId),
+      typeof req.query.date === "string" ? req.query.date : undefined
+    ));
+  })
+);
+
+operationsRouter.get(
+  "/collection-entry/weekly-summaries",
+  asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.weeklySummaries(
+      typeof req.query.date === "string" ? req.query.date : undefined
+    ));
+  })
+);
+
 operationsRouter.get(
   "/mortality-analysis/:tripId/deliveries",
   asyncHandler(async (req, res) => {

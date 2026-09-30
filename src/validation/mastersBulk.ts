@@ -360,8 +360,8 @@ function normalizeShop(ctx: RowContext): NormalizedShopRow {
     address: ctx.nullableStr("address"),
     latitude: ctx.nullableNum("latitude", { min: -90 }),
     longitude: ctx.nullableNum("longitude", { min: -180 }),
-    paperRate: ctx.num("paperRate", { fallback: 1, min: 1, integer: true }),
-    associationType: ctx.requiredStr("associationType"),
+    paperRate: ctx.num("paperRate", { fallback: 10, min: 1, integer: true }),
+    associationType: ctx.str("associationType") || "Ass Gun",
     openingBalance: ctx.num("openingBalance"),
     status: ctx.status("status", ACTIVE_STATUSES) as NormalizedShopRow["status"],
   };

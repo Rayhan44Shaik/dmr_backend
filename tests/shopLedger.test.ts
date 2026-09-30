@@ -251,6 +251,63 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     assert.equal(ledger.data[0].remarks, "Morning delivery");
     assert.equal(ledger.data[0].type, "sale");
     assert.equal(ledger.data[0].debit, 5100, "original sale and adjustment are merged");
+
+    // Shop Sales is the quantity/rate source of truth. An edit replaces the
+    // visible values on the same canonical row; it must never append a second
+    // set of birds/weight/rate to the cumulative report.
+    await pool.query(
+      `UPDATE trip_deliveries
+          SET birds = 2000, weight = 3456.75, rate = 187.25
+        WHERE id = $1`,
+      [delivery.rows[0].id]
+    );
+    const edited = await shopLedgerService.list({
+      shopId: shop.id,
+      fromDate: "2026-08-07",
+      toDate: "2026-08-07",
+    });
+    assert.equal(edited.data.length, 1, "editing Shop Sales must not duplicate the sale row");
+    assert.equal(edited.data[0].birds, 2000);
+    assert.equal(edited.data[0].weight, 3456.75);
+    assert.equal(edited.data[0].rate, 187.25);
+  });
+
+  it("2c. legacy trip ledger rows count a shop's birds and weight exactly once", async () => {
+    const shop = await seedShop(0);
+    const sup = await seedSupport();
+    const trip = await makeCompletedTrip(sup, {
+      tripNo: `LG-LEGACY-${seq}`,
+      tripDate: "2026-08-09",
+      totalBirds: 153,
+      dcWeight: 391.2,
+    });
+    await pool.query(
+      `INSERT INTO trip_deliveries
+         (trip_id, sale_no, shop_id, shop_name, birds, weight, mortality, rate, amount)
+       VALUES
+         ($1, $2, $3, $4, 85, 222.0, 0, 113, 25086),
+         ($1, $5, $3, $4, 68, 169.2, 0, 113, 19119.6)`,
+      [trip.id, `LG-LEGACY-${seq}-S1`, shop.id, shop.name, `LG-LEGACY-${seq}-S2`]
+    );
+    await pool.query(
+      `INSERT INTO shop_ledger
+         (shop_id, entry_date, entry_type, reference_type, reference_id, debit, credit, note)
+       VALUES
+         ($1, '2026-08-09', 'sale', 'trip', $2, 25086, 0, 'Legacy sale 1'),
+         ($1, '2026-08-09', 'sale', 'trip', $2, 19119.6, 0, 'Legacy sale 2')`,
+      [shop.id, trip.id]
+    );
+
+    const ledger = await shopLedgerService.list({
+      shopId: shop.id,
+      fromDate: "2026-08-09",
+      toDate: "2026-08-09",
+    });
+
+    assert.equal(ledger.data.length, 1, "legacy rows collapse to one shop/trip sale");
+    assert.equal(ledger.data[0].birds, 153);
+    assert.equal(ledger.data[0].weight, 391.2);
+    assert.equal(ledger.data[0].debit, 44205.6, "all legacy debits remain included once");
   });
 
   it("3. Custom date range is complete — a late range returns only its matching tail", async () => {
@@ -367,6 +424,23 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     assert.equal(body.data[1].credit, 2000);
     assert.equal(body.data[1].balance, 13000);
     assert.equal(body.data[1].referenceNo, c.collectionNo);
+  });
+
+  it("6b. All Shops exposes the same authoritative opening as a single-shop request", async () => {
+    const { shop } = await seedShopWithDebit(10000, 5000, "2026-08-01");
+    const single = await shopLedgerService.list({
+      shopId: shop.id,
+      fromDate: "2026-08-06",
+      toDate: "2026-08-16",
+    });
+    const all = await shopLedgerService.list({
+      fromDate: "2026-08-06",
+      toDate: "2026-08-16",
+    });
+    const allShopOpening = all.openingBalances?.find((row) => row.shopId === shop.id);
+    assert.ok(allShopOpening, "all-shops response must include this shop's opening");
+    assert.equal(allShopOpening.openingBalance, single.openingBalance);
+    assert.equal(allShopOpening.openingBalance, 15000);
   });
 
   it("7. REQUIRED — 11 approved collections: view = latest 10 only, ledger = all 11 credits + sale, transaction #1 never deleted", async () => {

@@ -48,18 +48,20 @@ export const authService = {
       }
       const token = randomBytes(32).toString("base64url");
       const expiresAt = new Date(Date.now() + SESSION_MS);
-      // One active session per account: signing in ends every other session
-      // everywhere, so leftover / forgotten logins never lock the user out.
-      let previousSessionsEnded = 0;
+      // Keep independent browser tabs/windows/devices signed in. Revoking all
+      // existing sessions here made any second login invalidate the dashboard
+      // token already in use, producing a fan-out of 401s from every mounted
+      // API query. Explicit logout still revokes its token, and password
+      // changes still revoke every session for the account.
+      const previousSessionsEnded = 0;
       await withTransaction(async (client) => {
-        const revoked = await client.query(
-          `UPDATE application_sessions
-           SET revoked_at = COALESCE(revoked_at, NOW())
-           WHERE user_id = $1 AND revoked_at IS NULL
-           RETURNING id`,
+        // Bound table growth without touching any currently valid session.
+        await client.query(
+          `DELETE FROM application_sessions
+           WHERE user_id = $1
+             AND (expires_at <= NOW() OR revoked_at IS NOT NULL)`,
           [row.id],
         );
-        previousSessionsEnded = revoked.rowCount ?? 0;
         await client.query(
           `INSERT INTO application_sessions (id,user_id,token_hash,expires_at) VALUES ($1,$2,$3,$4)`,
           [randomUUID(), row.id, tokenHash(token), expiresAt],

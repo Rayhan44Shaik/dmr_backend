@@ -63,8 +63,36 @@ export interface ShopLedgerResponse {
   shopName: string;
   /** Backend-authoritative balance at the START of the range. */
   openingBalance: number;
+  /** Authoritative per-shop openings when the request covers all shops. */
+  openingBalances?: Array<{ shopId: number; shopName: string; openingBalance: number }>;
   data: ShopLedgerRow[];
   meta?: PaginatedResult<unknown>["meta"];
+}
+
+async function computePerShopOpeningBalances(
+  fromDate: string | undefined,
+): Promise<Array<{ shopId: number; shopName: string; openingBalance: number }>> {
+  const result = await query<{
+    shop_id: string;
+    shop_name: string;
+    opening_balance: string;
+  }>(
+    `SELECT s.id::text AS shop_id,
+            s.shop_name,
+            (s.opening_balance + COALESCE(SUM(l.debit - l.credit), 0))::text AS opening_balance
+       FROM shops s
+       LEFT JOIN shop_ledger l
+         ON l.shop_id = s.id
+        AND ($1::date IS NULL OR l.entry_date < $1::date)
+      GROUP BY s.id, s.shop_name, s.opening_balance
+      ORDER BY s.shop_name, s.id`,
+    [fromDate ?? null],
+  );
+  return result.rows.map((row) => ({
+    shopId: num(row.shop_id),
+    shopName: str(row.shop_name),
+    openingBalance: num(row.opening_balance),
+  }));
 }
 
 function mapRow(row: Record<string, unknown>, openingBalance: number): ShopLedgerRow {
@@ -113,12 +141,12 @@ const DATA_SELECT = `
            CASE WHEN l.reference_type = 'shop_sale'
                 THEN GREATEST(COALESCE(lsa.net_amount, 0), 0)
                 WHEN l.reference_type = 'trip'
-                THEN GREATEST((l.debit - l.credit) + COALESCE(lta.net_adjustment, 0), 0)
+                THEN GREATEST(COALESCE(ltg.net_amount, 0) + COALESCE(lta.net_adjustment, 0), 0)
                 ELSE l.debit END AS debit,
            CASE WHEN l.reference_type = 'shop_sale'
                 THEN GREATEST(-COALESCE(lsa.net_amount, 0), 0)
                 WHEN l.reference_type = 'trip'
-                THEN GREATEST(-((l.debit - l.credit) + COALESCE(lta.net_adjustment, 0)), 0)
+                THEN GREATEST(-(COALESCE(ltg.net_amount, 0) + COALESCE(lta.net_adjustment, 0)), 0)
                 ELSE l.credit END AS credit,
            l.note, l.created_at,
            s.shop_name,
@@ -145,6 +173,18 @@ const DATA_SELECT = `
         AND l2.reference_id = l.reference_id
     ) lsa ON l.reference_type = 'shop_sale'
     LEFT JOIN LATERAL (
+      -- Older data wrote one ledger row per delivery but referenced only the
+      -- trip. Collapse those rows into one shop/trip statement row. Without
+      -- this, the complete trip/shop delivery total is repeated once
+      -- per legacy ledger row, multiplying birds and weight while the money
+      -- can still appear correct.
+      SELECT COALESCE(SUM(l5.debit - l5.credit), 0)::numeric AS net_amount
+      FROM shop_ledger l5
+      WHERE l5.shop_id = l.shop_id
+        AND l5.reference_type = 'trip'
+        AND l5.reference_id = l.reference_id
+    ) ltg ON l.reference_type = 'trip'
+    LEFT JOIN LATERAL (
       SELECT COALESCE(SUM(l4.debit - l4.credit), 0)::numeric AS net_adjustment
       FROM shop_ledger l4
       JOIN trip_deliveries d4 ON d4.id = l4.reference_id
@@ -170,8 +210,20 @@ const DATA_SELECT = `
       AND ($2::date IS NULL OR l.entry_date >= $2::date)
       AND ($3::date IS NULL OR l.entry_date <= $3::date)
       AND (
-        l.reference_type <> 'shop_sale'
+        l.reference_type NOT IN ('shop_sale', 'trip')
         OR (
+          l.reference_type = 'trip'
+          AND l.id = (
+            SELECT MIN(l6.id)
+            FROM shop_ledger l6
+            WHERE l6.shop_id = l.shop_id
+              AND l6.reference_type = 'trip'
+              AND l6.reference_id = l.reference_id
+          )
+        )
+        OR (
+          l.reference_type = 'shop_sale'
+          AND
           l.id = (
             SELECT MIN(l3.id)
             FROM shop_ledger l3
@@ -216,8 +268,20 @@ const COUNT_SELECT = `
     AND ($2::date IS NULL OR l.entry_date >= $2::date)
     AND ($3::date IS NULL OR l.entry_date <= $3::date)
     AND (
-      l.reference_type <> 'shop_sale'
+      l.reference_type NOT IN ('shop_sale', 'trip')
       OR (
+        l.reference_type = 'trip'
+        AND l.id = (
+          SELECT MIN(l3.id)
+          FROM shop_ledger l3
+          WHERE l3.shop_id = l.shop_id
+            AND l3.reference_type = 'trip'
+            AND l3.reference_id = l.reference_id
+        )
+      )
+      OR (
+        l.reference_type = 'shop_sale'
+        AND
         l.id = (
           SELECT MIN(l2.id)
           FROM shop_ledger l2
@@ -304,6 +368,9 @@ export const shopLedgerService = {
     const base = [shopId ?? null, fromDate ?? null, toDate ?? null];
 
     const opening = await computeOpeningBalance(shopId, fromDate);
+    const openingBalances = shopId == null
+      ? await computePerShopOpeningBalances(fromDate)
+      : undefined;
 
     if (filters.pagination) {
       const countResult = await query<{ c: string }>(COUNT_SELECT, base);
@@ -316,6 +383,7 @@ export const shopLedgerService = {
       );
       return {
         ...opening,
+        openingBalances,
         data: result.rows.map((row) => mapRow(row, opening.openingBalance)),
         meta: {
           total,
@@ -329,6 +397,7 @@ export const shopLedgerService = {
     const result = await query(DATA_SELECT, base);
     return {
       ...opening,
+      openingBalances,
       data: result.rows.map((row) => mapRow(row, opening.openingBalance)),
     };
   },

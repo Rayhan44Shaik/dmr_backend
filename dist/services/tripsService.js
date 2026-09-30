@@ -132,6 +132,10 @@ function mapTripBase(row) {
         others3Amt: num(row.others3_amt),
         others4Amt: num(row.others4_amt),
         others5Amt: num(row.others5_amt),
+        others2Name: str(row.others2_name),
+        others3Name: str(row.others3_name),
+        others4Name: str(row.others4_name),
+        others5Name: str(row.others5_name),
         fuel: num(row.fuel),
         expense: num(row.expense),
         driverBata: num(row.driver_bata),
@@ -1850,6 +1854,10 @@ export const tripsService = {
             farm_gps_accuracy = COALESCE($71, farm_gps_accuracy),
             farm_gps_time = COALESCE($72, farm_gps_time),
             farm_completed_trips = COALESCE($73, farm_completed_trips),
+            others2_name = COALESCE($74, others2_name),
+            others3_name = COALESCE($75, others3_name),
+            others4_name = COALESCE($76, others4_name),
+            others5_name = COALESCE($77, others5_name),
             approved_by = COALESCE($66, approved_by)
            WHERE id = $1`, [
                     tripId,
@@ -1940,6 +1948,10 @@ export const tripsService = {
                     body.farmGpsAccuracy ?? null,
                     normalizeTripTimestamp(body.farmGpsTime),
                     numOrNull(body.farmCompletedTrips),
+                    body.others2Name == null ? null : str(body.others2Name).trim().slice(0, 120),
+                    body.others3Name == null ? null : str(body.others3Name).trim().slice(0, 120),
+                    body.others4Name == null ? null : str(body.others4Name).trim().slice(0, 120),
+                    body.others5Name == null ? null : str(body.others5Name).trim().slice(0, 120),
                 ]);
                 try {
                     await client.query(`UPDATE trips SET
@@ -2604,6 +2616,12 @@ export const tripsService = {
             delete autosaveBody.deliveryStepSubmitted;
             delete autosaveBody.expensesStepSubmitted;
             delete autosaveBody.endStepSubmitted;
+            // End Meter is final-submit data. A typo in the background/manual Save
+            // Progress path must never constrain diesel meters or become authoritative.
+            if (step === "expenses") {
+                delete autosaveBody.endMeter;
+                delete autosaveBody.closingMeter;
+            }
             return this.save(id, autosaveBody);
         }
         // Per-load step order for Farm / Pickup / Deliveries; trip-level for start/expenses.
@@ -2735,6 +2753,13 @@ export const tripsService = {
             }
         }
         if (step === "expenses") {
+            for (const index of [2, 3, 4, 5]) {
+                const amount = num(body[`others${index}Amt`]);
+                const name = str(body[`others${index}Name`]).trim();
+                if (amount > 0 && !name) {
+                    throw new AppError(422, `Other expense ${index - 1} requires a description.`);
+                }
+            }
             const closing = numOrNull(body.closingMeter) ?? numOrNull(body.endMeter) ?? numOrNull(current.closing_meter);
             if (closing != null) {
                 const maxDest = Math.max(0, ...legRows.map((l) => l.destMeter ?? 0));

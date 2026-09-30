@@ -18,7 +18,10 @@ export const masterEntities = Object.keys(configs) as MasterEntity[];
 const text = z.string().trim().max(200).optional();
 const listSchema = z.object({
   page: z.coerce.number().int().min(1).max(100000).optional(),
-  pageSize: z.coerce.number().int().min(1).max(100).default(25),
+  // The shared Rows Per Page control intentionally accepts custom values up
+  // to 500. Keep the API contract aligned so values such as 110 do not become
+  // a misleading 400 Validation failed response.
+  pageSize: z.coerce.number().int().min(1).max(500).default(25),
   search: text,
   status: z.enum(["Active", "Inactive", "Suspended", ""]).optional(),
   sort: z.enum(["name", "number", "status"]).default("number"),

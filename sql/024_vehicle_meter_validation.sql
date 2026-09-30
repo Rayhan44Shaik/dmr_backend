@@ -81,7 +81,7 @@ SELECT
   expense_date AS event_date,
   created_at AS event_instant,
   created_at
-FROM fuel_expenses
+FROM N
 WHERE COALESCE(deleted, FALSE) = FALSE
   AND vehicle_id IS NOT NULL
   AND meter_reading IS NOT NULL

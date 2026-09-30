@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { postJson, patchJson, startApp, type TestApp } from "./helpers/app.js";
+import { getJson, postJson, patchJson, startApp, type TestApp } from "./helpers/app.js";
 import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
@@ -477,5 +477,43 @@ describe("HTTP API and transaction safety", () => {
     assert.equal(row.rows[0].is_financial, false, "failed approval must not be financial");
     assert.equal(await currentOutstanding(shop.id), 3000, "only the approved (b) credit persisted");
     assert.equal(await ledgerNet(shop.id), 5000 - 12000, "ledger holds sale debit and b-credit only");
+  });
+
+  it("21. named recent and weekly-summary routes are not captured by /:id", async () => {
+    const { shop } = await seedShopWithDebit(10000, 5000, "2026-08-06");
+    const collection = await collectionEntryService.create({
+      collectionDate: "2026-08-16",
+      shopId: shop.id,
+      amount: 2000,
+    });
+    await collectionEntryService.approve(collection.id);
+    // Some imported shops have a trustworthy current_balance but no historical
+    // opening_balance baseline. Weekly opening must still reconcile from the
+    // current balance and subsequent ledger movements.
+    await pool.query(`UPDATE shops SET opening_balance = 0 WHERE id = $1`, [shop.id]);
+
+    const recent = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/recent?shopId=${shop.id}&limit=10&includeDeleted=true`
+    );
+    assert.equal(recent.status, 200, JSON.stringify(recent.body));
+    assert.equal(recent.body[0].id, collection.id);
+    assert.equal(recent.body[0].canDelete, true);
+
+    const weekly = await getJson(
+      baseUrl,
+      `/api/operations/collection-entry/weekly-summary?shopId=${shop.id}&date=2026-08-16`
+    );
+    assert.equal(weekly.status, 200, JSON.stringify(weekly.body));
+    assert.equal(weekly.body.openingBalance, 15000);
+    assert.equal(weekly.body.approvedCollections, 2000);
+    assert.equal(weekly.body.closingBalance, 13000);
+
+    const allWeekly = await getJson(
+      baseUrl,
+      "/api/operations/collection-entry/weekly-summaries?date=2026-08-16"
+    );
+    assert.equal(allWeekly.status, 200, JSON.stringify(allWeekly.body));
+    assert.ok(allWeekly.body.some((row: { shopId: number }) => row.shopId === shop.id));
   });
 });
