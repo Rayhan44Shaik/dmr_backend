@@ -54,6 +54,22 @@ describe("farmPaymentsService", () => {
     assert.equal(row.paidAmount, 0);
     assert.equal(row.status, "Pending");
     assert.equal(row.farmName, "Test Farm");
+    assert.equal(row.totalBirds, 100, "Farm Payments uses Step 3 pickup birds");
+    assert.equal(row.dcWeight, 250.5, "Farm Payments uses Step 3 DC weight");
+
+    const incomplete = await pool.query<{ id: number }>(
+      `INSERT INTO trips (
+         trip_no, trip_date, status, deleted, pickup_step_submitted,
+         source_farm, vehicle_no, supervisor_name, total_birds, dc_weight
+       ) VALUES (
+         'TRP-FP-INCOMPLETE', '2026-09-10', 'Pending', FALSE, TRUE,
+         'Test Farm', 'TS09AB1234', 'Sup One', 999, 999
+       ) RETURNING id`
+    );
+    const completedOnly = await farmPaymentsService.list();
+    assert.ok(Array.isArray(completedOnly));
+    assert.ok(!completedOnly.some((candidate) => candidate.tripId === incomplete.rows[0].id),
+      "non-completed trips must never appear in Farm Payments");
 
     const updated = await farmPaymentsService.upsertMany([
       {
@@ -106,5 +122,49 @@ describe("farmPaymentsService", () => {
     for (const row of page2.data) {
       assert.ok(!ids1.has(row.tripId), "pages do not overlap");
     }
+  });
+
+  it("combines every submitted load into one completed-trip farm payment", async () => {
+    const trip = await pool.query<{ id: number }>(
+      `INSERT INTO trips (
+         trip_no, trip_date, status, deleted, pickup_step_submitted, leg_count,
+         source_farm, vehicle_no, supervisor_name, farm_bird_type,
+         total_birds, dc_weight, farm_rate, farm_amount
+       ) VALUES (
+         'TRP-FP-MULTI-001', '2026-09-20', 'Completed', FALSE, TRUE, 2,
+         'Farm One', 'TS09ML1234', 'Sup Multi', 'Broiler',
+         40, 80, 0, 0
+       ) RETURNING id`
+    );
+    const tripId = trip.rows[0].id;
+
+    await pool.query(
+      `INSERT INTO trip_legs (
+         trip_id, leg_index, source_farm, farm_bird_type,
+         total_birds, dc_weight, farm_step_submitted, pickup_step_submitted
+       ) VALUES
+         ($1, 1, 'Farm One', 'Broiler', 40, 80, TRUE, TRUE),
+         ($1, 2, 'Farm Two', 'Country Chicken', 60, 120, TRUE, TRUE)`,
+      [tripId]
+    );
+
+    const listed = await farmPaymentsService.list();
+    assert.ok(Array.isArray(listed));
+    const row = listed.find((candidate) => candidate.tripId === tripId);
+    assert.ok(row);
+    assert.equal(row.totalBirds, 100);
+    assert.equal(row.dcWeight, 200);
+    assert.equal(row.farmName, "Farm One, Farm Two");
+    assert.equal(row.loads.length, 2);
+    assert.deepEqual(row.loads.map((load) => [load.load, load.totalBirds, load.dcWeight]), [
+      [1, 40, 80],
+      [2, 60, 120],
+    ]);
+
+    const [saved] = await farmPaymentsService.upsertMany([{ tripId, rate: 10 }]);
+    assert.equal(saved.totalBirds, 100);
+    assert.equal(saved.dcWeight, 200);
+    assert.equal(saved.amount, 2000, "rate applies to Load 1 + Load 2 DC weight");
+    assert.equal(saved.loads.length, 2);
   });
 });

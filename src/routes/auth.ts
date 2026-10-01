@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { authService } from "../services/authService.js";
 import { AppError, asyncHandler } from "../middleware/errorHandler.js";
-import { authExpiresAt, authUser, clearSessionCookie, requestToken, requireAuth, sessionCookie } from "../middleware/auth.js";
+import { authExpiresAt, authToken, authUser, clearSessionCookie, requireAuth, sessionCookie } from "../middleware/auth.js";
 
 export const authRouter = Router();
 const credentials = z.object({ username: z.string().trim().min(1).max(100), password: z.string().min(1).max(1024) }).strict();
@@ -62,7 +62,7 @@ authRouter.get("/me", requireAuth, asyncHandler(async (req, res) => {
   return res.json({ user });
 }));
 authRouter.post("/logout", requireAuth, asyncHandler(async (req, res) => {
-  const token = requestToken(req); if (token) await authService.logout(token);
+  await authService.logout(authToken(res));
   res.setHeader("Set-Cookie", clearSessionCookie()); res.status(204).end();
 }));
 

@@ -310,6 +310,45 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     assert.equal(ledger.data[0].debit, 44205.6, "all legacy debits remain included once");
   });
 
+  it("2d. cumulative quantities reconcile Step 4 farm, delivery, mortality and weight loss", async () => {
+    const { shop, tripId } = await seedShopWithDebit(0, 5000, "2026-08-08");
+    await pool.query(
+      `UPDATE trip_deliveries
+          SET birds = 95, weight = 190, mortality = 5, mort_kg = 4,
+              farm_birds = 100, farm_weight = 200, delivery_mode = 'box'
+        WHERE trip_id = $1 AND shop_id = $2`,
+      [tripId, shop.id]
+    );
+
+    let ledger = await shopLedgerService.list({
+      shopId: shop.id,
+      fromDate: "2026-08-08",
+      toDate: "2026-08-08",
+    });
+    assert.equal(ledger.data.length, 1);
+    assert.equal(ledger.data[0].farmBirds, 100);
+    assert.equal(ledger.data[0].birds, 95);
+    assert.equal(ledger.data[0].mortalityBirds, 5);
+    assert.equal(ledger.data[0].farmWeight, 200);
+    assert.equal(ledger.data[0].weight, 190);
+    assert.equal(ledger.data[0].mortalityWeight, 4);
+    assert.equal(ledger.data[0].weightLoss, 6);
+
+    await pool.query(
+      `UPDATE trip_deliveries SET delivery_mode = 'weight', mort_kg = 99
+        WHERE trip_id = $1 AND shop_id = $2`,
+      [tripId, shop.id]
+    );
+    ledger = await shopLedgerService.list({
+      shopId: shop.id,
+      fromDate: "2026-08-08",
+      toDate: "2026-08-08",
+    });
+    assert.equal(ledger.data[0].mortalityBirds, 5, "weight mode still captures mortality birds");
+    assert.equal(ledger.data[0].mortalityWeight, 0, "weight mode never reports mortality weight");
+    assert.equal(ledger.data[0].weightLoss, 10, "farm weight = delivered weight + weight loss");
+  });
+
   it("3. Custom date range is complete — a late range returns only its matching tail", async () => {
     const { shop } = await seedShopWithDebit(10000, 5000, "2026-08-06");
     const c = await collectionEntryService.create({

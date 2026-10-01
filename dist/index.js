@@ -13,6 +13,7 @@ app.use(securityHeaders);
 app.use(cors({
     origin: env.corsOrigin.length ? env.corsOrigin : true,
     credentials: true,
+    exposedHeaders: ["X-DMR-Session-Token"],
 }));
 app.use(express.json({ limit: "25mb" }));
 app.get("/", (_req, res) => {

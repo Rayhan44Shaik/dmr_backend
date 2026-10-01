@@ -209,6 +209,8 @@ export const shopSalesService = {
       fromDate?: string;
       toDate?: string;
       status?: string;
+      search?: string;
+      sortBy?: string;
       includeDeleted?: boolean;
       pagination?: PaginationParams | null;
     } = {}
@@ -233,6 +235,15 @@ export const shopSalesService = {
       params.push(filters.toDate);
       clauses.push(`t.trip_date <= $${params.length}`);
     }
+    if (filters.search?.trim()) {
+      params.push(`%${filters.search.trim()}%`);
+      clauses.push(`(
+        d.sale_no ILIKE $${params.length}
+        OR t.trip_no ILIKE $${params.length}
+        OR d.shop_name ILIKE $${params.length}
+        OR COALESCE(d.remarks, '') ILIKE $${params.length}
+      )`);
+    }
     if (filters.status) {
       if (filters.status === "Approved") clauses.push(`t.status = 'Completed'`);
       else if (filters.status === "Pending Approval") clauses.push(`t.status = 'Pending'`);
@@ -242,6 +253,25 @@ export const shopSalesService = {
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const orderBy: Record<string, string> = {
+      latest: "t.trip_date DESC, d.id DESC",
+      oldest: "t.trip_date ASC, d.id ASC",
+      sale_asc: "d.sale_no ASC, d.id ASC",
+      sale_desc: "d.sale_no DESC, d.id DESC",
+      shop_asc: "d.shop_name ASC, t.trip_date DESC, d.id DESC",
+      shop_desc: "d.shop_name DESC, t.trip_date DESC, d.id DESC",
+      birds_asc: "d.birds ASC, t.trip_date DESC, d.id DESC",
+      birds_desc: "d.birds DESC, t.trip_date DESC, d.id DESC",
+      weight_asc: "d.weight ASC, t.trip_date DESC, d.id DESC",
+      weight_desc: "d.weight DESC, t.trip_date DESC, d.id DESC",
+      rate_asc: "COALESCE(NULLIF(d.rate, 0), re.rate, 0) ASC, t.trip_date DESC, d.id DESC",
+      rate_desc: "COALESCE(NULLIF(d.rate, 0), re.rate, 0) DESC, t.trip_date DESC, d.id DESC",
+      amount_asc: "d.amount ASC, t.trip_date DESC, d.id DESC",
+      amount_desc: "d.amount DESC, t.trip_date DESC, d.id DESC",
+      remark_asc: "COALESCE(d.remarks, '') ASC, t.trip_date DESC, d.id DESC",
+      remark_desc: "COALESCE(d.remarks, '') DESC, t.trip_date DESC, d.id DESC",
+    };
+    const order = orderBy[filters.sortBy ?? "latest"] ?? orderBy.latest;
 
     if (filters.pagination) {
       const countResult = await query<{ c: string }>(
@@ -253,7 +283,7 @@ export const shopSalesService = {
       const pagedParams = [...params, filters.pagination.limit, filters.pagination.offset];
       const result = await query(
         `${SALE_SELECT} ${where}
-         ORDER BY t.trip_date DESC, d.id DESC
+         ORDER BY ${order}
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         pagedParams
       );
@@ -261,7 +291,7 @@ export const shopSalesService = {
     }
 
     const result = await query(
-      `${SALE_SELECT} ${where} ORDER BY t.trip_date DESC, d.id DESC`,
+      `${SALE_SELECT} ${where} ORDER BY ${order}`,
       params
     );
     return result.rows.map(mapDeliverySale);
@@ -522,23 +552,40 @@ export const shopSalesService = {
           [saleShopId, id, trip.id, oldAmount]
         );
         if (!ledgerRow.rowCount) {
-          throw new AppError(409, "Shop Sale ledger row is missing; correction was not applied");
+          // Repair legacy/incomplete deliveries that reached Shop Sales before
+          // their financial row was created. The delivery update and this
+          // authoritative debit share one transaction, so neither can persist
+          // alone. Use the full new amount (not merely the rate-change delta),
+          // because there is no prior ledger value to correct.
+          await applyDebit(
+            client,
+            saleShopId,
+            {
+              entryDate: dateOnly(trip.tripDate) ?? "",
+              entryType: "sale",
+              referenceType: "shop_sale",
+              referenceId: id,
+              note: `Shop sale debit repaired during update (₹${nextAmount.toFixed(2)})`,
+            },
+            nextAmount
+          );
+        } else {
+          const currentNet = num(ledgerRow.rows[0].debit) - num(ledgerRow.rows[0].credit);
+          const correctedNet = Number((currentNet + diff).toFixed(2));
+          await client.query(
+            `UPDATE shop_ledger
+                SET debit = $2, credit = $3,
+                    note = $4
+              WHERE id = $1`,
+            [
+              ledgerRow.rows[0].id,
+              correctedNet > 0 ? correctedNet : 0,
+              correctedNet < 0 ? -correctedNet : 0,
+              `Shop sale updated (₹${oldAmount.toFixed(2)} → ₹${nextAmount.toFixed(2)})`,
+            ]
+          );
+          await recalcShopBalance(client, saleShopId);
         }
-        const currentNet = num(ledgerRow.rows[0].debit) - num(ledgerRow.rows[0].credit);
-        const correctedNet = Number((currentNet + diff).toFixed(2));
-        await client.query(
-          `UPDATE shop_ledger
-              SET debit = $2, credit = $3,
-                  note = $4
-            WHERE id = $1`,
-          [
-            ledgerRow.rows[0].id,
-            correctedNet > 0 ? correctedNet : 0,
-            correctedNet < 0 ? -correctedNet : 0,
-            `Shop sale updated (₹${oldAmount.toFixed(2)} → ₹${nextAmount.toFixed(2)})`,
-          ]
-        );
-        await recalcShopBalance(client, saleShopId);
       }
       await recalcTripDeliveryTotals(client, trip.id);
       const row = await client.query(`${SALE_SELECT} WHERE d.id = $1`, [id]);

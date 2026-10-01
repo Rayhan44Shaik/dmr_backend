@@ -479,8 +479,8 @@ export const mastersService = {
                     body.address ?? null,
                     body.latitude ?? null,
                     body.longitude ?? null,
-                    body.paperRate ?? 1,
-                    body.associationType ?? "",
+                    body.paperRate ?? 10,
+                    body.associationType ?? "Ass Gun",
                     body.status ?? "Active",
                     body.openingBalance ?? 0,
                 ]);
@@ -513,8 +513,8 @@ export const mastersService = {
             body.address ?? null,
             body.latitude ?? null,
             body.longitude ?? null,
-            body.paperRate ?? 1,
-            body.associationType ?? "",
+            body.paperRate ?? 10,
+            body.associationType ?? "Ass Gun",
             body.status ?? "Active",
             body.openingBalance ?? 0,
         ]);

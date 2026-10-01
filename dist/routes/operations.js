@@ -261,6 +261,12 @@ function collectionEntryFilters(req) {
 operationsRouter.get("/collection-entry", asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.list(collectionEntryFilters(req)));
 }));
+operationsRouter.get("/shop-ledger/cumulative-quantities", asyncHandler(async (req, res) => {
+    res.json(await shopLedgerService.cumulativeQuantities({
+        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+    }));
+}));
 // Keep named collection routes above /collection-entry/:id. Otherwise Express
 // treats values such as "recent" as an id and the database receives NaN.
 operationsRouter.get("/collection-entry/recent", asyncHandler(async (req, res) => {

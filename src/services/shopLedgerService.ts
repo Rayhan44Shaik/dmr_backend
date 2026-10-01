@@ -43,6 +43,8 @@ export interface ShopLedgerRow {
   referenceId: number;
   /** Trip no / sale no / collection no when the reference resolves. */
   referenceNo: string;
+  /** Comma-separated load numbers represented by this transaction row. */
+  loadLabel: string;
   /** Human description (ledger note or a readable default). */
   description: string;
   debit: number;
@@ -51,6 +53,11 @@ export interface ShopLedgerRow {
   balance: number;
   birds: number;
   weight: number;
+  farmBirds: number;
+  farmWeight: number;
+  mortalityBirds: number;
+  mortalityWeight: number;
+  weightLoss: number;
   rate: number;
   paymentMode: string | null;
   /** Collections only: ops_record_status of the source collection. */
@@ -67,6 +74,16 @@ export interface ShopLedgerResponse {
   openingBalances?: Array<{ shopId: number; shopName: string; openingBalance: number }>;
   data: ShopLedgerRow[];
   meta?: PaginatedResult<unknown>["meta"];
+}
+
+export interface ShopLedgerCumulativeQuantity {
+  shopId: number;
+  shopName: string;
+  birds: number;
+  weight: number;
+  mortalityBirds: number;
+  mortalityWeight: number;
+  weightLoss: number;
 }
 
 async function computePerShopOpeningBalances(
@@ -108,6 +125,15 @@ function mapRow(row: Record<string, unknown>, openingBalance: number): ShopLedge
       : referenceType === "collection"
         ? "collection"
         : "sale";
+  const weight = num(row.weight);
+  const mortalityBirds = num(row.mortality_birds);
+  const mortalityWeight = num(row.mortality_weight);
+  // The cumulative report is a reconciliation, so even legacy/incomplete
+  // Step 4 rows must obey the identities shown to users. Preserve the stored
+  // farm weight when valid; clamp impossible historical values to the
+  // delivered + mortality floor so weight loss never becomes negative.
+  const farmBirds = num(row.birds) + mortalityBirds;
+  const farmWeight = Math.max(num(row.farm_weight), weight + mortalityWeight);
   return {
     id: num(row.id),
     shopId: row.shop_id == null ? null : num(row.shop_id),
@@ -119,6 +145,7 @@ function mapRow(row: Record<string, unknown>, openingBalance: number): ShopLedge
     referenceType,
     referenceId: num(row.reference_id),
     referenceNo: str(row.ref_no),
+    loadLabel: str(row.load_label),
     description: str(row.note),
     debit: num(row.debit),
     credit: num(row.credit),
@@ -126,7 +153,12 @@ function mapRow(row: Record<string, unknown>, openingBalance: number): ShopLedge
     // opening so the row balance is the true authoritative outstanding.
     balance: openingBalance + num(row.running),
     birds: num(row.birds),
-    weight: num(row.weight),
+    weight,
+    farmBirds,
+    farmWeight,
+    mortalityBirds,
+    mortalityWeight,
+    weightLoss: Math.max(0, Number((farmWeight - weight - mortalityWeight).toFixed(2))),
     rate: num(row.rate),
     paymentMode: row.payment_mode == null ? null : str(row.payment_mode),
     status: row.collection_status == null ? null : str(row.collection_status),
@@ -154,8 +186,20 @@ const DATA_SELECT = `
            COALESCE(dd.remarks, dt.delivery_remarks, '') AS delivery_remarks,
            COALESCE(NULLIF(dd.sale_no, ''), NULLIF(tt.trip_no, ''),
                     NULLIF(c.collection_no, ''), '') AS ref_no,
+           CASE WHEN dd.id IS NOT NULL
+                THEN COALESCE(dd_leg.leg_index, 1)::text
+                ELSE COALESCE(dt.load_label, '') END AS load_label,
            COALESCE(dd.birds, dt.birds, 0)::numeric AS birds,
            COALESCE(dd.weight, dt.weight, 0)::numeric AS weight,
+           COALESCE(dd.farm_birds, dt.farm_birds,
+                    COALESCE(dd.birds, dt.birds, 0) + COALESCE(dd.mortality, dt.mortality_birds, 0))::numeric AS farm_birds,
+           COALESCE(dd.farm_weight, dt.farm_weight,
+                    COALESCE(dd.weight, dt.weight, 0) +
+                    CASE WHEN COALESCE(dd.delivery_mode::text, dt.delivery_mode, 'box') = 'weight'
+                         THEN 0 ELSE COALESCE(dd.mort_kg, dt.mortality_weight, 0) END)::numeric AS farm_weight,
+           COALESCE(dd.mortality, dt.mortality_birds, 0)::numeric AS mortality_birds,
+           CASE WHEN COALESCE(dd.delivery_mode::text, dt.delivery_mode, 'box') = 'weight'
+                THEN 0 ELSE COALESCE(dd.mort_kg, dt.mortality_weight, 0) END::numeric AS mortality_weight,
            COALESCE(dd.rate, dt.rate, 0)::numeric AS rate,
            c.payment_mode AS payment_mode,
            c.status AS collection_status
@@ -165,6 +209,7 @@ const DATA_SELECT = `
            ON l.reference_type = 'trip' AND tt.id = l.reference_id
     LEFT JOIN trip_deliveries dd
            ON l.reference_type = 'shop_sale' AND dd.id = l.reference_id
+    LEFT JOIN trip_legs dd_leg ON dd_leg.id = dd.leg_id
     LEFT JOIN LATERAL (
       SELECT COALESCE(SUM(l2.debit - l2.credit), 0)::numeric AS net_amount
       FROM shop_ledger l2
@@ -196,10 +241,18 @@ const DATA_SELECT = `
     LEFT JOIN LATERAL (
       SELECT COALESCE(SUM(d3.birds), 0)::numeric AS birds,
              COALESCE(SUM(d3.weight), 0)::numeric AS weight,
+             COALESCE(SUM(COALESCE(d3.farm_birds, d3.birds + d3.mortality)), 0)::numeric AS farm_birds,
+             COALESCE(SUM(COALESCE(d3.farm_weight, d3.weight + CASE WHEN d3.delivery_mode = 'weight' THEN 0 ELSE d3.mort_kg END)), 0)::numeric AS farm_weight,
+             COALESCE(SUM(d3.mortality), 0)::numeric AS mortality_birds,
+             COALESCE(SUM(CASE WHEN d3.delivery_mode = 'weight' THEN 0 ELSE d3.mort_kg END), 0)::numeric AS mortality_weight,
+             CASE WHEN BOOL_AND(d3.delivery_mode = 'weight') THEN 'weight' ELSE 'box' END AS delivery_mode,
              COALESCE(MAX(d3.rate), 0)::numeric AS rate,
+             COALESCE(STRING_AGG(DISTINCT COALESCE(d3_leg.leg_index, 1)::text, ','
+                                 ORDER BY COALESCE(d3_leg.leg_index, 1)::text), '') AS load_label,
              COALESCE(STRING_AGG(DISTINCT NULLIF(BTRIM(d3.sub_shop_name), ''), ', '), '') AS sub_shop_name,
              COALESCE(STRING_AGG(DISTINCT NULLIF(BTRIM(d3.remarks), ''), ', '), '') AS delivery_remarks
       FROM trip_deliveries d3
+      LEFT JOIN trip_legs d3_leg ON d3_leg.id = d3.leg_id
       WHERE d3.trip_id = l.reference_id
         AND d3.shop_id = l.shop_id
         AND COALESCE(d3.deleted, FALSE) = FALSE
@@ -356,6 +409,80 @@ async function computeOpeningBalance(
 }
 
 export const shopLedgerService = {
+  async cumulativeQuantities(filters: { fromDate?: string; toDate?: string } = {}): Promise<ShopLedgerCumulativeQuantity[]> {
+    const result = await query<Record<string, unknown>>(
+      `WITH delivery_by_load_shop AS (
+         SELECT t.id AS trip_id, COALESCE(d.leg_id, 0) AS load_key,
+                d.shop_id, MAX(d.shop_name) AS shop_name,
+                SUM(d.birds)::numeric AS raw_birds,
+                SUM(d.weight)::numeric AS raw_weight,
+                SUM(d.mortality)::numeric AS mortality_birds,
+                SUM(CASE WHEN d.delivery_mode = 'weight' THEN 0 ELSE d.mort_kg END)::numeric AS mortality_weight,
+                MAX(COALESCE(tl.total_birds, t.total_birds))::numeric AS farm_birds,
+                MAX(COALESCE(tl.dc_weight, t.dc_weight))::numeric AS farm_weight
+           FROM trips t
+           JOIN trip_deliveries d ON d.trip_id = t.id
+           LEFT JOIN trip_legs tl ON tl.id = d.leg_id
+          WHERE t.status = 'Completed' AND COALESCE(t.deleted, FALSE) = FALSE
+            AND COALESCE(d.deleted, FALSE) = FALSE
+            AND (d.leg_id IS NULL OR tl.pickup_step_submitted = TRUE)
+            AND ($1::date IS NULL OR t.trip_date >= $1::date)
+            AND ($2::date IS NULL OR t.trip_date <= $2::date)
+          GROUP BY t.id, COALESCE(d.leg_id, 0), d.shop_id
+       ), load_totals AS (
+         SELECT trip_id, load_key,
+                SUM(raw_birds) AS raw_birds,
+                SUM(raw_weight) AS raw_weight,
+                SUM(mortality_birds) AS mortality_birds,
+                SUM(mortality_weight) AS mortality_weight,
+                MAX(farm_birds) AS farm_birds,
+                MAX(farm_weight) AS farm_weight
+           FROM delivery_by_load_shop GROUP BY trip_id, load_key
+       ), normalized AS (
+         SELECT d.*,
+                GREATEST(t.farm_birds - t.mortality_birds, 0) *
+                  CASE WHEN t.raw_birds > 0 THEN d.raw_birds / t.raw_birds ELSE 0 END AS birds,
+                LEAST(t.raw_weight, GREATEST(t.farm_weight - t.mortality_weight, 0)) *
+                  CASE WHEN t.raw_weight > 0 THEN d.raw_weight / t.raw_weight ELSE 0 END AS weight,
+                GREATEST(t.farm_weight - t.mortality_weight -
+                  LEAST(t.raw_weight, GREATEST(t.farm_weight - t.mortality_weight, 0)), 0) *
+                  CASE WHEN t.raw_weight > 0 THEN d.raw_weight / t.raw_weight
+                       WHEN COUNT(*) OVER (PARTITION BY d.trip_id, d.load_key) > 0
+                       THEN 1::numeric / COUNT(*) OVER (PARTITION BY d.trip_id, d.load_key) ELSE 0 END AS weight_loss
+           FROM delivery_by_load_shop d
+           JOIN load_totals t USING (trip_id, load_key)
+       )
+       SELECT shop_id, MAX(shop_name) AS shop_name,
+              SUM(birds)::float AS birds, SUM(weight)::float AS weight,
+              SUM(mortality_birds)::float AS mortality_birds,
+              SUM(mortality_weight)::float AS mortality_weight,
+              SUM(weight_loss)::float AS weight_loss
+         FROM normalized GROUP BY shop_id ORDER BY MAX(shop_name), shop_id`,
+      [filters.fromDate ?? null, filters.toDate ?? null],
+    );
+    const rows = result.rows.map((row) => ({
+      shopId: num(row.shop_id), shopName: str(row.shop_name),
+      birds: num(row.birds), weight: num(row.weight),
+      mortalityBirds: Math.round(num(row.mortality_birds)), mortalityWeight: num(row.mortality_weight),
+      weightLoss: num(row.weight_loss),
+    }));
+
+    // Birds are indivisible. SQL computes proportional shop allocations so
+    // the Step 3 trip cap is preserved, which can produce fractions after
+    // grouping. Apply the largest-remainder method once across the result:
+    // every shop receives a whole bird and the grand total remains exact.
+    const targetBirds = Math.round(rows.reduce((sum, row) => sum + row.birds, 0));
+    const wholeBirds = rows.map((row) => Math.floor(row.birds));
+    let remaining = targetBirds - wholeBirds.reduce((sum, value) => sum + value, 0);
+    const remainderOrder = rows
+      .map((row, index) => ({ index, fraction: row.birds - wholeBirds[index], shopId: row.shopId }))
+      .sort((a, b) => b.fraction - a.fraction || a.shopId - b.shopId);
+    for (let index = 0; index < remainderOrder.length && remaining > 0; index += 1, remaining -= 1) {
+      wholeBirds[remainderOrder[index].index] += 1;
+    }
+    return rows.map((row, index) => ({ ...row, birds: wholeBirds[index] }));
+  },
+
   async list(filters: {
     shopId?: number;
     fromDate?: string;

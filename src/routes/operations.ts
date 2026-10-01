@@ -288,6 +288,8 @@ operationsRouter.get(
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
+        sortBy: typeof req.query.sortBy === "string" ? req.query.sortBy : undefined,
         includeDeleted: req.query.includeDeleted === "true",
         pagination: opsListPagination(req),
       })
@@ -467,6 +469,16 @@ operationsRouter.get(
   "/collection-entry",
   asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.list(collectionEntryFilters(req)));
+  })
+);
+
+operationsRouter.get(
+  "/shop-ledger/cumulative-quantities",
+  asyncHandler(async (req, res) => {
+    res.json(await shopLedgerService.cumulativeQuantities({
+      fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+      toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+    }));
   })
 );
 

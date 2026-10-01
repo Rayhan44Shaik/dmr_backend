@@ -39,6 +39,13 @@ export interface TripFarmPaymentRow {
   referenceNo: string | null;
   vehicleNo: string | null;
   supervisorName: string | null;
+  loads: Array<{
+    load: number;
+    farmName: string | null;
+    birdType: string | null;
+    totalBirds: number;
+    dcWeight: number;
+  }>;
 }
 
 export interface FarmPaymentUpsertInput {
@@ -56,10 +63,11 @@ const LIST_SELECT = `
     t.trip_no,
     t.trip_date,
     t.source_farm_id,
-    t.source_farm,
-    t.farm_bird_type,
-    t.total_birds,
-    t.dc_weight,
+    CASE WHEN COALESCE(la.load_count, 0) > 0 THEN la.farm_names ELSE t.source_farm END AS source_farm,
+    CASE WHEN COALESCE(la.load_count, 0) > 0 THEN la.bird_types ELSE t.farm_bird_type END AS farm_bird_type,
+    CASE WHEN COALESCE(la.load_count, 0) > 0 THEN la.total_birds ELSE t.total_birds END AS total_birds,
+    CASE WHEN COALESCE(la.load_count, 0) > 0 THEN la.dc_weight ELSE t.dc_weight END AS dc_weight,
+    COALESCE(la.loads, '[]'::jsonb) AS loads,
     t.farm_rate,
     t.farm_amount,
     COALESCE(t.farm_paid_amount, 0) AS farm_paid_amount,
@@ -69,6 +77,23 @@ const LIST_SELECT = `
     t.vehicle_no,
     t.supervisor_name
   FROM trips t
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS load_count,
+           COALESCE(SUM(l.total_birds), 0)::numeric AS total_birds,
+           COALESCE(SUM(l.dc_weight), 0)::numeric AS dc_weight,
+           STRING_AGG(DISTINCT NULLIF(BTRIM(l.source_farm), ''), ', ' ORDER BY NULLIF(BTRIM(l.source_farm), '')) AS farm_names,
+           STRING_AGG(DISTINCT NULLIF(BTRIM(l.farm_bird_type), ''), ', ' ORDER BY NULLIF(BTRIM(l.farm_bird_type), '')) AS bird_types,
+           JSONB_AGG(JSONB_BUILD_OBJECT(
+             'load', l.leg_index,
+             'farmName', l.source_farm,
+             'birdType', l.farm_bird_type,
+             'totalBirds', COALESCE(l.total_birds, 0),
+             'dcWeight', COALESCE(l.dc_weight, 0)
+           ) ORDER BY l.leg_index) AS loads
+      FROM trip_legs l
+     WHERE l.trip_id = t.id
+       AND l.pickup_step_submitted = TRUE
+  ) la ON TRUE
 `;
 
 function roundMoney(n: number): number {
@@ -86,11 +111,25 @@ function mapRow(row: Record<string, unknown>): TripFarmPaymentRow {
   const rate = num(row.farm_rate);
   const dcWeight = num(row.dc_weight);
   const storedAmount = num(row.farm_amount);
-  const amount = storedAmount > 0 ? storedAmount : roundMoney(dcWeight * rate);
+  // One editable trip rate applies to the complete submitted pickup weight,
+  // including Load 2–4. Recompute on reads so an older Load-1-only stored
+  // amount cannot remain stale after another load is submitted.
+  const amount = rate > 0 ? roundMoney(dcWeight * rate) : storedAmount;
   const paidAmount = num(row.farm_paid_amount);
   const balance = Math.max(0, roundMoney(amount - paidAmount));
   const mode = str(row.farm_payment_mode);
   const reference = str(row.farm_payment_reference);
+  let rawLoads: unknown[] = [];
+  if (Array.isArray(row.loads)) {
+    rawLoads = row.loads;
+  } else if (typeof row.loads === "string") {
+    try {
+      const parsed: unknown = JSON.parse(row.loads);
+      rawLoads = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      rawLoads = [];
+    }
+  }
 
   return {
     id: tripId,
@@ -112,6 +151,16 @@ function mapRow(row: Record<string, unknown>): TripFarmPaymentRow {
     referenceNo: reference || null,
     vehicleNo: row.vehicle_no == null ? null : str(row.vehicle_no),
     supervisorName: row.supervisor_name == null ? null : str(row.supervisor_name),
+    loads: rawLoads.map((value) => {
+      const load = value as Record<string, unknown>;
+      return {
+        load: num(load.load),
+        farmName: load.farmName == null ? null : str(load.farmName),
+        birdType: load.birdType == null ? null : str(load.birdType),
+        totalBirds: num(load.totalBirds),
+        dcWeight: num(load.dcWeight),
+      };
+    }),
   };
 }
 
@@ -244,7 +293,14 @@ export const farmPaymentsService = {
 
       for (const input of rows) {
         const locked = await client.query(
-          `SELECT id, dc_weight, farm_rate, farm_amount,
+          `SELECT id,
+                  CASE WHEN EXISTS (
+                    SELECT 1 FROM trip_legs l WHERE l.trip_id = trips.id AND l.pickup_step_submitted = TRUE
+                  ) THEN (
+                    SELECT COALESCE(SUM(l.dc_weight), 0) FROM trip_legs l
+                     WHERE l.trip_id = trips.id AND l.pickup_step_submitted = TRUE
+                  ) ELSE dc_weight END AS dc_weight,
+                  farm_rate, farm_amount,
                   COALESCE(farm_paid_amount, 0) AS farm_paid_amount,
                   farm_payment_date,
                   COALESCE(farm_payment_mode, '') AS farm_payment_mode,

@@ -261,6 +261,34 @@ describe("Shop Sales rate editing (corrected rule): locked + within 10 days + â‚
     await assertStatus(shopSalesService.update(deliveryId, { birds: 31 }), 422);
     await assertStatus(shopSalesService.update(deliveryId, { weight: 60.01 }), 422);
   });
+
+  test("17. Rate edit repairs a missing legacy Shop Sale ledger row", async (t) => {
+    const f = newFixture();
+    t.after(() => cleanup(f));
+    const { shopId, deliveryId } = await makeRateEditableTrip(f, { weight: 50, initialRate: 90 });
+    await pool.query(
+      `DELETE FROM shop_ledger
+        WHERE shop_id = $1
+          AND reference_type IN ('shop_sale', 'trip')`,
+      [shopId]
+    );
+
+    const updated = await shopSalesService.update(deliveryId, { rate: 110 });
+    assert.equal(updated.rate, 110);
+    assert.equal(updated.amount, 5500);
+
+    const ledger = await pool.query<{ debit: string; credit: string }>(
+      `SELECT debit, credit
+         FROM shop_ledger
+        WHERE shop_id = $1
+          AND reference_type = 'shop_sale'
+          AND reference_id = $2`,
+      [shopId, deliveryId]
+    );
+    assert.equal(ledger.rowCount, 1, "the missing sale row must be recreated exactly once");
+    assert.equal(Number(ledger.rows[0].debit), 5500);
+    assert.equal(Number(ledger.rows[0].credit), 0);
+  });
 });
 
 describe("Combined field edits within the 10-day window", () => {
