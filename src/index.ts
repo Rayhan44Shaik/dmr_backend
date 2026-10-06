@@ -9,13 +9,18 @@ import { requestId } from "./middleware/requestId.js";
 import { securityHeaders } from "./middleware/securityHeaders.js";
 
 const app = express();
+app.disable("x-powered-by");
 
 app.use(requestId);
 app.use(securityHeaders);
 
 app.use(
   cors({
-    origin: env.corsOrigin.length ? env.corsOrigin : true,
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (env.corsOrigin.includes(origin)) return callback(null, true);
+      return callback(new Error("CORS origin not allowed"));
+    },
     credentials: true,
     exposedHeaders: ["X-DMR-Session-Token"],
   })

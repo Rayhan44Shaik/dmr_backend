@@ -11,7 +11,9 @@ import { shopSalesService } from "../services/shopSalesService.js";
 import { shopLedgerService } from "../services/shopLedgerService.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
+import { operationsSensitiveBoundary, operationsTripsBoundary } from "../middleware/businessBoundary.js";
 export const operationsRouter = Router();
+operationsRouter.use(operationsTripsBoundary, operationsSensitiveBoundary);
 function tripListFilters(req) {
     const { params: pagination, enabled } = parsePagination(req.query);
     return {
@@ -171,6 +173,8 @@ operationsRouter.get("/shop-sales", asyncHandler(async (req, res) => {
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
         status: typeof req.query.status === "string" ? req.query.status : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
+        sortBy: typeof req.query.sortBy === "string" ? req.query.sortBy : undefined,
         includeDeleted: req.query.includeDeleted === "true",
         pagination: opsListPagination(req),
     }));

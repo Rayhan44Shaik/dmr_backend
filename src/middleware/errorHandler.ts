@@ -4,12 +4,26 @@ import { mapPgError } from "../utils/pgErrors.js";
 export class AppError extends Error {
   status: number;
   details?: unknown;
+  code?: string;
 
-  constructor(status: number, message: string, details?: unknown) {
+  constructor(status: number, message: string, details?: unknown, code?: string) {
     super(message);
     this.status = status;
     this.details = details;
+    this.code = code;
   }
+}
+
+function authCodeFor(status: number, message: string): string | null {
+  if (status === 401) {
+    const lower = message.toLowerCase();
+    if (lower.includes("expir")) return "AUTH_EXPIRED";
+    if (lower.includes("revok")) return "AUTH_REVOKED";
+    return "AUTH_INVALID";
+  }
+  if (status === 403) return "FORBIDDEN";
+  if (status === 429) return "RATE_LIMITED";
+  return null;
 }
 
 export function notFound(_req: Request, res: Response) {
@@ -28,11 +42,28 @@ export function errorHandler(
   const withId = (body: Record<string, unknown>) =>
     requestId ? { ...body, requestId } : body;
 
+  // Malformed JSON bodies (body-parser SyntaxError): report 400 with a safe
+  // generic message. Never echo the offending body (it is user input).
+  if (err instanceof SyntaxError && typeof (err as unknown as { status?: unknown }).status === "number") {
+    const status = (err as unknown as { status: number }).status;
+    if (status >= 400 && status < 500) {
+      return res.status(status).json(
+        withId({
+          error: "Invalid request body",
+          message: "The request body is not valid JSON.",
+          code: "VALIDATION_ERROR",
+        })
+      );
+    }
+  }
+
   if (err instanceof AppError) {
+    const code = err.code ?? authCodeFor(err.status, err.message);
     return res.status(err.status).json(
       withId({
         error: err.message,
         message: err.message,
+        ...(code ? { code } : {}),
         details: err.details,
       })
     );

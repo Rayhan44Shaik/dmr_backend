@@ -20,12 +20,16 @@ type CredentialsFile = {
  * Updates (or appends) the plaintext password for `username` in the local
  * gitignored credentials file so operators can see the current password after
  * a UI or CLI change. No-op when the file is absent.
+ *
+ * SECURITY: plaintext credentials must never be persisted in production —
+ * the sync only runs outside NODE_ENV=production.
  */
 export function syncLocalCredentialsPassword(
   username: string,
   password: string,
   extras: { role?: string; employeeId?: number | null; employeeName?: string } = {},
 ): boolean {
+  if (process.env.NODE_ENV === "production") return false;
   if (!existsSync(LOCAL_CREDENTIALS_PATH)) return false;
   let raw: CredentialsFile = {};
   try {

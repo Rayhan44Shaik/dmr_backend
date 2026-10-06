@@ -11,8 +11,10 @@ import { shopSalesService } from "../services/shopSalesService.js";
 import { shopLedgerService } from "../services/shopLedgerService.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
+import { operationsSensitiveBoundary, operationsTripsBoundary } from "../middleware/businessBoundary.js";
 
 export const operationsRouter = Router();
+operationsRouter.use(operationsTripsBoundary, operationsSensitiveBoundary);
 
 function tripListFilters(req: { query: Record<string, unknown> }) {
   const { params: pagination, enabled } = parsePagination(req.query);

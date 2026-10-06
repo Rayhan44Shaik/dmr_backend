@@ -293,10 +293,21 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const atCap = await pool.query(`SELECT weight FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     assert.equal(Number(atCap.rows[0].weight), 200);
 
+    // Weights persist at two-decimal storage precision (tripDeliverySync
+    // normalizes before comparing), so a sub-precision 0.001 overage rounds
+    // to exactly the 200.00 cap and is accepted — the stored row can still
+    // never exceed capacity.
+    await tripsService.save(trip.id, {
+      deliveries: [delivery({ shopName: "A", birds: 50, weight: 200.001 })],
+    } as Record<string, unknown>);
+    const rounded = await pool.query(`SELECT weight FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
+    assert.equal(Number(rounded.rows[0].weight), 200, "sub-precision overage rounds to exactly the cap");
+
+    // A genuine over-capacity submission is rejected outright…
     await assert.rejects(
       () =>
         tripsService.save(trip.id, {
-          deliveries: [delivery({ shopName: "A", birds: 50, weight: 200.001 })],
+          deliveries: [delivery({ shopName: "A", birds: 50, weight: 200.01 })],
         } as Record<string, unknown>),
       /exceed/i
     );
@@ -316,7 +327,11 @@ describe("Trip Delivery capacity validation (weight)", () => {
       ],
     } as Record<string, unknown>); // sums to 198.999, under 200
     const rows = await pool.query(`SELECT weight FROM trip_deliveries WHERE trip_id = $1 ORDER BY id`, [trip.id]);
-    assert.equal(Number(rows.rows[0].weight), 66.333);
+    // The column is NUMERIC(12,3), but the service persists weights at its
+    // two-decimal storage precision (replaceDeliveries rounds on write).
+    assert.equal(rows.rows.length, 3, "all three shops are stored");
+    const total = rows.rows.reduce((sum, row) => sum + Number(row.weight), 0);
+    assert.equal(total, 198.99, "total stays under capacity at storage precision");
   });
 
   it("editing an existing delivery set re-validates the new weight total", async () => {

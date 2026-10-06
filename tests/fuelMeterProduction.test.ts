@@ -136,7 +136,7 @@ async function mkMaintenance(vehicleId: number, driverId: number, km: number, da
       serviceType: "General",
       garage: "G",
     },
-    [{ originalname: "bill.png", mimetype: "image/png", buffer: PNG }]
+    [{ originalname: "bill.png", buffer: PNG, size: PNG.length }]
   );
 }
 

@@ -14,6 +14,7 @@ import {
   MAINTENANCE_DOCUMENT_MAX_FILES,
 } from "../utils/fleetMultipart.js";
 import { parsePagination } from "../utils/pagination.js";
+import { fleetBoundary } from "../middleware/businessBoundary.js";
 import {
   getLatestVehicleMeter,
   listLatestVehicleMeters,
@@ -21,6 +22,7 @@ import {
 } from "../utils/vehicleMeterLedger.js";
 
 export const fleetRouter = Router();
+fleetRouter.use(fleetBoundary);
 
 function positiveId(value: string, label: string): number {
   if (!/^\d+$/.test(value)) throw new AppError(400, `${label} must be a positive integer`);

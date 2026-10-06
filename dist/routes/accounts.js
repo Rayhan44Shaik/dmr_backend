@@ -7,7 +7,9 @@
 import { Router } from "express";
 import { farmPaymentsRouter } from "./farmPayments.js";
 import { paymentsRouter } from "./payments.js";
+import { accountsBoundary } from "../middleware/businessBoundary.js";
 export const accountsRouter = Router();
+accountsRouter.use(accountsBoundary);
 accountsRouter.use("/payments", paymentsRouter);
 accountsRouter.use("/farm-payments", farmPaymentsRouter);
 //# sourceMappingURL=accounts.js.map

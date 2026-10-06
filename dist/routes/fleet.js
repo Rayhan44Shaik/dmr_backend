@@ -9,8 +9,10 @@ import { vehicleEmiService } from "../services/vehicleEmiService.js";
 import { coercePermitMultipartBody } from "../validation/permits.js";
 import { coerceMultipartBody, MAINTENANCE_DOCUMENT_MAX_BYTES, MAINTENANCE_DOCUMENT_MAX_FILES, } from "../utils/fleetMultipart.js";
 import { parsePagination } from "../utils/pagination.js";
+import { fleetBoundary } from "../middleware/businessBoundary.js";
 import { getLatestVehicleMeter, listLatestVehicleMeters, listVehicleMeterHistory, } from "../utils/vehicleMeterLedger.js";
 export const fleetRouter = Router();
+fleetRouter.use(fleetBoundary);
 function positiveId(value, label) {
     if (!/^\d+$/.test(value))
         throw new AppError(400, `${label} must be a positive integer`);

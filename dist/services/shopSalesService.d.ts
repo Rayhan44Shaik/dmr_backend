@@ -6,6 +6,8 @@ export declare const shopSalesService: {
         fromDate?: string;
         toDate?: string;
         status?: string;
+        search?: string;
+        sortBy?: string;
         includeDeleted?: boolean;
         pagination?: PaginationParams | null;
     }): Promise<ShopSale[] | PaginatedResult<ShopSale>>;
