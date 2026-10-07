@@ -39,10 +39,10 @@ async function httpLogin(): Promise<{ token: string; cookie: string }> {
     body: JSON.stringify({ username: USERNAME, password: PASSWORD }),
   });
   assert.equal(response.status, 200);
-  const body = (await response.json()) as { token: string };
+  await response.json();
   const cookie = response.headers.get("set-cookie")?.split(";")[0] ?? "";
-  assert.ok(body.token, "login returns a Bearer [REDACTED]");
-  return { token: body.token, cookie };
+  assert.ok(cookie.startsWith("dmr_session="), "login returns an HttpOnly session cookie");
+  return { token: decodeURIComponent(cookie.slice("dmr_session=".length)), cookie };
 }
 
 async function backdateActivity(token: string, minutesAgo: number): Promise<void> {

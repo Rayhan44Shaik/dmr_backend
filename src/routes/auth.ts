@@ -36,6 +36,7 @@ function auditMeta(req: { ip?: string }, res: { locals: Record<string, unknown> 
   return {
     ip: typeof req.ip === "string" ? req.ip : null,
     requestId: typeof res.locals.requestId === "string" ? (res.locals.requestId as string) : null,
+    userAgent: typeof (req as { headers?: Record<string,string> }).headers?.["user-agent"] === "string" ? (req as { headers: Record<string,string> }).headers["user-agent"] : null,
   };
 }
 
@@ -57,6 +58,7 @@ authRouter.post("/login", asyncHandler(async (req, res) => {
     // Only rejected credentials consume the login-attempt allowance. Database
     // outages and missing auth schema are service failures, not user failures.
     if (error instanceof AppError && error.status === 401) {
+      authService.recordLoginFailure(parsed.data.username, auditMeta(req, res));
       await authService.throttleFailure(loginKey);
       const current = prior && prior.resetAt > Date.now() ? prior : { count: 0, resetAt: Date.now() + LOGIN_WINDOW_MS };
       failedLogins.set(loginKey, { ...current, count: current.count + 1 });
@@ -82,7 +84,6 @@ authRouter.post("/login", asyncHandler(async (req, res) => {
   res.setHeader("Set-Cookie", sessionCookie(session.token, session.expiresAt));
   return res.json({
     user: session.user,
-    token: session.token,
     expiresAt: session.expiresAt,
     previousSessionsEnded: session.previousSessionsEnded > 0,
   });
@@ -104,6 +105,11 @@ authRouter.get("/me", requireAuth, asyncHandler(async (req, res) => {
     return res.json({ supervisor: mobileProfile(user), expiresAt: authExpiresAt(res) });
   }
   return res.json({ user });
+}));
+authRouter.get("/profile", requireAuth, asyncHandler(async (_req, res) => {
+  const user = authUser(res);
+  const profile = await authService.profile(user.id);
+  return res.json({ profile });
 }));
 authRouter.post("/logout", requireAuth, asyncHandler(async (req, res) => {
   await authService.logout(authToken(res), auditMeta(req, res));
@@ -211,7 +217,6 @@ authRouter.post("/mfa/verify", asyncHandler(async (req, res) => {
   res.setHeader("Set-Cookie", sessionCookie(session.token, session.expiresAt));
   return res.json({
     user: session.user,
-    token: session.token,
     expiresAt: session.expiresAt,
     previousSessionsEnded: session.previousSessionsEnded > 0,
   });

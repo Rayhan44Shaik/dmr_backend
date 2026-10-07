@@ -28,7 +28,7 @@ export const mastersBoundary: RequestHandler = (req, res, next) => {
   // They are owner-only unless an installation provides a stricter/custom
   // server-side authorizer below. Read access remains available to authenticated
   // operational roles because selectors depend on these registers.
-  if (action !== "read" && authUser(res).role !== "OWNER") {
+  if (action !== "read" && !["OWNER", "FULL_ACCESS"].includes(authUser(res).role)) {
     throw new AppError(403, "Owner access is required to change master data");
   }
   const authorize = req.app.locals.authorizeMasters as MastersAuthorizer | undefined;

@@ -22,10 +22,11 @@ export const staffBoundary: RequestHandler = (req, res, next) => {
   const access: StaffAccess = { resource, action, resourceId: parts.find((part) => /^[0-9a-f-]{36}$/i.test(part)) };
   res.locals.staffAccess = access;
   const user = authUser(res);
-  if (action === "read" && user.role !== "OWNER" && resource === "staff") {
+  const elevated = user.role === "OWNER" || user.role === "FULL_ACCESS";
+  if (action === "read" && !elevated && user.role !== "AUDIT" && resource === "staff") {
     throw new AppError(403, "Owner access is required to view payroll, attendance, advances, or performance data");
   }
-  if (user.role !== "OWNER" && resource === "leave") {
+  if (!elevated && user.role !== "AUDIT" && user.role !== "OFFICE" && resource === "leave") {
     if (user.employeeId == null) throw new AppError(403, "This account is not linked to an employee");
     if (action === "read") req.query.employeeId = String(user.employeeId);
     if (action === "create" && Number(req.body?.employeeId) !== user.employeeId) {
@@ -37,7 +38,9 @@ export const staffBoundary: RequestHandler = (req, res, next) => {
     && !parts.includes("auto-assign")
     && !parts.includes("submit");
   const isLeaveRequestCreate = resource === "leave" && action === "create" && parts.length === 1;
-  if (action !== "read" && user.role !== "OWNER" && !isManualDutyWrite && !isLeaveRequestCreate) {
+  if (user.role === "AUDIT" && action !== "read") throw new AppError(403, "Audit access is read-only");
+  const officeEntry = user.role === "OFFICE" && (resource === "leave" || resource === "duty-planner") && (action === "create" || action === "update");
+  if (action !== "read" && !elevated && !officeEntry && !isManualDutyWrite && !isLeaveRequestCreate) {
     throw new AppError(403, "Owner access is required for this staff operation");
   }
   const authorize = req.app.locals.authorizeStaff as StaffAuthorizer | undefined;

@@ -3,9 +3,9 @@
  *
  * Proves the role-deny paths with mocked identities:
  *  - fleet approvals/deletes, permit writes, EMI finance writes: OWNER or
- *    SENIOR_ACCOUNT only (SUPERVISOR gets 403)
- *  - accounts payments writes + farm-payment updates: OWNER/SENIOR only
- *  - rate-entry lock: OWNER/SENIOR only (draft saves stay open)
+ *    FULL_ACCESS only (SUPERVISOR gets 403)
+ *  - accounts payments writes + farm-payment updates: OWNER/FULL_ACCESS only
+ *  - rate-entry lock: OWNER/FULL_ACCESS only (draft saves stay open)
  *  - reads and field-entry mutations stay open to linked roles
  *
  * Trip-ownership paths (requireTripAccess) need the database and are covered
@@ -17,7 +17,7 @@ import { describe, it } from "node:test";
 const { accountsBoundary, fleetBoundary, operationsSensitiveBoundary, operationsTripsBoundary } =
   await import("../src/middleware/businessBoundary.js");
 
-type Role = "OWNER" | "SENIOR_ACCOUNT" | "SUPERVISOR";
+type Role = "OWNER" | "FULL_ACCESS" | "OFFICE" | "SUPERVISOR";
 
 function mockRes(role: Role) {
   const res: Record<string, unknown> = {
@@ -66,10 +66,7 @@ describe("fleetBoundary: approvals, deletes, permits, EMI finance", () => {
     ["POST", "/maintenance/12/reject"],
     ["DELETE", "/maintenance/12"],
     ["DELETE", "/maintenance/12/documents/3"],
-    ["PUT", "/permits/4/Insurance"],
     ["DELETE", "/permits/4/Insurance"],
-    ["POST", "/emis"],
-    ["PUT", "/emis/9"],
     ["DELETE", "/emis/9"],
     ["POST", "/emis/9/pay"],
   ] as Array<[string, string]>) {
@@ -81,14 +78,22 @@ describe("fleetBoundary: approvals, deletes, permits, EMI finance", () => {
     it(`OWNER ${method} ${path} passes`, async () => {
       assert.equal((await run(fleetBoundary, "OWNER", method, path)).passed, true);
     });
-    it(`SENIOR_ACCOUNT ${method} ${path} passes`, async () => {
-      assert.equal((await run(fleetBoundary, "SENIOR_ACCOUNT", method, path)).passed, true);
+    it(`FULL_ACCESS ${method} ${path} passes`, async () => {
+      assert.equal((await run(fleetBoundary, "FULL_ACCESS", method, path)).passed, true);
     });
   }
 
   it("SUPERVISOR maintenance entry (POST/PUT) stays open for field reporting", async () => {
     assert.equal((await run(fleetBoundary, "SUPERVISOR", "POST", "/maintenance")).passed, true);
     assert.equal((await run(fleetBoundary, "SUPERVISOR", "PUT", "/maintenance/12")).passed, true);
+  });
+
+  it("Office entry/edit for permits and EMI stays open; destructive/payment actions remain protected", async()=>{
+    assert.equal((await run(fleetBoundary,"OFFICE","PUT","/permits/4/Insurance")).passed,true);
+    assert.equal((await run(fleetBoundary,"OFFICE","POST","/emis")).passed,true);
+    assert.equal((await run(fleetBoundary,"OFFICE","PUT","/emis/9")).passed,true);
+    assert.equal((await run(fleetBoundary,"OFFICE","DELETE","/emis/9")).status,403);
+    assert.equal((await run(fleetBoundary,"OFFICE","POST","/emis/9/pay")).status,403);
   });
 
   it("reads stay open to all linked roles", async () => {
@@ -114,12 +119,12 @@ describe("accountsBoundary: payments and farm payments", () => {
   it("reads stay open; OWNER writes pass", async () => {
     assert.equal((await run(accountsBoundary, "SUPERVISOR", "GET", "/payments")).passed, true);
     assert.equal((await run(accountsBoundary, "OWNER", "POST", "/payments")).passed, true);
-    assert.equal((await run(accountsBoundary, "SENIOR_ACCOUNT", "PUT", "/farm-payments")).passed, true);
+    assert.equal((await run(accountsBoundary, "FULL_ACCESS", "PUT", "/farm-payments")).passed, true);
   });
 });
 
 describe("operationsSensitiveBoundary: rate-entry lock", () => {
-  it("SUPERVISOR lock → 403; OWNER/SENIOR pass; draft save stays open", async () => {
+  it("SUPERVISOR lock → 403; OWNER/FULL_ACCESS pass; draft save stays open", async () => {
     const denied = await run(operationsSensitiveBoundary, "SUPERVISOR", "POST", "/rate-entry/9/lock");
     assert.equal(denied.passed, false);
     assert.equal(denied.status, 403);

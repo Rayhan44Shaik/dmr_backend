@@ -12,6 +12,9 @@ import { farmPaymentsRouter } from "./farmPayments.js";
 import { requireAuth } from "../middleware/auth.js";
 import { idempotency } from "../middleware/idempotency.js";
 import { serverActor } from "../middleware/serverActor.js";
+import { accessManagementRouter } from "./accessManagement.js";
+import { AppError } from "../middleware/errorHandler.js";
+import { roleBoundary } from "../middleware/roleBoundary.js";
 
 export const apiRouter = Router();
 
@@ -19,11 +22,19 @@ apiRouter.use("/health", healthRouter);
 apiRouter.use("/docs", docsRouter);
 apiRouter.use("/auth", authRouter);
 apiRouter.use(requireAuth);
+apiRouter.use((req, res, next) => {
+  if (res.locals.authUser?.mustChangePassword) {
+    return next(new AppError(403, "Password change is required before accessing business pages", undefined, "PASSWORD_CHANGE_REQUIRED"));
+  }
+  next();
+});
 apiRouter.use(idempotency);
+apiRouter.use(roleBoundary);
 // Actor identity (approve/reject/delete/completion) is stamped from the
 // authenticated session AFTER idempotency hashing so a tampered payload and
 // its honest twin hash differently only by the client's own fields.
 apiRouter.use(serverActor);
+apiRouter.use("/access-management", accessManagementRouter);
 apiRouter.use("/masters", mastersRouter);
 apiRouter.use("/trips", tripsRouter);
 apiRouter.use("/staff", staffRouter);

@@ -6,7 +6,7 @@
  *  - the /operations/trips shadow path enforces the same ownership rules as
  *    /trips (supervisor cross-trip read/write/delete/status → 404, not data)
  *  - financial/approval mutations (fleet approve, accounts payments,
- *    rate-entry lock) require OWNER/SENIOR_ACCOUNT (supervisor → 403)
+ *    rate-entry lock) require OWNER/FULL_ACCESS (supervisor → 403)
  *  - a second login while the first tab is open keeps BOTH sessions valid
  *  - Idempotency-Key replay returns the original result without a duplicate
  *    row; key reuse with a different payload returns 409
@@ -129,7 +129,7 @@ describe("operations/trips shadow path enforces trip ownership", () => {
   });
 });
 
-describe("financial/approval mutations require OWNER or SENIOR_ACCOUNT", () => {
+describe("financial/approval mutations require OWNER or FULL_ACCESS", () => {
   it("supervisor approve/reject/payments/lock attempts return 403", async () => {
     assert.equal((await api("POST", "/api/fleet/maintenance/1/approve", supervisorCookie, {})).response.status, 403);
     assert.equal((await api("POST", "/api/fleet/maintenance/1/reject", supervisorCookie, {})).response.status, 403);

@@ -130,9 +130,11 @@ describe("challenged login and ticket verification", () => {
     const code = totpCode(decryptMfaSecret(String(stored.rows[0].secret_enc)));
     const good = await api("POST", "/api/auth/mfa/verify", "", { ticket, code });
     assert.equal(good.response.status, 200);
-    assert.ok(typeof good.json.token === "string");
+    const verifiedCookie=good.response.headers.get("set-cookie")?.split(";")[0]??"";
+    assert.ok(verifiedCookie.startsWith("dmr_session="));
+    assert.match(good.response.headers.get("set-cookie")??"",/HttpOnly/i);
     const me = await fetch(`${app.baseUrl}/api/auth/me`, {
-      headers: { cookie: `dmr_session=${String(good.json.token)}` },
+      headers: { cookie: verifiedCookie },
     });
     assert.equal(me.status, 200);
     const replay = await api("POST", "/api/auth/mfa/verify", "", { ticket, code: totpCode(decryptMfaSecret(String(stored.rows[0].secret_enc))) });
@@ -184,7 +186,7 @@ describe("password-change step-up and disable/admin reset", () => {
     assert.equal((status.json as { enabled: boolean }).enabled, false);
     const plain = await login("mfa-sup", PASSWORD);
     assert.equal(plain.json.mfaRequired, undefined, "login is unchallenged after reset");
-    assert.ok(typeof plain.json.token === "string");
+    assert.ok((plain.response.headers.get("set-cookie")??"").includes("HttpOnly"));
   });
 
   it("password change without a live TOTP is rejected while MFA is active", async () => {

@@ -50,7 +50,7 @@ function tripListFilters(req: {
   return {
     fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
     toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
-    status: typeof req.query.status === "string" ? req.query.status : undefined,
+    status: user.role === "SUPERVISOR" ? "Draft" : typeof req.query.status === "string" ? req.query.status : undefined,
     vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
     supervisorId,
     search: typeof req.query.search === "string" ? req.query.search : undefined,
@@ -280,6 +280,10 @@ tripsRouter.patch(
   "/:id/status",
   asyncHandler(async (req, res) => {
     const id = positiveId(req.params.id);
+    const user = authUser(res);
+    if (user.role === "OFFICE" && req.body?.status !== "Completed") {
+      throw new AppError(403, "Office can only complete a pending trip");
+    }
     await requireTripAccess(res, id, "trip.status_change");
     const trip = await tripsService.updateStatus(id, req.body);
     res.json(trip);

@@ -13,9 +13,9 @@ async function run() {
   const positional = args.filter((arg) => arg !== "--update");
   const [username, displayName, role, employeeArg] = positional;
 
-  if (!username || !displayName || !["OWNER", "SENIOR_ACCOUNT", "SUPERVISOR"].includes(role ?? "")) {
+  if (!username || !displayName || !["OWNER", "FULL_ACCESS", "SUPERVISOR"].includes(role ?? "")) {
     throw new Error(
-      "Usage: npm run account:create -- [--update] <username> <display-name> <OWNER|SENIOR_ACCOUNT|SUPERVISOR> [employee-id] (password via stdin)"
+      "Usage: npm run account:create -- [--update] <username> <display-name> <OWNER|FULL_ACCESS|SUPERVISOR> [employee-id] (password via stdin)"
     );
   }
 

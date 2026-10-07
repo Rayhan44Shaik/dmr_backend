@@ -5,9 +5,10 @@ import { AppError } from "../middleware/errorHandler.js";
 import { isPgError } from "../utils/pgErrors.js";
 import { verifyPassword, hashPassword } from "../utils/passwordHash.js";
 import { syncLocalCredentialsPassword } from "../utils/localCredentials.js";
+import type { AppRole } from "../security/rbac.js";
 
-export type AppRole = "OWNER" | "SENIOR_ACCOUNT" | "SUPERVISOR";
-export type AuthUser = { id: number; username: string; displayName: string; role: AppRole; employeeId: number | null };
+export type { AppRole } from "../security/rbac.js";
+export type AuthUser = { id: number; username: string; displayName: string; role: AppRole; employeeId: number | null; mustChangePassword: boolean };
 export type AuthSession = { user: AuthUser; expiresAt: string };
 /** Absolute session lifetime (server time). */
 export const SESSION_ABSOLUTE_MS = 8 * 60 * 60 * 1000;
@@ -132,7 +133,7 @@ export function isSessionIdleExpired(lastActivityAt: Date | string | null | unde
   return elapsed > SESSION_IDLE_MS;
 }
 
-export type AuditMeta = { ip?: string | null; requestId?: string | null };
+export type AuditMeta = { ip?: string | null; requestId?: string | null; userAgent?: string | null };
 
 function auditEvent(
   event: string,
@@ -142,9 +143,10 @@ function auditEvent(
 ): void {
   try {
     void query(
-      `INSERT INTO auth_audit_logs (user_id, username, event, ip, request_id)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [userId, username, event, meta?.ip ?? null, meta?.requestId ?? null],
+      `INSERT INTO auth_audit_logs (user_id, username, event, ip, request_id, result, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [userId, username, event, meta?.ip ?? null, meta?.requestId ?? null,
+       event === "login_failure" ? "FAILURE" : "SUCCESS", meta?.userAgent ?? null],
     ).catch(() => undefined);
   } catch {
     // Audit must never break authentication (e.g. table not yet migrated).
@@ -199,6 +201,7 @@ const tokenHash = (token: string) => createHash("sha256").update(token).digest("
 const mapUser = (row: Record<string, unknown>): AuthUser => ({
   id: Number(row.id), username: String(row.username), displayName: String(row.display_name),
   role: row.role as AppRole, employeeId: row.employee_id == null ? null : Number(row.employee_id),
+  mustChangePassword: Boolean(row.must_change_password),
 });
 
 const AUTH_RELATIONS = /\b(?:application_users|application_sessions)\b/i;
@@ -218,13 +221,42 @@ function rethrowAuthStorageError(error: unknown): never {
 }
 
 export const authService = {
+  recordLoginFailure(username: string, meta?: AuditMeta) {
+    auditEvent("login_failure", null, username.trim().toLowerCase(), meta);
+  },
+  async profile(userId: number) {
+    const result = await query(
+      `SELECT u.id,u.username,u.display_name,u.role,u.last_password_reset_at,
+              e.employee_no,e.employee_name,e.phone_number,e.department,e.status AS employee_status
+         FROM application_users u LEFT JOIN employees e ON e.id=u.employee_id WHERE u.id=$1`, [userId]);
+    if (!result.rowCount) throw new AppError(404,"Profile was not found");
+    const row=result.rows[0];
+    return { id:Number(row.id),username:String(row.username),fullName:String(row.employee_name??row.display_name),
+      role:String(row.role),employeeNumber:row.employee_no==null?null:String(row.employee_no),
+      mobileNumber:String(row.phone_number??""),department:String(row.department??""),
+      employeeStatus:row.employee_status??null,lastPasswordResetAt:row.last_password_reset_at??null };
+  },
   async login(username: string, password: string, meta?: AuditMeta) {
     try {
-      const found = await query(`SELECT * FROM application_users WHERE LOWER(username)=LOWER($1) AND active=TRUE`, [username.trim()]);
+      const found = await query(
+        `SELECT u.*,e.status AS employee_status FROM application_users u LEFT JOIN employees e ON e.id=u.employee_id
+         WHERE LOWER(u.username)=LOWER($1)`, [username.trim()]);
       const row = found.rows[0];
       const passwordMatches = await verifyPassword(password, row ? String(row.password_hash) : INVALID_PASSWORD_HASH);
       if (!row || !passwordMatches) {
         throw new AppError(401, "Invalid username or password");
+      }
+      if (row.employee_id != null && row.employee_status !== "Active") {
+        throw new AppError(403, "Your employee profile is inactive. Contact the owner.", undefined, "EMPLOYEE_INACTIVE");
+      }
+      if (row.access_status === "PAUSED") {
+        throw new AppError(403, "Your login access is paused. Contact the owner.", undefined, "ACCESS_PAUSED");
+      }
+      if (row.access_status === "REVOKED" || !row.active) {
+        throw new AppError(403, "Your login access has been revoked. Contact the owner.", undefined, "ACCESS_REVOKED");
+      }
+      if (row.access_status !== "ACTIVE") {
+        throw new AppError(403, "Login access has not been granted. Contact the owner.", undefined, "ACCESS_NOT_GRANTED");
       }
       if (row.role === "SUPERVISOR" && row.employee_id == null) {
         throw new AppError(403, "Supervisor account is not linked to an employee");
@@ -287,7 +319,10 @@ export const authService = {
       const result = await query(`SELECT u.*,s.expires_at AS session_expires_at,
         COALESCE(s.last_activity_at, s.last_seen_at, s.created_at) AS session_last_activity
         FROM application_sessions s JOIN application_users u ON u.id=s.user_id
-        WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>NOW() AND u.active=TRUE`, [tokenHash(token)]);
+        LEFT JOIN employees e ON e.id=u.employee_id
+        WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>NOW()
+          AND u.active=TRUE AND u.access_status='ACTIVE'
+          AND (u.employee_id IS NULL OR e.status='Active')`, [tokenHash(token)]);
       if (!result.rowCount) return null;
       // Server-side idle enforcement (server time): ordinary reads, polling,
       // and health checks must NOT extend the session — only login and the
@@ -420,7 +455,8 @@ export const authService = {
       }
       await withTransaction(async (client) => {
         const updated = await client.query(
-          `UPDATE application_users SET password_hash=$2, updated_at=NOW() WHERE id=$1
+          `UPDATE application_users SET password_hash=$2, must_change_password=FALSE,
+             last_password_reset_at=NOW(), updated_at=NOW() WHERE id=$1
            RETURNING id, password_hash`,
           [userId, passwordHash],
         );
@@ -438,6 +474,11 @@ export const authService = {
         await client.query(
           `UPDATE application_sessions SET revoked_at=COALESCE(revoked_at,NOW())
            WHERE user_id=$1 AND revoked_at IS NULL`,
+          [userId],
+        );
+        await client.query(
+          `INSERT INTO access_security_events(user_id,actor_user_id,event,details)
+           VALUES($1,$1,'PASSWORD_CHANGED',jsonb_build_object('sessionsInvalidated',true))`,
           [userId],
         );
       });
@@ -537,11 +578,12 @@ export const authService = {
           passwordHash,
         ]);
         // Reset ends every session — the account must sign in again.
-        await client.query(
+        const revoked = await client.query(
           `UPDATE application_sessions SET revoked_at=COALESCE(revoked_at,NOW())
-           WHERE user_id=$1 AND revoked_at IS NULL`,
+           WHERE user_id=$1 AND revoked_at IS NULL RETURNING id`,
           [Number(row.user_id)],
         );
+        await client.query(`INSERT INTO access_security_events(user_id,actor_user_id,event,details) VALUES($1,$1,'PASSWORD_RESET',jsonb_build_object('sessionsInvalidated',$2::int))`,[Number(row.user_id),revoked.rowCount??0]);
       });
       auditEvent("password_reset", Number(row.user_id), String(row.username), meta);
       syncLocalCredentialsPassword(String(row.username), newPassword, {
@@ -641,9 +683,12 @@ export const authService = {
       const found = await query(
         `SELECT t.user_id AS user_id, t.used_at AS used_at, t.expires_at AS expires_at,
                 u.username AS username, u.display_name AS display_name, u.role AS role,
-                u.employee_id AS employee_id, u.active AS active
+                u.employee_id AS employee_id, u.active AS active,
+                u.must_change_password AS must_change_password
          FROM mfa_tickets t JOIN application_users u ON u.id=t.user_id
-         WHERE t.ticket_hash=$1`,
+         LEFT JOIN employees e ON e.id=u.employee_id
+         WHERE t.ticket_hash=$1 AND u.access_status='ACTIVE'
+           AND (u.employee_id IS NULL OR e.status='Active')`,
         [tokenHash(String(ticket ?? ""))],
       );
       const row = found.rows[0] as Record<string, unknown> | undefined;
@@ -705,6 +750,7 @@ export const authService = {
           displayName: String(row.display_name),
           role: row.role as AppRole,
           employeeId: row.employee_id == null ? null : Number(row.employee_id),
+          mustChangePassword: Boolean(row.must_change_password),
         } satisfies AuthUser,
         token,
         expiresAt: expiresAt.toISOString(),

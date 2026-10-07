@@ -81,7 +81,7 @@ async function main() {
       [credentials.E2E_OWNER_USERNAME,"Owner E2E",credentials.E2E_OWNER_PASSWORD,"OWNER",null],
       [credentials.E2E_SUPERVISOR_A_USERNAME,"E2E Supervisor A",credentials.E2E_SUPERVISOR_A_PASSWORD,"SUPERVISOR",employeeId(990001)],
       [credentials.E2E_SUPERVISOR_B_USERNAME,"E2E Supervisor B",credentials.E2E_SUPERVISOR_B_PASSWORD,"SUPERVISOR",employeeId(990002)],
-      [credentials.E2E_SENIOR_USERNAME,"Senior Account E2E",credentials.E2E_SENIOR_PASSWORD,"SENIOR_ACCOUNT",null],
+      [credentials.E2E_SENIOR_USERNAME,"Full Access E2E",credentials.E2E_SENIOR_PASSWORD,"FULL_ACCESS",null],
     ];
     for (const [username,name,password,role,empId] of accounts) await db.query(`INSERT INTO application_users(username,display_name,password_hash,role,employee_id,active) VALUES($1,$2,$3,$4,$5,TRUE) ON CONFLICT((LOWER(username))) DO UPDATE SET display_name=EXCLUDED.display_name,password_hash=EXCLUDED.password_hash,role=EXCLUDED.role,employee_id=EXCLUDED.employee_id,active=TRUE`, [username,name,await hashPassword(password),role,empId]);
     await db.query(`INSERT INTO trips(trip_no,trip_date,status,supervisor_id,supervisor_name) VALUES('E2E-SUPERVISOR-B-TRIP',CURRENT_DATE,'Draft',$1,'E2E Supervisor B') ON CONFLICT(trip_no) DO NOTHING`, [employeeId(990002)]);

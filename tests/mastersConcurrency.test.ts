@@ -53,7 +53,7 @@ test("authenticated non-owner cannot mutate Vehicle Master", async () => {
   const username = "vehicle-supervisor";
   await pool.query(
     `INSERT INTO application_users (username,display_name,password_hash,role)
-     VALUES ($1,'Vehicle Accountant',$2,'SENIOR_ACCOUNT')`,
+     VALUES ($1,'Vehicle Accountant',$2,'FULL_ACCESS')`,
     [username, await hashPassword("Supervisor-test-password-123!")],
   );
   const login = await fetch(`${app.baseUrl}/api/auth/login`, {

@@ -21,7 +21,7 @@ import type { AuthUser } from "../services/authService.js";
  *   bypassed `requireTripAccess`.
  * - Financial/approval/destructive mutations (fleet approve/reject/delete,
  *   permit upsert/delete, EMI create/update/delete/pay, accounts payments,
- *   farm-payment updates, rate-entry lock) require OWNER or SENIOR_ACCOUNT.
+ *   farm-payment updates, rate-entry lock) require OWNER or FULL_ACCESS.
  * - Field mutations (trip steps, collections, fuel, shop sales/rates entry,
  *   maintenance entry, duty/leave flows) remain open to linked supervisors —
  *   restricting them would break field workflows. Row-level supervisor
@@ -29,7 +29,7 @@ import type { AuthUser } from "../services/authService.js";
  */
 
 type Role = AuthUser["role"];
-const FINANCE_ROLES: ReadonlySet<Role> = new Set(["OWNER", "SENIOR_ACCOUNT"]);
+const FINANCE_ROLES: ReadonlySet<Role> = new Set(["OWNER", "FULL_ACCESS"]);
 
 function positiveId(value: string, label: string): number {
   if (!/^\d+$/.test(value)) throw new AppError(400, `${label} must be a positive integer`);
@@ -41,7 +41,7 @@ function positiveId(value: string, label: string): number {
 function financeOnly(res: Parameters<typeof authUser>[0], action: string): void {
   const user = authUser(res);
   if (!FINANCE_ROLES.has(user.role)) {
-    throw new AppError(403, `Owner or Senior Accounts access is required (${action})`);
+    throw new AppError(403, `Full Access or Owner access is required (${action})`);
   }
 }
 
@@ -71,6 +71,7 @@ function supervisorListScope(
     throw new AppError(403, "Supervisor account is not linked to an employee");
   }
   req.query.supervisorId = String(user.employeeId);
+  req.query.status = "Draft";
 }
 
 const STEP_NAMES = new Set(["start", "farm", "pickup", "deliveries", "expenses"]);
@@ -165,7 +166,7 @@ export const operationsSensitiveBoundary: RequestHandler = (req, res, next) => {
 /**
  * Guards `/fleet` mutations. Reads stay open; entry (maintenance create/
  * update, permit scans) stays open for field reporting; approvals, deletes,
- * permit upserts/deletes, and all EMI writes require OWNER/SENIOR_ACCOUNT.
+ * permit upserts/deletes, and all EMI writes require OWNER/FULL_ACCESS.
  */
 export const fleetBoundary: RequestHandler = (req, res, next) => {
   const path = req.path;
@@ -174,15 +175,16 @@ export const fleetBoundary: RequestHandler = (req, res, next) => {
     (method === "POST" && /^\/maintenance\/[^/]+\/(approve|reject)$/.test(path)) ||
     (method === "DELETE" && /^\/maintenance\/[^/]+$/.test(path)) ||
     (method === "DELETE" && /^\/maintenance\/[^/]+\/documents\/[^/]+$/.test(path)) ||
-    ((method === "PUT" || method === "DELETE") && /^\/permits\//.test(path)) ||
-    ((method === "POST" || method === "PUT" || method === "DELETE") && /^\/emis/.test(path));
+    (method === "DELETE" && /^\/permits\//.test(path)) ||
+    (method === "DELETE" && /^\/emis/.test(path)) ||
+    (method === "POST" && /^\/emis\/[^/]+\/pay$/.test(path));
   if (sensitive) financeOnly(res, "fleet approval/finance");
   next();
 };
 
 /**
  * Guards `/accounts` mutations. Reads stay open; every payments write and
- * farm-payment update requires OWNER/SENIOR_ACCOUNT.
+ * farm-payment update requires OWNER/FULL_ACCESS.
  */
 export const accountsBoundary: RequestHandler = (req, res, next) => {
   const path = req.path;
