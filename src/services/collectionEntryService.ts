@@ -146,6 +146,7 @@ async function loadOne(client: Client, id: number): Promise<CollectionEntry> {
   return mapEntry(result.rows[0]);
 }
 
+export { deletePendingCollection, deletePendingCollectionForRouter } from "./collectionEntryService.pendingDelete.js";
 export const collectionEntryService = {
   async recent(filters: { shopId: number; limit?: number; includeDeleted?: boolean }) {
     if (!Number.isInteger(filters.shopId) || filters.shopId <= 0) {

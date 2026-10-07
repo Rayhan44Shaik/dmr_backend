@@ -4,6 +4,7 @@
  */
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
+import { authUser } from "../middleware/auth.js";
 import { paymentsService } from "../services/paymentsService.js";
 import { parseBody, paymentListQuerySchema, } from "../validation/payments.js";
 import { parsePagination } from "../utils/pagination.js";
@@ -37,7 +38,12 @@ paymentsRouter.get("/:id", asyncHandler(async (req, res) => {
     res.json(await paymentsService.getById(parseId(req.params.id)));
 }));
 paymentsRouter.post("/", asyncHandler(async (req, res) => {
-    res.status(201).json(await paymentsService.create(req.body));
+    // The recorded-by identity is an audit fact: always the session user,
+    // never a client-supplied name.
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body)
+        ? { ...req.body, createdBy: authUser(res).displayName }
+        : req.body;
+    res.status(201).json(await paymentsService.create(body));
 }));
 paymentsRouter.put("/:id", asyncHandler(async (req, res) => {
     res.json(await paymentsService.update(parseId(req.params.id), req.body));

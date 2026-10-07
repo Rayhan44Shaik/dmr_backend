@@ -105,7 +105,10 @@ export const leaveStatusSchema = z.object({
     errorMap: () => ({ message: "status must be one of Approved | Rejected | Cancelled" }),
   }),
   rejectionReason: z.preprocess(trimmed, z.string().optional()),
-}).strict().superRefine((value, ctx) => {
+  approvedBy: z.string().optional(),
+  rejectedBy: z.string().optional(),
+  deletedBy: z.string().optional(),
+}).superRefine((value, ctx) => {
   if (value.status === "Rejected" && !value.rejectionReason) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["rejectionReason"], message: "rejectionReason is required when rejecting leave" });
   }

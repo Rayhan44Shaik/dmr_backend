@@ -4,6 +4,7 @@
  */
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
+import { authUser } from "../middleware/auth.js";
 import { paymentsService } from "../services/paymentsService.js";
 import {
   parseBody,
@@ -56,7 +57,13 @@ paymentsRouter.get(
 paymentsRouter.post(
   "/",
   asyncHandler(async (req, res) => {
-    res.status(201).json(await paymentsService.create(req.body));
+    // The recorded-by identity is an audit fact: always the session user,
+    // never a client-supplied name.
+    const body =
+      req.body && typeof req.body === "object" && !Array.isArray(req.body)
+        ? ({ ...(req.body as Record<string, unknown>), createdBy: authUser(res).displayName } as Record<string, unknown>)
+        : req.body;
+    res.status(201).json(await paymentsService.create(body));
   })
 );
 

@@ -1,4 +1,4 @@
-﻿import { Router } from "express";
+import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { collectionEntryService } from "../services/collectionEntryService.js";
 import { collectionsService } from "../services/collectionsService.js";
@@ -12,7 +12,7 @@ import { shopLedgerService } from "../services/shopLedgerService.js";
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { operationsSensitiveBoundary, operationsTripsBoundary } from "../middleware/businessBoundary.js";
-
+import { operationsPendingDeleteRouter } from "./operations_pending_delete.js";
 export const operationsRouter = Router();
 operationsRouter.use(operationsTripsBoundary, operationsSensitiveBoundary);
 
@@ -433,7 +433,7 @@ operationsRouter.delete(
 
 // ── Shop Ledger (complete financial history) ────────────────────────────────
 // Authoritative read of shop_ledger (single source of truth). Supports the
-// shop + custom date range + optional pagination. There is NO 10-row display
+// shop + custom date range + optional pagination. There is NO 10row display
 // limit here — the complete matching history is returned. Opening balance is
 // computed by the backend as of the range start; running balances are correct
 // across pages. See services/shopLedgerService.ts for the contract.
@@ -450,6 +450,12 @@ operationsRouter.get(
     );
   })
 );
+
+// ── Pending Collection delete (7-day window, non-financial only) ────────────────
+// Distinct from Collection Entry's general soft-delete. Pending collections are
+// not yet financial, so this route is the authoritative delete for the Pending
+// Collection UI and is protected by the migration-enforced 7-day window.
+operationsRouter.use("/collection-entry", operationsPendingDeleteRouter);
 
 // ── Collection Entry (real financial collections) ──────────────────────────
 // Distinct from the legacy derived /collections view. Persists real collection
