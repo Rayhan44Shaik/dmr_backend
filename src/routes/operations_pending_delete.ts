@@ -1,7 +1,7 @@
 import { Router } from "express";
-import { asyncHandler } from "../middleware/errorHandler.js";
+import { asyncHandler, AppError } from "../middleware/errorHandler.js";
 import { withTransaction } from "../config/db.js";
-import { AppError } from "../middleware/errorHandler.js";
+import { authUser } from "../middleware/auth.js";
 import type { CollectionEntry } from "../types/operations.js";
 import { num, str } from "../utils/coerce.js";
 
@@ -49,14 +49,17 @@ function mapPendingDeleteResult(row: Record<string, unknown>): CollectionEntry {
  * only be deleted while CURRENT_DATE <= collection_date + 7 days. Outside the
  * window the request is rejected with 409 so the number and record remain
  * auditable rather than silently disappearing.
+ *
+ * Audit identity: deletedBy is recorded from the authenticated session, never
+ * from the client payload.
  */
 operationsPendingDeleteRouter.delete(
   "/collection-entry/pending/:id",
   asyncHandler(async (req, res) => {
-    const id = Number(req.params.id);
+    const rawId = req.params.id;
+    const id = Number(rawId);
     if (!Number.isInteger(id) || id <= 0) {
-      res.status(400).json({ success: false, message: "A valid collection id is required" });
-      return;
+      throw new AppError(400, "A valid collection id is required");
     }
 
     await withTransaction(async (client) => {
@@ -79,7 +82,10 @@ operationsPendingDeleteRouter.delete(
         );
       }
       if (Boolean(row.is_financial)) {
-        throw new AppError(409, "A financial collection cannot be deleted from the pending register");
+        throw new AppError(
+          409,
+          "A financial collection cannot be deleted from the pending register"
+        );
       }
 
       const windowOk = await client.query<{ ok: boolean }>(
@@ -93,18 +99,20 @@ operationsPendingDeleteRouter.delete(
         );
       }
 
+      const deletedBy = authUser(res).displayName;
       await client.query(
         `UPDATE collections SET
            deleted = TRUE,
            deleted_at = NOW(),
            status = 'Deleted',
-           is_financial = FALSE
+           is_financial = FALSE,
+           deleted_by = $2
          WHERE id = $1`,
-        [id]
+        [id, deletedBy]
       );
 
       const refreshed = await client.query(
-        `SELECT id, collection_no, collection_date, shop_id, status, deleted, is_financial, deleted_at
+        `SELECT id, collection_no, collection_date, shop_id, status, deleted, is_financial, deleted_at, deleted_by
            FROM collections WHERE id = $1`,
         [id]
       );

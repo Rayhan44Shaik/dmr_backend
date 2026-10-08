@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
+import { authUser } from "../middleware/auth.js";
 import { collectionEntryService } from "../services/collectionEntryService.js";
 import { collectionsService } from "../services/collectionsService.js";
 import { dashboardService } from "../services/dashboardService.js";
@@ -590,7 +591,10 @@ operationsRouter.delete(
     res.json(
       await collectionEntryService.softDelete(Number(req.params.id), {
         reason: typeof req.body?.reason === "string" ? req.body.reason : undefined,
-        deletedBy: typeof req.body?.deletedBy === "string" ? req.body.deletedBy : undefined,
+        // deletedBy is an audit identity; it must come from the authenticated
+        // session, not the client payload (serverActor is not mounted on this
+        // router path — be explicit here).
+        deletedBy: authUser(res).displayName,
       })
     );
   })
