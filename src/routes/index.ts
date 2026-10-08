@@ -13,6 +13,7 @@ import { requireAuth } from "../middleware/auth.js";
 import { idempotency } from "../middleware/idempotency.js";
 import { serverActor } from "../middleware/serverActor.js";
 import { accessManagementRouter } from "./accessManagement.js";
+import { settingsRouter } from "./settings.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { roleBoundary } from "../middleware/roleBoundary.js";
 
@@ -35,6 +36,7 @@ apiRouter.use(roleBoundary);
 // its honest twin hash differently only by the client's own fields.
 apiRouter.use(serverActor);
 apiRouter.use("/access-management", accessManagementRouter);
+apiRouter.use("/settings", settingsRouter);
 apiRouter.use("/masters", mastersRouter);
 apiRouter.use("/trips", tripsRouter);
 apiRouter.use("/staff", staffRouter);

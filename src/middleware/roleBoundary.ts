@@ -12,6 +12,10 @@ export const roleBoundary: RequestHandler = (req, res, next) => {
   const { role } = authUser(res);
   const path = req.path;
   if (role === "OWNER") return next();
+  // Self-scoped settings (language/theme preferences) are available to every
+  // role: the router only ever reads and writes the caller's own row, so there
+  // is nothing to gate. The employee access directory is NOT under /settings.
+  if (starts(path, ["/settings"])) return next();
   // FULL_ACCESS is intentionally distinct from OWNER: read and workflow
   // permissions across modules, but no destructive writes (delete / financial
   // approve / rate-lock) — those remain OWNER-only.

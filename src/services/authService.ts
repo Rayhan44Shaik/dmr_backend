@@ -321,7 +321,10 @@ export const authService = {
         FROM application_sessions s JOIN application_users u ON u.id=s.user_id
         LEFT JOIN employees e ON e.id=u.employee_id
         WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>NOW()
-          AND u.active=TRUE AND u.access_status='ACTIVE'
+          -- Paused employees keep already-signed-in sessions (owner intent:
+          -- pause freezes NEW logins, revoke signs out). Only REVOKED/inactive
+          -- users lose their session.
+          AND u.active=TRUE AND u.access_status IN ('ACTIVE','PAUSED')
           AND (u.employee_id IS NULL OR e.status='Active')`, [tokenHash(token)]);
       if (!result.rowCount) return null;
       // Server-side idle enforcement (server time): ordinary reads, polling,
@@ -456,7 +459,8 @@ export const authService = {
       await withTransaction(async (client) => {
         const updated = await client.query(
           `UPDATE application_users SET password_hash=$2, must_change_password=FALSE,
-             last_password_reset_at=NOW(), updated_at=NOW() WHERE id=$1
+             reveal_password=NULL, last_password_reset_at=NOW(), updated_at=NOW()
+           WHERE id=$1
            RETURNING id, password_hash`,
           [userId, passwordHash],
         );

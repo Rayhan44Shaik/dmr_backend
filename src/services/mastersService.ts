@@ -372,12 +372,24 @@ export const mastersService = {
   },
 
   async updateEmployeeStatus(id: number, status: Employee["status"]) {
-    const result = await query(
-      `UPDATE employees SET status=$2 WHERE id=$1 RETURNING *`,
-      [id, status]
-    );
-    if (!result.rowCount) throw new AppError(404, "Employee not found");
-    return mapEmployee(result.rows[0]);
+    // Marking an employee Inactive must also kill their login completely:
+    // the linked application_user is revoked, its sessions are torn down, and
+    // login/session auth then refuses the account outright.
+    const result = await withTransaction(async (c) => {
+      const updated = await c.query(`UPDATE employees SET status=$2 WHERE id=$1 RETURNING *`, [id, status]);
+      if (!updated.rowCount) throw new AppError(404, "Employee not found");
+      if (status !== "Active") {
+        const revokedLogin = await c.query(
+          `UPDATE application_users SET access_status='REVOKED',active=FALSE,last_access_change_at=NOW(),updated_at=NOW() WHERE employee_id=$1 AND role<>'OWNER' RETURNING id`,
+          [id],
+        );
+        if (revokedLogin.rowCount) {
+          await c.query(`UPDATE application_sessions SET revoked_at=COALESCE(revoked_at,NOW()) WHERE user_id=$1 AND revoked_at IS NULL`, [revokedLogin.rows[0].id]);
+        }
+      }
+      return updated.rows[0];
+    });
+    return mapEmployee(result);
   },
 
   async deleteEmployee(id: number) {
