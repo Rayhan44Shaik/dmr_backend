@@ -400,7 +400,7 @@ export async function upsertLegFields(
       body.pickupTolls ?? null,
       body.farmAddress ?? null,
       body.avgBirdWeight ?? null,
-      body.farmRemarks ?? body.remarks ?? null,
+      body.farmRemarks == null ? null : str(body.farmRemarks).trim().toLocaleUpperCase("en-IN"),
       body.farmBirdTypeId ?? null,
       body.farmBirdType ?? null,
       body.farmBirdCount ?? body.totalBirds ?? null,

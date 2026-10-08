@@ -26,6 +26,7 @@ export function mapEmployee(row: Record<string, unknown>): Employee {
     employeeNo: num(row.employee_no),
     employeeName: str(row.employee_name),
     department: str(row.department),
+    secondaryDepartment: row.secondary_department == null ? null : str(row.secondary_department),
     role: str(row.role),
     phoneNumber: str(row.phone_number),
     email: str(row.email),
@@ -298,10 +299,10 @@ export const mastersService = {
   async listEmployees(department?: string) {
     const result = department
       ? await query(
-          `SELECT * FROM employees WHERE department = $1 ORDER BY employee_name`,
+          `SELECT * FROM employees WHERE department = $1 OR secondary_department = $1 ORDER BY CASE WHEN department='Owner' THEN 0 ELSE 1 END, employee_name`,
           [department]
         )
-      : await query(`SELECT * FROM employees ORDER BY employee_name`);
+      : await query(`SELECT * FROM employees ORDER BY CASE WHEN department='Owner' THEN 0 ELSE 1 END, employee_name`);
     return result.rows.map(mapEmployee);
   },
 
@@ -317,7 +318,8 @@ export const mastersService = {
         `UPDATE employees SET
           employee_no=COALESCE($2,employee_no), employee_name=$3, department=$4, role=$5,
           phone_number=$6, email=$7, address=$8, joining_date=$9,
-          aadhar_number=$10, license_number=$11, salary=$12, status=$13, avatar=$14
+          aadhar_number=$10, license_number=$11, salary=$12, status=$13, avatar=$14,
+          secondary_department=$15
          WHERE id=$1 RETURNING *`,
         [
           body.id,
@@ -334,6 +336,7 @@ export const mastersService = {
           body.salary ?? 0,
           body.status ?? "Active",
           body.avatar ?? null,
+          body.secondaryDepartment ?? null,
         ]
       );
       if (!result.rowCount) throw new AppError(404, "Employee not found");
@@ -350,8 +353,8 @@ export const mastersService = {
     const result = await query(
       `INSERT INTO employees (
          employee_no, employee_name, department, role, phone_number, email,
-         address, joining_date, aadhar_number, license_number, salary, status, avatar
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+         address, joining_date, aadhar_number, license_number, salary, status, avatar, secondary_department
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       [
         body.employeeNo ?? nextNo.rows[0].n,
         body.employeeName,
@@ -366,6 +369,7 @@ export const mastersService = {
         body.salary ?? 0,
         body.status ?? "Active",
         body.avatar ?? null,
+        body.secondaryDepartment ?? null,
       ]
     );
     return mapEmployee(result.rows[0]);
@@ -393,11 +397,30 @@ export const mastersService = {
   },
 
   async deleteEmployee(id: number) {
-    const result = await query(
-      `UPDATE employees SET status='Inactive' WHERE id=$1 RETURNING *`,
-      [id]
-    );
-    if (!result.rowCount) throw new AppError(404, "Employee not found");
+    const result = await withTransaction(async (c) => {
+      const employee = await c.query(
+        `UPDATE employees SET status='Inactive' WHERE id=$1 RETURNING id`,
+        [id],
+      );
+      if (!employee.rowCount) throw new AppError(404, "Employee not found");
+      const users = await c.query(
+        `UPDATE application_users
+            SET access_status='REVOKED', active=FALSE,
+                last_access_change_at=NOW(), updated_at=NOW()
+          WHERE employee_id=$1 AND role<>'OWNER'
+          RETURNING id`,
+        [id],
+      );
+      for (const user of users.rows) {
+        await c.query(
+          `UPDATE application_sessions
+              SET revoked_at=COALESCE(revoked_at,NOW())
+            WHERE user_id=$1 AND revoked_at IS NULL`,
+          [user.id],
+        );
+      }
+      return employee;
+    });
     return { id, deleted: true, deactivated: true };
   },
 
@@ -747,6 +770,52 @@ export const mastersService = {
         created.push(mapShop(result.rows[0]));
       }
       return created;
+    });
+  },
+
+  /** Update opening balances for existing shops only, atomically. Existing
+   * ledger movement is preserved by applying only the opening-balance delta
+   * to current_balance. No shop or unrelated master field can be created or
+   * changed through this endpoint. */
+  async bulkUpdateShopOpeningBalances(inputs: Array<{ shopNumber?: string; shopName?: string; openingBalance: number }>) {
+    if (!Array.isArray(inputs) || inputs.length === 0 || inputs.length > 5000) {
+      throw new AppError(400, "Provide between 1 and 5000 opening-balance rows.");
+    }
+    return withTransaction(async (client) => {
+      const seen = new Set<number>();
+      const updated: Shop[] = [];
+      for (let index = 0; index < inputs.length; index += 1) {
+        const input = inputs[index];
+        const shopNumber = str(input.shopNumber).trim();
+        const shopName = str(input.shopName).trim();
+        const openingBalance = Number(input.openingBalance);
+        if ((!shopNumber && !shopName) || !Number.isFinite(openingBalance) || Math.abs(openingBalance) > 1_000_000_000) {
+          throw new AppError(400, `Row ${index + 1}: valid Shop Number or Shop Name and Opening Balance are required.`);
+        }
+        const found = await client.query(
+          `SELECT * FROM shops
+            WHERE ($1<>'' AND LOWER(shop_no)=LOWER($1))
+               OR ($2<>'' AND LOWER(shop_name)=LOWER($2))
+            ORDER BY CASE WHEN $1<>'' AND LOWER(shop_no)=LOWER($1) THEN 0 ELSE 1 END
+            LIMIT 2 FOR UPDATE`,
+          [shopNumber, shopName],
+        );
+        if (found.rowCount !== 1) {
+          throw new AppError(found.rowCount ? 409 : 404, `Row ${index + 1}: existing shop could not be identified uniquely.`);
+        }
+        const shopId = num(found.rows[0].id);
+        if (seen.has(shopId)) throw new AppError(409, `Row ${index + 1}: the same shop appears more than once.`);
+        seen.add(shopId);
+        const saved = await client.query(
+          `UPDATE shops
+              SET current_balance=COALESCE(current_balance,0)+($2-opening_balance),
+                  opening_balance=$2
+            WHERE id=$1 RETURNING *`,
+          [shopId, openingBalance],
+        );
+        updated.push(mapShop(saved.rows[0]));
+      }
+      return updated;
     });
   },
 

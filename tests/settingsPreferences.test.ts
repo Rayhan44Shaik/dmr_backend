@@ -28,6 +28,8 @@ const { hashPassword } = await import("../src/utils/passwordHash.js");
 
 const SECOND_USERNAME = "settings-supervisor";
 const SECOND_PASSWORD = "Settings-supervisor-123!";
+const FULL_USERNAME = "settings-full-access";
+const FULL_PASSWORD = "Settings-full-access-123!";
 
 const owner = app.authHeaders.cookie;
 
@@ -72,6 +74,15 @@ before(async () => {
     `INSERT INTO application_users (username, display_name, password_hash, role, employee_id, access_status, active)
      VALUES ($1, 'Settings Supervisor', $2, 'SUPERVISOR', $3, 'ACTIVE', TRUE)`,
     [SECOND_USERNAME, await hashPassword(SECOND_PASSWORD), employee.rows[0].id],
+  );
+  const fullEmployee = await pool.query(
+    `INSERT INTO employees (employee_no, employee_name, department, status, phone_number)
+     VALUES (9002, 'Settings Full Access', 'Office', 'Active', '9000000002') RETURNING id`,
+  );
+  await pool.query(
+    `INSERT INTO application_users (username, display_name, password_hash, role, employee_id, access_status, active)
+     VALUES ($1, 'Settings Full Access', $2, 'FULL_ACCESS', $3, 'ACTIVE', TRUE)`,
+    [FULL_USERNAME, await hashPassword(FULL_PASSWORD), fullEmployee.rows[0].id],
   );
 });
 
@@ -183,6 +194,13 @@ describe("access directory summary", () => {
     });
     assert.equal(status, 200);
     assert.ok(Array.isArray(body.rows));
+    assert.ok(body.rows.every((row: any) => row.employee_id != null), "every access row has a stable employee identity");
+    assert.ok(body.rows.every((row: any) => row.role !== "OWNER"), "protected OWNER accounts are not employee-access rows");
+    assert.equal(
+      new Set(body.rows.map((row: any) => String(row.employee_id))).size,
+      body.rows.length,
+      "employee row keys are unique",
+    );
     assert.ok(body.summary, "summary counts are returned with the page");
     assert.equal(Number(body.summary.total), Number(body.total));
     assert.equal(
@@ -218,5 +236,92 @@ describe("access directory summary", () => {
     assert.equal(filtered.status, 200);
     assert.equal(Number(filtered.body.summary.total), 0);
     assert.equal(filtered.body.rows.length, 0);
+  });
+
+  it("owner can pause and resume an employee-linked account", async () => {
+    const directory = await call(`/api/access-management/employees?page=1&pageSize=10&search=${SECOND_USERNAME}`, {
+      method: "GET",
+      cookie: owner,
+    });
+    const row = directory.body.rows.find((item: any) => item.username === SECOND_USERNAME);
+    assert.ok(row?.user_id, "test employee login is available");
+
+    const employeeCookie = await login(SECOND_USERNAME, SECOND_PASSWORD);
+    const paused = await call(`/api/access-management/${row.user_id}/access`, {
+      method: "POST",
+      cookie: owner,
+      body: { action: "PAUSE" },
+    });
+    assert.equal(paused.status, 200);
+    assert.equal(paused.body.access_status, "PAUSED");
+    const existingSession = await call("/api/settings/preferences", { method: "GET", cookie: employeeCookie });
+    assert.equal(existingSession.status, 401, "pausing immediately invalidates an existing session");
+    const pausedLogin = await call("/api/auth/login", {
+      method: "POST",
+      body: { username: SECOND_USERNAME, password: SECOND_PASSWORD },
+    });
+    assert.equal(pausedLogin.status, 403);
+    assert.equal(pausedLogin.body.code, "ACCESS_PAUSED");
+
+    const resumed = await call(`/api/access-management/${row.user_id}/access`, {
+      method: "POST",
+      cookie: owner,
+      body: { action: "RESUME" },
+    });
+    assert.equal(resumed.status, 200);
+    assert.equal(resumed.body.access_status, "ACTIVE");
+  });
+
+  it("wrong password reveal is validation failure and never expires the owner session", async () => {
+    const directory = await call(`/api/access-management/employees?page=1&pageSize=10&search=${SECOND_USERNAME}`, {
+      method: "GET",
+      cookie: owner,
+    });
+    const row = directory.body.rows.find((item: any) => item.username === SECOND_USERNAME);
+    const denied = await call(`/api/access-management/${row.user_id}/reveal-password`, {
+      method: "POST",
+      cookie: owner,
+      body: { actorPassword: "definitely-wrong" },
+    });
+    assert.equal(denied.status, 422);
+    assert.equal(denied.body.code, "REAUTH_FAILED");
+    const stillSignedIn = await call("/api/auth/me", { method: "GET", cookie: owner });
+    assert.equal(stillSignedIn.status, 200);
+  });
+
+  it("FULL_ACCESS manages lower roles but cannot manage or create FULL_ACCESS peers", async () => {
+    const fullCookie = await login(FULL_USERNAME, FULL_PASSWORD);
+    const directory = await call(`/api/access-management/employees?page=1&pageSize=10`, {
+      method: "GET",
+      cookie: fullCookie,
+    });
+    const supervisor = directory.body.rows.find((item: any) => item.username === SECOND_USERNAME);
+    const peer = directory.body.rows.find((item: any) => item.username === FULL_USERNAME);
+    assert.ok(supervisor?.user_id && peer?.user_id);
+
+    const pauseLower = await call(`/api/access-management/${supervisor.user_id}/access`, {
+      method: "POST",
+      cookie: fullCookie,
+      body: { action: "PAUSE" },
+    });
+    assert.equal(pauseLower.status, 200);
+    await call(`/api/access-management/${supervisor.user_id}/access`, {
+      method: "POST",
+      cookie: fullCookie,
+      body: { action: "RESUME" },
+    });
+
+    const pausePeer = await call(`/api/access-management/${peer.user_id}/access`, {
+      method: "POST",
+      cookie: fullCookie,
+      body: { action: "PAUSE" },
+    });
+    assert.equal(pausePeer.status, 403);
+    const promote = await call(`/api/access-management/${supervisor.user_id}/role`, {
+      method: "PATCH",
+      cookie: fullCookie,
+      body: { role: "FULL_ACCESS" },
+    });
+    assert.equal(promote.status, 403);
   });
 });

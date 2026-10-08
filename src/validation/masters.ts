@@ -20,6 +20,7 @@ export const employeeSchema = z.object({
   employeeNo: optionalPositiveNo,
   employeeName: trimmed(200).min(1),
   department: trimmed(100).min(1),
+  secondaryDepartment: trimmed(100).nullable().optional(),
   role: optionalText(100),
   phoneNumber: phone,
   email,

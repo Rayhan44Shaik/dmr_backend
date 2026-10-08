@@ -253,7 +253,9 @@ export const authService = {
         throw new AppError(403, "Your login access is paused. Contact the owner.", undefined, "ACCESS_PAUSED");
       }
       if (row.access_status === "REVOKED" || !row.active) {
-        throw new AppError(403, "Your login access has been revoked. Contact the owner.", undefined, "ACCESS_REVOKED");
+        // Do not disclose whether a revoked username still exists. A fresh
+        // grant can reactivate it, but until then it behaves like no account.
+        throw new AppError(401, "Invalid username or password", undefined, "AUTH_INVALID");
       }
       if (row.access_status !== "ACTIVE") {
         throw new AppError(403, "Login access has not been granted. Contact the owner.", undefined, "ACCESS_NOT_GRANTED");
@@ -321,10 +323,9 @@ export const authService = {
         FROM application_sessions s JOIN application_users u ON u.id=s.user_id
         LEFT JOIN employees e ON e.id=u.employee_id
         WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>NOW()
-          -- Paused employees keep already-signed-in sessions (owner intent:
-          -- pause freezes NEW logins, revoke signs out). Only REVOKED/inactive
-          -- users lose their session.
-          AND u.active=TRUE AND u.access_status IN ('ACTIVE','PAUSED')
+          -- Any access-state change is enforced on the very next request.
+          -- PAUSED and REVOKED users cannot retain an already-open session.
+          AND u.active=TRUE AND u.access_status='ACTIVE'
           AND (u.employee_id IS NULL OR e.status='Active')`, [tokenHash(token)]);
       if (!result.rowCount) return null;
       // Server-side idle enforcement (server time): ordinary reads, polling,

@@ -388,7 +388,7 @@ export const shopSalesService = {
             data.mortality ?? 0,
             rate,
             amount,
-            data.remarks ?? "",
+            data.remarks == null ? "" : str(data.remarks).trim().toLocaleUpperCase("en-IN"),
           ]
         );
         const saleId = num(result.rows[0].id);
@@ -516,7 +516,7 @@ export const shopSalesService = {
           effectiveRate,
           nextAmount,
           data.mortality ?? null,
-          data.remarks ?? null,
+          data.remarks == null ? null : str(data.remarks).trim().toLocaleUpperCase("en-IN"),
         ]
       );
       if (!result.rowCount) throw new AppError(404, "Shop sale not found");

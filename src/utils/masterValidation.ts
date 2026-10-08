@@ -9,6 +9,10 @@ import { str } from "./coerce.js";
 // ---------------------------------------------------------------------------
 
 export const EMPLOYEE_DEPARTMENTS = [
+  "Owner",
+  "Accounts",
+  "Office",
+  "Audit",
   "Accountant",
   "Collection",
   "Driver",
@@ -158,6 +162,7 @@ export function validateEmployeeFields(raw: Record<string, unknown>): FieldError
   const errors: FieldError[] = [];
   const employeeName = str(raw.employeeName ?? raw.employee_name).trim();
   const department = str(raw.department).trim();
+  const secondaryDepartment = str(raw.secondaryDepartment ?? raw.secondary_department).trim();
   const phoneNumber = str(raw.phoneNumber ?? raw.phone ?? raw.phone_number).trim();
   const email = str(raw.email).trim();
   const aadharNumber = str(raw.aadharNumber ?? raw.aadhar_number).replace(/\s/g, "");
@@ -168,6 +173,8 @@ export function validateEmployeeFields(raw: Record<string, unknown>): FieldError
   else if (!EMPLOYEE_DEPARTMENTS.some((d) => d.toLowerCase() === department.toLowerCase())) {
     errors.push({ field: "department", message: `Department "${department}" is not valid.` });
   }
+  if (secondaryDepartment && !EMPLOYEE_DEPARTMENTS.some((d) => d.toLowerCase() === secondaryDepartment.toLowerCase())) errors.push({ field: "secondaryDepartment", message: `Secondary Department "${secondaryDepartment}" is not valid.` });
+  if (secondaryDepartment && secondaryDepartment.toLowerCase() === department.toLowerCase()) errors.push({ field: "secondaryDepartment", message: "Secondary Department must differ from the primary department." });
   if (isMissing(phoneNumber)) errors.push({ field: "phoneNumber", message: "Phone Number is required." });
   else if (!/^[0-9]{10}$/.test(phoneNumber)) errors.push({ field: "phoneNumber", message: "Mobile Number must be exactly 10 digits." });
 
@@ -184,7 +191,7 @@ export function validateEmployeeFields(raw: Record<string, unknown>): FieldError
     errors.push({ field: "aadharNumber", message: "Aadhar Number must be exactly 12 digits." });
   }
   if (
-    (department.toLowerCase() === "driver" || department.toLowerCase() === "collection") &&
+    ([department, secondaryDepartment].some((value) => value.toLowerCase() === "driver" || value.toLowerCase() === "collection")) &&
     isMissing(raw.licenseNumber)
   ) {
     errors.push({ field: "licenseNumber", message: "License Number is required for Driver and Collection departments." });

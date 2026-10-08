@@ -1334,13 +1334,13 @@ async function replaceDeliveries(
         mortKg,
         d.rate ?? null,
         amount,
-        d.remarks ?? "",
+        d.remarks == null ? "" : str(d.remarks).trim().toLocaleUpperCase("en-IN"),
         d.deliveryMode ?? "box",
         d.farmBirds ?? null,
         d.farmWeight == null ? null : Number(Number(d.farmWeight).toFixed(2)),
         normalizeTripTimestamp(d.autoCaptureTime),
         d.clientKey ?? null,
-        d.subShopName ?? "",
+        d.subShopName == null ? "" : str(d.subShopName).trim().toLocaleUpperCase("en-IN"),
       ]
     );
     const deliveryId = num(inserted.rows[0].id);
@@ -2419,7 +2419,7 @@ export const tripsService = {
             body.pickupTolls ?? null,
             body.farmAddress ?? null,
             body.avgBirdWeight ?? null,
-            body.farmRemarks ?? null,
+            body.farmRemarks == null ? null : str(body.farmRemarks).trim().toLocaleUpperCase("en-IN"),
             body.farmStepSubmitted ?? null,
             body.dcWeight ?? null,
             body.totalBirds ?? null,
@@ -2449,7 +2449,7 @@ export const tripsService = {
             body.others5Amt ?? null,
             body.fuel ?? null,
             body.expense ?? null,
-            body.remarks ?? null,
+            body.remarks == null ? null : str(body.remarks).trim().toLocaleUpperCase("en-IN"),
             normalizeTripTimestamp(body.submittedAt),
             body.endStepSubmitted ?? null,
             body.expensesStepSubmitted ?? null,
@@ -3093,13 +3093,13 @@ export const tripsService = {
               mortKg,
               d.rate != null ? Number(d.rate) : null,
               amount,
-              d.remarks ?? "",
+              d.remarks == null ? "" : str(d.remarks).trim().toLocaleUpperCase("en-IN"),
               mode,
               farmBirds,
               farmWeight,
               autoCaptureTime,
               d.clientKey ? str(d.clientKey) : null,
-              d.subShopName ?? "",
+              d.subShopName == null ? "" : str(d.subShopName).trim().toLocaleUpperCase("en-IN"),
             ]
           );
         } else {
@@ -3680,7 +3680,7 @@ export const tripsService = {
     const drivers = await query(
       `SELECT id, employee_name, department
          FROM employees
-        WHERE department = 'Driver'
+        WHERE (department = 'Driver' OR secondary_department = 'Driver')
           AND id NOT IN (
             SELECT driver_id FROM trips
             ${occupied} AND driver_id IS NOT NULL
@@ -3692,7 +3692,7 @@ export const tripsService = {
     const supervisors = await query(
       `SELECT id, employee_name, department
          FROM employees
-        WHERE department = 'Supervisor'
+        WHERE (department = 'Supervisor' OR secondary_department = 'Supervisor')
           AND id NOT IN (
             SELECT supervisor_id FROM trips
             ${occupied} AND supervisor_id IS NOT NULL
@@ -3721,7 +3721,7 @@ export const tripsService = {
             ORDER BY t.id DESC
             LIMIT 1
          ) occ ON TRUE
-        WHERE e.department IN ('Helper', 'Labor')
+        WHERE (e.department IN ('Helper', 'Labor') OR e.secondary_department IN ('Helper', 'Labor'))
         ORDER BY e.employee_name`,
       [excludeId]
     );
@@ -3743,7 +3743,7 @@ export const tripsService = {
             ORDER BY t.id DESC
             LIMIT 1
          ) occ ON TRUE
-        WHERE e.department = 'Loader'
+        WHERE (e.department = 'Loader' OR e.secondary_department = 'Loader')
         ORDER BY e.employee_name`,
       [excludeId]
     );

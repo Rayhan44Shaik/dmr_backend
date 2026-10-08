@@ -11,7 +11,7 @@ const starts = (path: string, choices: readonly string[]) => choices.some((prefi
 export const roleBoundary: RequestHandler = (req, res, next) => {
   const { role } = authUser(res);
   const path = req.path;
-  if (role === "OWNER") return next();
+  if (role === "OWNER" || role === "FULL_ACCESS") return next();
   // Self-scoped settings (language/theme preferences) are available to every
   // role: the router only ever reads and writes the caller's own row, so there
   // is nothing to gate. The employee access directory is NOT under /settings.
@@ -19,24 +19,11 @@ export const roleBoundary: RequestHandler = (req, res, next) => {
   // FULL_ACCESS is intentionally distinct from OWNER: read and workflow
   // permissions across modules, but no destructive writes (delete / financial
   // approve / rate-lock) — those remain OWNER-only.
-  if (role === "FULL_ACCESS") {
-    if (read(req.method)) return next(); // read-only everywhere
-    // Trip workflow (create/edit/submit/approve/status) but no delete.
-    if (starts(path, ["/trips", "/operations/trips"])) {
-      if (req.method === "DELETE") throw new AppError(403, "Trip deletion is OWNER-only");
-      return next();
-    }
-    // Staff workflow (view + own leave + manual duty writes).
-    if (starts(path, ["/staff/leaves", "/staff/duties", "/staff/duty-planner"])) return next();
-    // Read-only operation views.
-    if (starts(path, ["/operations/dashboard", "/operations/trip-list", "/operations/shop-ledger"])) return next();
-    throw new AppError(403, "Full access is read/write across modules but destructive writes are OWNER-only");
-  }
-  if (path.startsWith("/access-management")) throw new AppError(403, "Owner access is required");
   if (role === "AUDIT") {
     if (!read(req.method)) throw new AppError(403, "Audit access is read-only");
     return next();
   }
+  if (path.startsWith("/access-management")) throw new AppError(403, "Owner or Full Access permission is required");
   // Reference lists are required by entry forms but remain read-only.
   if (path.startsWith("/masters") && read(req.method)) return next();
   if (role === "SUPERVISOR") {
@@ -61,4 +48,3 @@ export const roleBoundary: RequestHandler = (req, res, next) => {
   }
   throw new AppError(403, "Access denied");
 };
-

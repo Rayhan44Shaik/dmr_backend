@@ -177,7 +177,7 @@ export const shopRatesService = {
             data.birdTypeId ?? null,
             data.birdType ?? "",
             data.rate,
-            data.remarks ?? `Rate effective ${data.effectiveFrom}`,
+            String(data.remarks ?? `RATE EFFECTIVE ${data.effectiveFrom}`).trim().toLocaleUpperCase("en-IN"),
           ]
         );
         const rateId = num(inserted.rows[0].id);
@@ -256,7 +256,7 @@ export const shopRatesService = {
         data.birdType ?? null,
         data.rate ?? null,
         amount,
-        data.remarks ?? null,
+        data.remarks == null ? null : str(data.remarks).trim().toLocaleUpperCase("en-IN"),
       ]
     );
     return this.getById(id);
