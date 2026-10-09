@@ -5,7 +5,8 @@
  *  - preferences default to en/light with `updatedAt: null` before any save
  *    (so a client can tell "never chosen" from "chose the defaults");
  *  - PATCH persists, is partial (one field does not clobber the other) and
- *    survives a later GET;
+ *    survives a later GET — including the numeric font scale (70–150, 10%
+ *    steps);
  *  - rejects unknown fields and out-of-vocabulary values;
  *  - preferences are strictly self-scoped: another user sees their own row;
  *  - every role may reach /settings, but the employee directory stays gated;
@@ -98,6 +99,7 @@ describe("preferences defaults and persistence", () => {
     assert.equal(status, 200);
     assert.equal(body.language, "en");
     assert.equal(body.theme, "light");
+    assert.equal(body.fontScale, 100);
     assert.equal(body.updatedAt, null);
   });
 
@@ -124,6 +126,19 @@ describe("preferences defaults and persistence", () => {
     const read = await call("/api/settings/preferences", { method: "GET", cookie: owner });
     assert.equal(read.body.language, "te");
     assert.equal(read.body.theme, "dark");
+
+    const third = await call("/api/settings/preferences", {
+      method: "PATCH",
+      cookie: owner,
+      body: { fontScale: 110 },
+    });
+    assert.equal(third.status, 200);
+    assert.equal(third.body.fontScale, 110);
+    assert.equal(third.body.language, "te", "language survives a font-scale-only update");
+    assert.equal(third.body.theme, "dark", "theme survives a font-scale-only update");
+
+    const reread = await call("/api/settings/preferences", { method: "GET", cookie: owner });
+    assert.equal(reread.body.fontScale, 110, "the font scale survives a later GET");
   });
 
   it("rejects unknown fields and values outside the vocabulary", async () => {
@@ -143,6 +158,28 @@ describe("preferences defaults and persistence", () => {
 
     const empty = await call("/api/settings/preferences", { method: "PATCH", cookie: owner, body: {} });
     assert.equal(empty.status, 400);
+
+    // Font scale must sit on the 70–150 / 10% vocabulary — no 105, no 200.
+    const offStep = await call("/api/settings/preferences", {
+      method: "PATCH",
+      cookie: owner,
+      body: { fontScale: 105 },
+    });
+    assert.equal(offStep.status, 400);
+
+    const outOfRange = await call("/api/settings/preferences", {
+      method: "PATCH",
+      cookie: owner,
+      body: { fontScale: 200 },
+    });
+    assert.equal(outOfRange.status, 400);
+
+    const wrongType = await call("/api/settings/preferences", {
+      method: "PATCH",
+      cookie: owner,
+      body: { fontScale: "large" },
+    });
+    assert.equal(wrongType.status, 400);
   });
 
   it("keeps preferences self-scoped across users", async () => {
@@ -287,6 +324,36 @@ describe("access directory summary", () => {
     assert.equal(denied.body.code, "REAUTH_FAILED");
     const stillSignedIn = await call("/api/auth/me", { method: "GET", cookie: owner });
     assert.equal(stillSignedIn.status, 200);
+  });
+
+  it("view password never rotates an employee-chosen password", async () => {
+    const lowercasePassword = "lowercase@dmr123";
+    const originalCookie = await login(SECOND_USERNAME, SECOND_PASSWORD);
+    const changed = await call("/api/auth/change-password", {
+      method: "POST",
+      cookie: originalCookie,
+      body: { currentPassword: SECOND_PASSWORD, newPassword: lowercasePassword },
+    });
+    assert.equal(changed.status, 204, "a lowercase password must be stored exactly as entered");
+
+    const directory = await call(`/api/access-management/employees?page=1&pageSize=10&search=${SECOND_USERNAME}`, {
+      method: "GET",
+      cookie: owner,
+    });
+    const row = directory.body.rows.find((item: any) => item.username === SECOND_USERNAME);
+    assert.ok(row?.user_id);
+
+    const denied = await call(`/api/access-management/${row.user_id}/reveal-password`, {
+      method: "POST",
+      cookie: owner,
+      body: { actorPassword: "Test-only-password-123!" },
+    });
+    assert.equal(denied.status, 409);
+    assert.equal(denied.body.code, "PASSWORD_NOT_REVEALABLE");
+
+    // Most importantly, the read attempt did not change the credential.
+    const employeeCookie = await login(SECOND_USERNAME, lowercasePassword);
+    assert.ok(employeeCookie);
   });
 
   it("FULL_ACCESS manages lower roles but cannot manage or create FULL_ACCESS peers", async () => {

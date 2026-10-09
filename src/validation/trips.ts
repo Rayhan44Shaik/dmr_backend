@@ -204,15 +204,20 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
       boxDetails: z.array(boxDetailSchema).min(1),
       dcPhotoKey: z.string().min(1, "DC Photo is required."),
       dcPhotoKey2: z.string().optional(),
+      pickupPhotos: z.array(z.object({
+        key: z.string().min(1).max(240),
+        mime: z.string().startsWith("image/").max(100),
+        data: z.string().startsWith("data:image/").max(100_000),
+      })).max(500).optional(),
     })
     .passthrough()
     .refine(
       (data) => {
-        const photoCount = (data.dcPhotoKey ? 1 : 0) + (data.dcPhotoKey2 ? 1 : 0);
-        return photoCount >= 1 && photoCount <= 2;
+        const photoCount = data.pickupPhotos?.length || (data.dcPhotoKey ? 1 : 0) + (data.dcPhotoKey2 ? 1 : 0);
+        return photoCount >= 1;
       },
       {
-        message: "Step 3 requires between 1 and 2 photos.",
+        message: "Step 3 requires at least one photo.",
         path: ["dcPhotoKey"],
       }
     ),

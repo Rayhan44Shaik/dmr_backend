@@ -788,6 +788,7 @@ async function hydrateTrip(
     dcPhotoKey2?: string | null;
     dcPhotoMime2?: string | null;
     dcPhotoData2?: string | null;
+    pickupPhotos?: Array<{ key: string; mime: string; data: string }>;
   }
 > {
   const base = mapTripBase(row);
@@ -844,6 +845,7 @@ async function hydrateTrip(
     dcPhotoKey2: string | null;
     dcPhotoMime2: string | null;
     dcPhotoData2: string | null;
+    pickupPhotos: Array<{ key: string; mime: string; data: string }>;
   } = {
     dcPhotoKey: (viewLeg?.dcPhotoKey ?? base.dcPhotoKey) ?? null,
     dcPhotoMime: null,
@@ -851,6 +853,7 @@ async function hydrateTrip(
     dcPhotoKey2: null,
     dcPhotoMime2: null,
     dcPhotoData2: null,
+    pickupPhotos: [],
   };
   if (options.includeDcPhoto) {
     dcPhoto = await loadDcPhoto(
@@ -2630,7 +2633,7 @@ export const tripsService = {
           await replaceDiesel(client, tripId, []);
         }
 
-        // Step 3 photos — up to 2, stored in trip_media (base64). Persist the
+        // Step 3 photos — unlimited, stored in trip_media (base64). Persist the
         // submitted set, then remove any image row no longer referenced so a
         // removed photo never resurrects on reload.
         const persistPhoto = async (key: unknown, mime: unknown, data: unknown) => {
@@ -2648,17 +2651,19 @@ export const tripsService = {
         };
         await persistPhoto(body.dcPhotoKey, body.dcPhotoMime, body.dcPhotoData);
         await persistPhoto(body.dcPhotoKey2, body.dcPhotoMime2, body.dcPhotoData2);
-        if (body.dcPhotoKey || body.dcPhotoData || body.dcPhotoKey2 || body.dcPhotoData2) {
+        const pickupPhotos = Array.isArray(body.pickupPhotos) ? body.pickupPhotos : [];
+        for (const photo of pickupPhotos) {
+          await persistPhoto(photo?.key, photo?.mime, photo?.data);
+        }
+        if (body.syncPickupPhotos === true) {
+          const retainedKeys = [body.dcPhotoKey, body.dcPhotoKey2, ...pickupPhotos.map((photo: any) => photo?.key)]
+            .filter(Boolean)
+            .map(String);
           await client.query(
             `DELETE FROM trip_media
               WHERE trip_id = $1 AND leg_id = $2 AND media_type = 'image'
-                AND media_key NOT IN ($3, $4)`,
-            [
-              tripId,
-              activeLeg.id,
-              body.dcPhotoKey ? str(body.dcPhotoKey) : "__none__",
-              body.dcPhotoKey2 ? str(body.dcPhotoKey2) : "__none__",
-            ]
+                AND NOT (media_key = ANY($3::text[]))`,
+            [tripId, activeLeg.id, retainedKeys]
           );
         }
 

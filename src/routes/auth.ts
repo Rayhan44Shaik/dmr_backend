@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { authService } from "../services/authService.js";
 import { AppError, asyncHandler } from "../middleware/errorHandler.js";
-import { authExpiresAt, authToken, authUser, clearSessionCookie, requireAuth, sessionCookie } from "../middleware/auth.js";
+import { authExpiresAt, authToken, authUser, clearSessionCookie, requestToken, requireAuth, sessionCookie } from "../middleware/auth.js";
 
 export const authRouter = Router();
 const credentials = z.object({ username: z.string().trim().min(1).max(100), password: z.string().min(1).max(1024) }).strict();
@@ -111,8 +111,11 @@ authRouter.get("/profile", requireAuth, asyncHandler(async (_req, res) => {
   const profile = await authService.profile(user.id);
   return res.json({ profile });
 }));
-authRouter.post("/logout", requireAuth, asyncHandler(async (req, res) => {
-  await authService.logout(authToken(res), auditMeta(req, res));
+// Logout is idempotent. An already expired/revoked session is still a
+// successful logout and must clear the browser cookie rather than emit 401.
+authRouter.post("/logout", asyncHandler(async (req, res) => {
+  const token = requestToken(req);
+  if (token) await authService.logout(token, auditMeta(req, res));
   res.setHeader("Set-Cookie", clearSessionCookie()); res.status(204).end();
 }));
 

@@ -248,6 +248,7 @@ export async function loadDcPhoto(
   dcPhotoKey2: string | null;
   dcPhotoMime2: string | null;
   dcPhotoData2: string | null;
+  pickupPhotos: Array<{ key: string; mime: string; data: string }>;
 }> {
   const empty = {
     dcPhotoKey: dcPhotoKey ?? null,
@@ -256,6 +257,7 @@ export async function loadDcPhoto(
     dcPhotoKey2: null,
     dcPhotoMime2: null,
     dcPhotoData2: null,
+    pickupPhotos: [],
   };
   const result = await client.query(
     `SELECT media_key, mime_type, data_base64 FROM trip_media
@@ -284,5 +286,10 @@ export async function loadDcPhoto(
     dcPhotoKey2: secondary?.key ?? null,
     dcPhotoMime2: secondary?.mime ?? null,
     dcPhotoData2: secondary?.data ?? null,
+    pickupPhotos: photos.map((photo) => ({
+      key: photo.key,
+      mime: photo.mime ?? "image/jpeg",
+      data: photo.data!,
+    })),
   };
 }
