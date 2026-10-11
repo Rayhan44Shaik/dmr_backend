@@ -123,16 +123,27 @@ describe("Fleet maintenance", () => {
     const { status, body } = await postForm("/api/fleet/maintenance", maintForm({
       date: TODAY, vehicleId: vehicle.id, driverId: driver.id, currentKM: 50000,
       maintenanceType: ["Engine"], serviceType: "General", garage: "G1",
+      remarks: "Check mounting bolts after 500 KM",
       idempotencyKey: key, parts: [{ name: "Oil", quantity: 2, rate: 100 }],
     }));
     assert.equal(status, 201);
     assert.match(body.billNo, /^MNT-/);
     assert.equal(Number(body.totalCost), 200);
     assert.equal(body.vehicleId, vehicle.id);
+    assert.equal(body.remarks, "Check mounting bolts after 500 KM");
+
+    const detail = await getJson(baseUrl, `/api/fleet/maintenance/${body.id}`);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.remarks, "Check mounting bolts after 500 KM");
+
+    const history = await getJson(baseUrl, `/api/fleet/maintenance?search=${encodeURIComponent(body.billNo)}`);
+    assert.equal(history.status, 200);
+    assert.equal(rowsOf(history)[0]?.remarks, "Check mounting bolts after 500 KM");
 
     const replay = await postForm("/api/fleet/maintenance", maintForm({
       date: TODAY, vehicleId: vehicle.id, driverId: driver.id, currentKM: 50000,
       maintenanceType: ["Engine"], serviceType: "General", garage: "G1",
+      remarks: "Check mounting bolts after 500 KM",
       idempotencyKey: key, parts: [{ name: "Oil", quantity: 2, rate: 100 }],
     }));
     assert.equal(replay.status, 201);
@@ -162,6 +173,12 @@ describe("Fleet maintenance", () => {
     const upd = await putJson(baseUrl, `/api/fleet/maintenance/${first.body.id}`, { remarks: "updated", currentKM: 60005 });
     assert.equal(upd.status, 200);
     assert.equal(upd.body.remarks, "updated");
+
+    const clearRemarksForm = new FormData();
+    clearRemarksForm.append("remarks", "");
+    const cleared = await putForm(`/api/fleet/maintenance/${first.body.id}`, clearRemarksForm);
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.remarks, null);
 
     const second = await postForm("/api/fleet/maintenance", maintForm({
       date: TODAY, vehicleId: vehicle.id, driverId: driver.id, currentKM: 60050,

@@ -144,9 +144,10 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
       supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int().positive(),
       helpers: crewNames,
       loaders: crewNames,
+      isRentedVehicle: z.boolean().optional(),
       openingMeter: z.preprocess(
         (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
-        z.coerce.number({ required_error: "Opening meter is required" }).positive("Opening meter is required")
+        z.coerce.number().positive("Opening meter is required").optional()
       ),
       advanceAmount: z.preprocess(
         (v) => (typeof v === "string" && v.trim() === "" ? null : v),
@@ -154,7 +155,10 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
       ),
       startTime: z.string().optional(),
     })
-    .passthrough(),
+    .passthrough()
+    .superRefine((data, ctx) => {
+      if (!data.isRentedVehicle && data.openingMeter == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["openingMeter"], message: "Opening meter is required" });
+    }),
   farm: z
     .object({
       sourceFarmId: idSchema,
@@ -164,7 +168,8 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
           z.string().trim().max(500).optional()
         )
         .optional(),
-      destMeter: z.coerce.number().nonnegative(),
+      isRentedVehicle: z.boolean().optional(),
+      destMeter: z.coerce.number().nonnegative().optional(),
       // reached_time is never sent by the frontend (backend captures it) — but
       // tolerate a null in case a legacy client sends one.
       reachedTime: z.string().nullable().optional(),
@@ -211,6 +216,9 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
       })).max(500).optional(),
     })
     .passthrough()
+    .superRefine((data, ctx) => {
+      if (!data.isRentedVehicle && data.destMeter == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["destMeter"], message: "Farm meter is required" });
+    })
     .refine(
       (data) => {
         const photoCount = data.pickupPhotos?.length || (data.dcPhotoKey ? 1 : 0) + (data.dcPhotoKey2 ? 1 : 0);
@@ -270,12 +278,13 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
     .object({
       closingMeter: z.coerce.number().nonnegative().optional(),
       endMeter: z.coerce.number().nonnegative().optional(),
+      isRentedVehicle: z.boolean().optional(),
       // Optional — the server stamps end_time / expenses_step_submitted_at on
       // final submit. The client deliberately does not send browser clocks.
       endTime: z.string().optional(),
     })
     .passthrough()
-    .refine((data) => data.closingMeter != null || data.endMeter != null, {
+    .refine((data) => data.isRentedVehicle || data.closingMeter != null || data.endMeter != null, {
       message: "Either closingMeter or endMeter must be provided to finish the trip",
       path: ["closingMeter"],
     }),

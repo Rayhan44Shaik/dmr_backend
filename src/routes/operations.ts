@@ -11,6 +11,7 @@ import { shopRatesService } from "../services/shopRatesService.js";
 import { shopSalesService } from "../services/shopSalesService.js";
 import { shopLedgerService } from "../services/shopLedgerService.js";
 import { tripsService } from "../services/tripsService.js";
+import { tripExpensesService } from "../services/tripExpensesService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { operationsSensitiveBoundary, operationsTripsBoundary } from "../middleware/businessBoundary.js";
 import { operationsPendingDeleteRouter } from "./operations_pending_delete.js";
@@ -77,6 +78,23 @@ operationsRouter.get(
   "/trips",
   asyncHandler(async (req, res) => {
     res.json(await tripsService.list(tripListFilters(req)));
+  })
+);
+
+/** Completed Step-5 expense register. Draft/Pending/Deleted trips are excluded in SQL. */
+operationsRouter.get(
+  "/expenses",
+  asyncHandler(async (req, res) => {
+    res.json(await tripExpensesService.list({
+      fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+      toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+      vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+      supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
+      search: typeof req.query.search === "string" ? req.query.search : undefined,
+      sortBy: typeof req.query.sortBy === "string" ? req.query.sortBy : undefined,
+      sortDir: req.query.sortDir === "asc" ? "asc" : "desc",
+      pagination: opsListPagination(req),
+    }));
   })
 );
 

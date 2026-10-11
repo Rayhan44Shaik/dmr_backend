@@ -30,6 +30,7 @@ export interface Vehicle {
   noOfBoxes: number;
   birdCapacity: number;
   capacityKg: number;
+  isRented: boolean;
   trackingId: string;
   fastagBank: string;
   engineNumber: string;
@@ -259,6 +260,8 @@ export interface Trip {
   startTime: string | null;
   vehicleId: number | null;
   vehicleNo: string | null;
+  /** Rental status captured when the trip selected the vehicle. */
+  isRentedVehicle?: boolean;
   /** From Vehicle Master `no_of_boxes` — used by Pickup Step 3 capacity UI. */
   vehicleBoxCapacity?: number | null;
   driverId: number | null;

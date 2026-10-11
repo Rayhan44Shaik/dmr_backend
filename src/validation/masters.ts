@@ -36,14 +36,15 @@ export const employeeSchema = z.object({
 export const vehicleSchema = z.object({
   vehicleNo: optionalPositiveNo,
   vehicleNumber: trimmed(50).min(1),
-  vehicleType: trimmed(100).min(1),
+  vehicleType: optionalText(100),
+  isRented: z.boolean().optional().default(false),
   noOfBoxes: z.coerce.number().int().positive().max(100_000),
   birdCapacity: z.coerce.number().int().positive().max(10_000_000),
   capacityKg: z.coerce.number().positive().max(100_000_000),
   trackingId: optionalText(100),
   fastagBank: optionalText(100),
-  engineNumber: trimmed(100).min(1),
-  chassisNumber: trimmed(100).min(1),
+  engineNumber: optionalText(100),
+  chassisNumber: optionalText(100),
   insuranceExpiry: nullableDate,
   permitExpiry: nullableDate,
   fitnessExpiry: nullableDate,
@@ -54,7 +55,12 @@ export const vehicleSchema = z.object({
   totalEMIs: z.coerce.number().int().positive().max(1200).nullable().optional(),
   rcDate: nullableDate,
   status: activeStatus.optional().default("Active"),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  if (value.isRented) return;
+  if (!value.vehicleType) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["vehicleType"], message: "Vehicle Type is required" });
+  if (!value.engineNumber) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["engineNumber"], message: "Engine Number is required" });
+  if (!value.chassisNumber) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["chassisNumber"], message: "Chassis Number is required" });
+});
 
 export const farmSchema = z.object({
   farmNo: optionalPositiveNo,

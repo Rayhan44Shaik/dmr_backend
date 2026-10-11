@@ -127,29 +127,30 @@ export function validateVehicleFields(raw: Record<string, unknown>): FieldError[
   const capacityKg = raw.capacityKg;
   const emiDay = raw.emiDay;
   const totalEMIs = raw.totalEMIs;
+  const isRented = raw.isRented === true || raw.is_rented === true;
 
   if (isMissing(vehicleNumber)) errors.push({ field: "vehicleNumber", message: "Vehicle Number is required." });
-  if (isMissing(vehicleType)) errors.push({ field: "vehicleType", message: "Vehicle Type is required." });
+  if (!isRented && isMissing(vehicleType)) errors.push({ field: "vehicleType", message: "Vehicle Type is required." });
   if (!isPositiveNumber(noOfBoxes)) errors.push({ field: "noOfBoxes", message: "No. of Boxes must be a positive number." });
   if (!isPositiveNumber(birdCapacity)) errors.push({ field: "birdCapacity", message: "Bird Capacity must be a positive number." });
   if (!isPositiveNumber(capacityKg)) errors.push({ field: "capacityKg", message: "Capacity (Kg) must be a positive number." });
-  if (isMissing(engineNumber)) errors.push({ field: "engineNumber", message: "Engine Number is required." });
-  if (isMissing(chassisNumber)) errors.push({ field: "chassisNumber", message: "Chassis Number is required." });
+  if (!isRented && isMissing(engineNumber)) errors.push({ field: "engineNumber", message: "Engine Number is required." });
+  if (!isRented && isMissing(chassisNumber)) errors.push({ field: "chassisNumber", message: "Chassis Number is required." });
 
-  if (!isMissing(emiDay)) {
+  if (!isRented && !isMissing(emiDay)) {
     const day = Number(emiDay);
     if (!Number.isInteger(day) || day < 1 || day > 31) {
       errors.push({ field: "emiDay", message: "EMI Day must be between 1 and 31." });
     }
   }
-  if (!isMissing(totalEMIs)) {
+  if (!isRented && !isMissing(totalEMIs)) {
     const count = Number(totalEMIs);
     if (!Number.isInteger(count) || count <= 0 || count > 1200) {
       errors.push({ field: "totalEMIs", message: "Total EMIs must be greater than zero." });
     }
   }
 
-  for (const field of VEHICLE_DATE_FIELDS) {
+  for (const field of isRented ? [] : VEHICLE_DATE_FIELDS) {
     if (!isValidDateInput(raw[field])) errors.push({ field, message: `${field} must be a valid date (YYYY-MM-DD).` });
   }
   if (!isMissing(raw.status) && !ACTIVE_STATUSES.includes(String(raw.status).trim())) {

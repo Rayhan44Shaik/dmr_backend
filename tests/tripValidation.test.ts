@@ -40,6 +40,25 @@ describe("Trip step boundary validation", () => {
     );
   });
 
+  it("does not require any vehicle meter for a rented-vehicle trip", () => {
+    assert.doesNotThrow(() =>
+      validateStepSubmit("start", { ...validStart, isRentedVehicle: true, openingMeter: undefined })
+    );
+    assert.doesNotThrow(() =>
+      validateStepSubmit("farm", {
+        sourceFarmId: 1,
+        farmBirdTypeId: 2,
+        avgBirdWeight: 2.1,
+        farmGpsLat: 17.385,
+        farmGpsLon: 78.4867,
+        isRentedVehicle: true,
+      })
+    );
+    assert.doesNotThrow(() =>
+      validateStepSubmit("expenses", { destinationTolls: 0, isRentedVehicle: true })
+    );
+  });
+
   it("allows an optional Step 2 address and requires bird type and a valid non-zero GPS location", () => {
     const validFarm = {
       sourceFarmId: 1,

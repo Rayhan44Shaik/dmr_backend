@@ -49,6 +49,7 @@ export function mapVehicle(row: Record<string, unknown>): Vehicle {
     noOfBoxes: num(row.no_of_boxes),
     birdCapacity: num(row.bird_capacity),
     capacityKg: num(row.capacity_kg),
+    isRented: Boolean(row.is_rented),
     trackingId: str(row.tracking_id),
     fastagBank: str(row.fastag_bank),
     engineNumber: str(row.engine_number),
@@ -435,11 +436,19 @@ export const mastersService = {
 
   async upsertVehicle(body: Partial<Vehicle> & { vehicleNumber: string }) {
     assertValid(validateVehicleFields(body));
+    const isRented = Boolean(body.isRented);
+    if (isRented) {
+      Object.assign(body, {
+        vehicleType: "", trackingId: "", fastagBank: "", engineNumber: "", chassisNumber: "",
+        insuranceExpiry: null, permitExpiry: null, fitnessExpiry: null, purchaseDate: null,
+        purchaseAmount: null, emiStartDate: null, emiDay: null, totalEMIs: null, rcDate: null,
+      });
+    }
 
     if (body.id) {
       await assertUnique("vehicle", body.vehicleNumber, body.id);
-      await assertUnique("vehicleEngine", body.engineNumber ?? "", body.id);
-      await assertUnique("vehicleChassis", body.chassisNumber ?? "", body.id);
+      if (!isRented) await assertUnique("vehicleEngine", body.engineNumber ?? "", body.id);
+      if (!isRented) await assertUnique("vehicleChassis", body.chassisNumber ?? "", body.id);
       const result = await query(
         `UPDATE vehicles SET
           vehicle_no=COALESCE($2,vehicle_no), vehicle_number=$3, vehicle_type=$4, no_of_boxes=$5,
@@ -447,7 +456,7 @@ export const mastersService = {
           engine_number=$10, chassis_number=$11, insurance_expiry=$12,
           permit_expiry=$13, fitness_expiry=$14, purchase_date=$15,
           purchase_amount=$16, emi_start_date=$17, rc_date=$18, status=$19,
-          emi_day=$20, total_emis=$21
+          emi_day=$20, total_emis=$21, is_rented=$22
          WHERE id=$1 RETURNING *`,
         [
           body.id,
@@ -471,6 +480,7 @@ export const mastersService = {
           body.status ?? "Active",
           body.emiDay ?? null,
           body.totalEMIs ?? null,
+          isRented,
         ]
       );
       if (!result.rowCount) throw new AppError(404, "Vehicle not found");
@@ -481,15 +491,15 @@ export const mastersService = {
       `SELECT next_master_number('vehicles') AS n`
     );
     await assertUnique("vehicle", body.vehicleNumber);
-    await assertUnique("vehicleEngine", body.engineNumber ?? "");
-    await assertUnique("vehicleChassis", body.chassisNumber ?? "");
+    if (!isRented) await assertUnique("vehicleEngine", body.engineNumber ?? "");
+    if (!isRented) await assertUnique("vehicleChassis", body.chassisNumber ?? "");
     const result = await query(
       `INSERT INTO vehicles (
          vehicle_no, vehicle_number, vehicle_type, no_of_boxes, bird_capacity,
          capacity_kg, tracking_id, fastag_bank, engine_number, chassis_number,
          insurance_expiry, permit_expiry, fitness_expiry, purchase_date,
-         purchase_amount, emi_start_date, rc_date, status, emi_day, total_emis
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+         purchase_amount, emi_start_date, rc_date, status, emi_day, total_emis, is_rented
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
        RETURNING *`,
       [
         body.vehicleNo ?? nextNo.rows[0].n,
@@ -512,6 +522,7 @@ export const mastersService = {
         body.status ?? "Active",
         body.emiDay ?? null,
         body.totalEMIs ?? null,
+        isRented,
       ]
     );
     return mapVehicle(result.rows[0]);

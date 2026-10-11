@@ -154,6 +154,7 @@ function mapTripBase(row: Record<string, unknown>): Omit<
     startTime: isoOrNull(row.start_time),
     vehicleId: numOrNull(row.vehicle_id),
     vehicleNo: row.vehicle_no == null ? null : str(row.vehicle_no),
+    isRentedVehicle: Boolean(row.is_rented_vehicle),
     vehicleBoxCapacity:
       numOrNull(row.vehicle_box_capacity) ?? numOrNull(row.no_of_boxes) ?? null,
     driverId: numOrNull(row.driver_id),
@@ -962,11 +963,14 @@ async function enrichMasterDenorm(
   client: Client,
   body: Partial<Trip> & Record<string, unknown>
 ) {
-  if (body.vehicleId && !body.vehicleNo) {
-    const v = await client.query(`SELECT vehicle_number FROM vehicles WHERE id = $1`, [
+  if (body.vehicleId) {
+    const v = await client.query(`SELECT vehicle_number, is_rented FROM vehicles WHERE id = $1`, [
       body.vehicleId,
     ]);
-    if (v.rowCount) body.vehicleNo = str(v.rows[0].vehicle_number);
+    if (v.rowCount) {
+      if (!body.vehicleNo) body.vehicleNo = str(v.rows[0].vehicle_number);
+      if (body.isRentedVehicle === undefined) body.isRentedVehicle = Boolean(v.rows[0].is_rented);
+    }
   }
   if (body.driverId && !body.driverName) {
     const e = await client.query(`SELECT employee_name FROM employees WHERE id = $1`, [
@@ -2047,6 +2051,16 @@ export const tripsService = {
             await assertTripMetersEditable(client, tripId);
           }
         }
+        // Preserve the trip-time snapshot when the same vehicle is edited.
+        // Only a genuinely new/different vehicle reads today's master flag;
+        // purchasing a formerly rented vehicle must not rewrite old history.
+        const existingVehicleId = existing?.rowCount ? numOrNull(existing.rows[0].vehicle_id) : null;
+        const requestedVehicleId = numOrNull(body.vehicleId);
+        if (existing?.rowCount && requestedVehicleId != null && requestedVehicleId === existingVehicleId) {
+          body.isRentedVehicle = Boolean(existing.rows[0].is_rented_vehicle);
+        } else if (!existing?.rowCount || (requestedVehicleId != null && requestedVehicleId !== existingVehicleId)) {
+          delete body.isRentedVehicle;
+        }
         await enrichMasterDenorm(client, body);
 
         // Resource availability is DB-backed and transaction-safe. A single
@@ -2141,7 +2155,8 @@ export const tripsService = {
         // "Save Progress" autosave (submitStep already strips these flags for
         // autosave bodies before calling save() â€” see submitStep below), so
         // partial in-progress drafts are never blocked mid-entry.
-        if (body.startStepSubmitted === true || body.expensesStepSubmitted === true) {
+        const isRentedVehicle = Boolean(body.isRentedVehicle ?? existing?.rows[0]?.is_rented_vehicle);
+        if (!isRentedVehicle && (body.startStepSubmitted === true || body.expensesStepSubmitted === true)) {
           const vehicleIdForMeter =
             numOrNull(body.vehicleId) ?? (existing ? numOrNull(existing.rows[0].vehicle_id) : null);
           if (vehicleIdForMeter == null) {
@@ -2493,6 +2508,10 @@ export const tripsService = {
         );
 
         try {
+          await client.query(
+            `UPDATE trips SET is_rented_vehicle = $2 WHERE id = $1`,
+            [tripId, isRentedVehicle]
+          );
           await client.query(
             `UPDATE trips SET
                farm_bird_type_id = COALESCE($2, farm_bird_type_id),
@@ -3200,13 +3219,16 @@ export const tripsService = {
     const isSaveMode = body.mode === "save";
     const legIndex = resolveLegIndex(body);
 
-    if (!isSaveMode) {
-      validateStepSubmit(step, body);
-    }
-
     const existing = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
     if (!existing.rowCount) throw new AppError(404, `Trip ${id} not found`);
     const current = existing.rows[0];
+    body.isRentedVehicle = Boolean(current.is_rented_vehicle);
+    if (step === "start" && body.vehicleId != null && numOrNull(body.vehicleId) !== numOrNull(current.vehicle_id)) {
+      const selectedVehicle = await query(`SELECT is_rented FROM vehicles WHERE id=$1`, [body.vehicleId]);
+      if (!selectedVehicle.rowCount) throw new AppError(422, "Selected vehicle no longer exists.");
+      body.isRentedVehicle = Boolean(selectedVehicle.rows[0].is_rented);
+    }
+    if (!isSaveMode) validateStepSubmit(step, body);
 
     // Ensure Load 1 exists for legacy trips created before multi-load.
     await withTransaction(async (client) => {
@@ -3672,9 +3694,9 @@ export const tripsService = {
         AND id <> $1`;
 
     const vehicles = await query(
-      `SELECT id, vehicle_number, no_of_boxes
+      `SELECT id, vehicle_number, no_of_boxes, is_rented
          FROM vehicles
-        WHERE id NOT IN (
+        WHERE status = 'Active' AND id NOT IN (
           SELECT vehicle_id FROM trips
           ${occupied} AND vehicle_id IS NOT NULL
         )
@@ -3758,6 +3780,7 @@ export const tripsService = {
         id: num(r.id),
         vehicleNumber: str(r.vehicle_number),
         noOfBoxes: num(r.no_of_boxes),
+        isRented: Boolean(r.is_rented),
       })),
       drivers: drivers.rows.map((r) => ({
         id: num(r.id),
@@ -3790,10 +3813,11 @@ export const tripsService = {
    */
   async upsertDieselEntry(tripId: number, body: Record<string, unknown>) {
     return withTransaction(async (client) => {
-      const existing = await client.query(`SELECT id, trip_date, closing_meter, vehicle_id FROM trips WHERE id = $1 AND deleted = FALSE`, [
+      const existing = await client.query(`SELECT id, trip_date, closing_meter, vehicle_id, is_rented_vehicle FROM trips WHERE id = $1 AND deleted = FALSE`, [
         tripId,
       ]);
       if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
+      if (Boolean(existing.rows[0].is_rented_vehicle)) throw new AppError(422, "Diesel entries are not available for rented vehicles.");
 
       const litres = numOrNull(body.litres);
       const rate = numOrNull(body.rate);
@@ -3973,13 +3997,14 @@ export const tripsService = {
   async updateDieselEntry(tripId: number, entryId: number, body: Record<string, unknown>) {
     return withTransaction(async (client) => {
       const existing = await client.query(
-        `SELECT d.id, d.row_index, t.closing_meter, t.vehicle_id, t.trip_date
+        `SELECT d.id, d.row_index, t.closing_meter, t.vehicle_id, t.trip_date, t.is_rented_vehicle
            FROM trip_diesel_entries d
            JOIN trips t ON t.id = d.trip_id
           WHERE d.id = $1 AND d.trip_id = $2`,
         [entryId, tripId]
       );
       if (!existing.rowCount) throw new AppError(404, `Diesel entry ${entryId} not found`);
+      if (Boolean(existing.rows[0].is_rented_vehicle)) throw new AppError(422, "Diesel entries are not available for rented vehicles.");
 
       const litres = numOrNull(body.litres);
       const rate = numOrNull(body.rate);

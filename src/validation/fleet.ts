@@ -28,7 +28,7 @@ export const fleetMaintenanceBodySchema = z.object({
   mechanic: z.string().optional(),
   parts: z.array(fleetMaintenancePartSchema).optional(),
   totalCost: z.number().nonnegative().optional(),
-  remarks: z.string().nullable().optional(),
+  remarks: z.string().trim().max(2000, "Remarks must be 2000 characters or fewer").nullable().optional(),
   createdBy: z.string().optional(),
   idempotencyKey: z.string().uuid().optional(),
 });

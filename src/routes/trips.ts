@@ -9,8 +9,18 @@ import {
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { validateStepSubmit } from "../validation/trips.js";
+import { query } from "../config/db.js";
 
 export const tripsRouter = Router();
+
+async function applyAuthoritativeRentalStatus(body: Record<string, unknown> | undefined) {
+  if (!body || body.vehicleId == null) return;
+  const vehicleId = Number(body.vehicleId);
+  if (!Number.isSafeInteger(vehicleId) || vehicleId <= 0) return;
+  const vehicle = await query(`SELECT is_rented FROM vehicles WHERE id=$1 AND status='Active'`, [vehicleId]);
+  if (!vehicle.rowCount) throw new AppError(422, "Selected vehicle no longer exists.");
+  body.isRentedVehicle = Boolean(vehicle.rows[0].is_rented);
+}
 
 function positiveId(value: string, label = "Trip id"): number {
   const id = Number(value);
@@ -98,6 +108,7 @@ tripsRouter.post(
   asyncHandler(async (req, res) => {
     requireTripPermission(res, "trip.create");
     applySupervisorScope(res, req.body);
+    await applyAuthoritativeRentalStatus(req.body);
     validateStepSubmit("start", req.body);
     const payload = {
       ...req.body,
@@ -144,6 +155,7 @@ tripsRouter.post(
     applySupervisorScope(res, req.body);
     // Create draft or full save without id
     if (req.body?.startStepSubmitted || req.body?.vehicleId || req.body?.helpers) {
+      await applyAuthoritativeRentalStatus(req.body);
       validateStepSubmit("start", req.body);
       const trip = await tripsService.save(null, req.body);
       res.status(201).json(trip);
