@@ -212,13 +212,11 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
       pickupPhotos: z.array(z.object({
         key: z.string().min(1).max(240),
         mime: z.string().startsWith("image/").max(100),
-        data: z.string().startsWith("data:image/").max(100_000),
+        // 50 KiB binary images become roughly 68k characters as base64.
+        data: z.string().startsWith("data:image/").max(70_000),
       })).max(500).optional(),
     })
     .passthrough()
-    .superRefine((data, ctx) => {
-      if (!data.isRentedVehicle && data.destMeter == null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["destMeter"], message: "Farm meter is required" });
-    })
     .refine(
       (data) => {
         const photoCount = data.pickupPhotos?.length || (data.dcPhotoKey ? 1 : 0) + (data.dcPhotoKey2 ? 1 : 0);

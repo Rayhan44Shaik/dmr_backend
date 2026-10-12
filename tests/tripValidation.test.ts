@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { validateStepSubmit } from "../src/validation/trips.js";
 import { businessTodayDateOnly, shiftDateOnly } from "../src/utils/tripNumbering.js";
+import { scopeTripStepBody } from "../src/services/tripsService.js";
 
 const validStart = {
   tripDate: businessTodayDateOnly(),
@@ -14,6 +15,26 @@ const validStart = {
 };
 
 describe("Trip step boundary validation", () => {
+  it("isolates a Step 1 correction from stale farm and delivery fields", () => {
+    const scoped = scopeTripStepBody("start", {
+      ...validStart,
+      advanceAmount: 5_000,
+      mode: "submit",
+      sourceFarmId: 999_999,
+      farmBirdTypeId: 888_888,
+      deliveries: [{ shopId: 77 }],
+      boxDetails: [{ boxNo: 59 }],
+    });
+
+    assert.equal(scoped.advanceAmount, 5_000);
+    assert.equal(scoped.mode, "submit");
+    assert.equal("sourceFarmId" in scoped, false);
+    assert.equal("farmBirdTypeId" in scoped, false);
+    assert.equal("deliveries" in scoped, false);
+    assert.equal("boxDetails" in scoped, false);
+    assert.doesNotThrow(() => validateStepSubmit("start", scoped));
+  });
+
   it("rejects invalid dates, non-positive IDs, missing crew and duplicate crew", () => {
     assert.throws(() => validateStepSubmit("start", { ...validStart, tripDate: "10/09/2026" }));
     assert.throws(() => validateStepSubmit("start", { ...validStart, tripDate: "2026-02-30" }));
@@ -74,6 +95,32 @@ describe("Trip step boundary validation", () => {
     assert.throws(() => validateStepSubmit("farm", { ...validFarm, farmBirdTypeId: 0 }));
     assert.throws(() => validateStepSubmit("farm", { ...validFarm, farmGpsLat: null }));
     assert.throws(() => validateStepSubmit("farm", { ...validFarm, farmGpsLat: 0, farmGpsLon: 0 }));
+  });
+
+  it("validates Step 3 from pickup fields without requiring Step 2 fields again", () => {
+    assert.doesNotThrow(() =>
+      validateStepSubmit("pickup", {
+        boxDetails: [{ boxNo: 1, birds: 10, weight: 20 }],
+        dcPhotoKey: "pickup-photo-1",
+      })
+    );
+    assert.throws(() =>
+      validateStepSubmit("pickup", {
+        boxDetails: [{ boxNo: 1, birds: 10, weight: 20 }],
+        dcPhotoKey: "",
+      })
+    );
+    assert.doesNotThrow(() =>
+      validateStepSubmit("pickup", {
+        boxDetails: [{ boxNo: 1, birds: 10, weight: 20 }],
+        dcPhotoKey: "pickup-photo-readable",
+        pickupPhotos: [{
+          key: "pickup-photo-readable",
+          mime: "image/jpeg",
+          data: `data:image/webp;base64,${"A".repeat(68_000)}`,
+        }],
+      })
+    );
   });
 
   it("requires positive shop and bird-type IDs on final Step 4 submission", () => {

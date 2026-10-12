@@ -75,6 +75,74 @@ import {
 
 type Client = pg.PoolClient;
 
+/**
+ * Keep the user-facing delivery number a contiguous, per-load row sequence.
+ * Older clients supplied serial_no themselves, which allowed stale retries to
+ * create duplicates and hidden order plans to consume the first numbers.
+ */
+async function normalizeDeliverySerials(client: Client, tripId: number, legId?: number | null) {
+  await client.query(
+    `WITH ranked AS (
+       SELECT id,
+              ROW_NUMBER() OVER (
+                PARTITION BY leg_id
+                ORDER BY
+                  CASE WHEN remarks LIKE '[ORDER]%' AND auto_capture_time IS NULL THEN 1 ELSE 0 END,
+                  auto_capture_time ASC NULLS LAST,
+                  serial_no ASC NULLS LAST,
+                  id ASC
+              ) AS next_serial
+         FROM trip_deliveries
+        WHERE trip_id = $1
+          AND ($2::int IS NULL OR leg_id = $2)
+          AND COALESCE(deleted, FALSE) = FALSE
+     )
+     UPDATE trip_deliveries delivery
+        SET serial_no = ranked.next_serial
+       FROM ranked
+      WHERE delivery.id = ranked.id
+        AND delivery.serial_no IS DISTINCT FROM ranked.next_serial`,
+    [tripId, legId]
+  );
+}
+
+// Step endpoints are security/data-integrity boundaries, not generic trip
+// autosaves. In particular, an older cached browser bundle used to post the
+// whole hydrated trip while editing Step 1. A stale/deleted sourceFarmId from
+// Step 2 then made an advance-only Step 1 correction fail with "Farm not
+// found". Keep the header endpoint incapable of reading or writing unrelated
+// farm, pickup, delivery, or expense fields regardless of client version.
+const START_STEP_FIELDS = new Set([
+  "tripDate",
+  "status",
+  "vehicleId",
+  "vehicleNo",
+  "isRentedVehicle",
+  "driverId",
+  "driverName",
+  "supervisorId",
+  "supervisorName",
+  "openingMeter",
+  "advanceAmount",
+  "helpers",
+  "loaders",
+  "remarks",
+  "startStepSubmitted",
+  "mode",
+  "expectedUpdatedAt",
+  "updatedAt",
+]);
+
+export function scopeTripStepBody(
+  step: TripWizardStep,
+  body: Partial<Trip> & Record<string, unknown>
+): Partial<Trip> & Record<string, unknown> {
+  if (step !== "start") return { ...body };
+  return Object.fromEntries(
+    Object.entries(body).filter(([key]) => START_STEP_FIELDS.has(key))
+  ) as Partial<Trip> & Record<string, unknown>;
+}
+
 type ResolvedDieselBunk = {
   bunkName: string;
   bunkSource: "MASTER" | "OTHER";
@@ -1368,6 +1436,7 @@ async function replaceDeliveries(
       );
     }
   }
+  await normalizeDeliverySerials(client, tripId, legId);
 }
 
 async function replaceDiesel(
@@ -3076,7 +3145,12 @@ export const tripsService = {
         // Ignore client-calculated totals; this prevents tampering and keeps
         // retries/edits consistent with the persisted weight and rate.
         const amount = computeDeliveryAmount(weight, d.rate);
-        const autoCaptureTime = normalizeTripTimestamp(d.autoCaptureTime);
+        // Capture order is immutable. Editing a saved delivery must never move
+        // it in the first-saved-bottom / latest-saved-top sequence. A timestamp
+        // is accepted only for a row that has never been captured before.
+        const autoCaptureTime = match?.autoCaptureTime
+          ? normalizeTripTimestamp(match.autoCaptureTime)
+          : normalizeTripTimestamp(d.autoCaptureTime);
 
         let deliveryId: number;
         if (match) {
@@ -3181,6 +3255,10 @@ export const tripsService = {
         }
       }
 
+      // The database, rather than a possibly stale browser, owns this sequence.
+      // This also repairs legacy duplicate/gapped numbers on the next save.
+      await normalizeDeliverySerials(client, tripId, activeLeg.id);
+
       // Recompute delivery-side KPIs from the live rows (source of truth).
       await recalcTripDeliveryTotals(client, tripId);
 
@@ -3216,13 +3294,29 @@ export const tripsService = {
     step: TripWizardStep,
     body: Partial<Trip> & Record<string, unknown>
   ) {
+    body = scopeTripStepBody(step, body);
     const isSaveMode = body.mode === "save";
     const legIndex = resolveLegIndex(body);
+
+    // Step endpoints are field-scoped and validate against current server
+    // state below. Older clients sent the trip-wide updatedAt token here;
+    // unrelated autosaves then produced false 409 conflicts while editing a
+    // different step. Never apply that broad optimistic lock to a validated
+    // step submission.
+    if (!isSaveMode) {
+      delete body.expectedUpdatedAt;
+      delete body.updatedAt;
+    }
 
     const existing = await query(`SELECT * FROM trips WHERE id = $1`, [id]);
     if (!existing.rowCount) throw new AppError(404, `Trip ${id} not found`);
     const current = existing.rows[0];
     body.isRentedVehicle = Boolean(current.is_rented_vehicle);
+    if (step === "expenses") {
+      // Fixed Step 5 business category for both Save Progress and Submit.
+      // This keeps reports/reloads consistent even from cached older clients.
+      body.others2Name = "SUPERVISOR (PC)";
+    }
     if (step === "start" && body.vehicleId != null && numOrNull(body.vehicleId) !== numOrNull(current.vehicle_id)) {
       const selectedVehicle = await query(`SELECT is_rented FROM vehicles WHERE id=$1`, [body.vehicleId]);
       if (!selectedVehicle.rowCount) throw new AppError(422, "Selected vehicle no longer exists.");
