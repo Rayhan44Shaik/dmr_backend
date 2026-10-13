@@ -107,7 +107,7 @@ export function mapShop(row: Record<string, unknown>): Shop {
 }
 
 /** Keep readable name snapshots synchronized by immutable shop identity. */
-async function propagateShopName(
+export async function propagateShopName(
   client: { query: (text: string, values?: unknown[]) => Promise<unknown> },
   shopId: number,
   shopName: string
@@ -645,7 +645,7 @@ export const mastersService = {
       return withTransaction(async (client) => {
         const result = await client.query(
           `UPDATE shops SET
-          shop_no=COALESCE($2,shop_no), shop_number=$3, shop_name=$4, owner_name=$5, phone_number=$6,
+          shop_no=COALESCE($2,shop_no), shop_number='SHOP-' || LPAD(COALESCE($2,shop_no)::text,6,'0'), shop_name=$4, owner_name=$5, phone_number=$6,
           secondary_phone_number=$7, whatsapp_number=$8, email=$9,
           city=$10, village=$10, address=$11, latitude=$12, longitude=$13,
           paper_rate=$14, association_type=$15, status=$16, opening_balance=$17,
@@ -693,7 +693,7 @@ export const mastersService = {
        RETURNING *`,
       [
         body.shopNo ?? nextNo.rows[0].n,
-        body.shopNumber ?? "",
+        `SHOP-${String(body.shopNo ?? nextNo.rows[0].n).padStart(6, "0")}`,
         body.shopName,
         body.ownerName ?? "",
         body.phoneNumber ?? "",
@@ -805,9 +805,9 @@ export const mastersService = {
         }
         const found = await client.query(
           `SELECT * FROM shops
-            WHERE ($1<>'' AND LOWER(shop_no)=LOWER($1))
+            WHERE ($1<>'' AND LOWER(COALESCE(shop_number, ''))=LOWER($1))
                OR ($2<>'' AND LOWER(shop_name)=LOWER($2))
-            ORDER BY CASE WHEN $1<>'' AND LOWER(shop_no)=LOWER($1) THEN 0 ELSE 1 END
+            ORDER BY CASE WHEN $1<>'' AND LOWER(COALESCE(shop_number, ''))=LOWER($1) THEN 0 ELSE 1 END
             LIMIT 2 FOR UPDATE`,
           [shopNumber, shopName],
         );

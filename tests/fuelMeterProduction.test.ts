@@ -160,6 +160,28 @@ function errOf(e: unknown): { status?: number; message: string; code?: string } 
 }
 
 describe("fuel bill numbering (per-trip authoritative sequence)", () => {
+  it("allows diesel readings below or above the farm meter while preserving diesel order", async () => {
+    const v = await mkVehicle(tag("DF"));
+    const t = await mkTrip(`TRP-DF-${tag("x")}`, Number(v.id), 50000);
+    await pool.query(`UPDATE trips SET closing_meter = 51000 WHERE id = $1`, [t.id]);
+    await pool.query(
+      `INSERT INTO trip_legs (trip_id, leg_index, dest_meter, farm_step_submitted)
+       VALUES ($1, 1, 50500, TRUE)`,
+      [t.id]
+    );
+
+    const belowFarm = await addDiesel(t.id, 1, 50100);
+    const aboveFarm = await addDiesel(t.id, 2, 50700);
+    assert.equal(belowFarm.billNo, `${t.tripNo}-F001`);
+    assert.equal(aboveFarm.billNo, `${t.tripNo}-F002`);
+
+    await assert.rejects(
+      () => addDiesel(t.id, 3, 50600),
+      /greater than the last entered meter \(50700 KM\)/i,
+      "farm position is flexible, but diesel bills must remain sequential"
+    );
+  });
+
   it("allocates F001/F002/F003 per trip from the backend", async () => {
     const v = await mkVehicle(tag("N1"));
     const t = await mkTrip(`TRP-N1-${tag("a")}`, Number(v.id), 50000);

@@ -3444,22 +3444,14 @@ export const tripsService = {
       }
       const nextReading = await withTransaction(async (client) => {
         const result = await client.query<{ meter: string | null }>(
-          `WITH active AS (
-             SELECT farm_step_submitted_at
-               FROM trip_legs WHERE trip_id = $1 AND leg_index = $2
-           ), later_readings AS (
+          `WITH later_readings AS (
              SELECT dest_meter AS meter
                FROM trip_legs
               WHERE trip_id = $1 AND leg_index > $2 AND dest_meter IS NOT NULL
              UNION ALL
-             SELECT d.meter
-               FROM trip_diesel_entries d, active a
-              WHERE d.trip_id = $1 AND d.meter IS NOT NULL
-                AND a.farm_step_submitted_at IS NOT NULL
-                AND d.submitted_at > a.farm_step_submitted_at
-             UNION ALL
              SELECT closing_meter FROM trips
               WHERE id = $1 AND closing_meter IS NOT NULL
+                AND expenses_step_submitted = TRUE
            ) SELECT MIN(meter) AS meter FROM later_readings`,
           [id, legIndex]
         );
@@ -3569,11 +3561,31 @@ export const tripsService = {
     return this.save(id, { ...body, legIndex, ...stepFlags[step] });
   },
 
-  /** Add Load 2–4 on the same Draft trip (max 4). */
+  /** Add Load 2–4 on the same Draft or Pending trip (max 4). */
   async addLeg(id: number) {
     return withTransaction(async (client) => {
       const existing = await client.query(`SELECT * FROM trips WHERE id = $1`, [id]);
       if (!existing.rowCount) throw new AppError(404, `Trip ${id} not found`);
+      // Pending releases its vehicle and crew for other work. Re-opening it
+      // with another load re-occupies those resources, so perform the same
+      // database-backed conflict check used by Step 1 before creating Load N.
+      if (str(existing.rows[0].status) === "Pending") {
+        const crew = await client.query<{ employee_name: string; role: string }>(
+          `SELECT employee_name, role FROM trip_crew WHERE trip_id = $1`,
+          [id]
+        );
+        await assertTripResourcesAvailable(
+          {
+            tripId: id,
+            vehicleId: numOrNull(existing.rows[0].vehicle_id),
+            driverId: numOrNull(existing.rows[0].driver_id),
+            supervisorId: numOrNull(existing.rows[0].supervisor_id),
+            helpers: crew.rows.filter((row) => row.role === "helper").map((row) => str(row.employee_name)),
+            loaders: crew.rows.filter((row) => row.role === "loader").map((row) => str(row.employee_name)),
+          },
+          client
+        );
+      }
       await ensureTripLeg1(client, id);
       const leg = await addTripLeg(client, id);
       const row = await client.query(`SELECT * FROM trips WHERE id = $1`, [id]);
@@ -3594,8 +3606,9 @@ export const tripsService = {
     return withTransaction(async (client) => {
       const tripRes = await client.query(`SELECT * FROM trips WHERE id = $1 FOR UPDATE`, [id]);
       if (!tripRes.rowCount) throw new AppError(404, `Trip ${id} not found`);
-      if (str(tripRes.rows[0].status) !== "Draft") {
-        throw new AppError(422, "Loads can only be closed while the trip is Draft");
+      const tripStatus = str(tripRes.rows[0].status);
+      if (tripStatus !== "Draft" && tripStatus !== "Pending") {
+        throw new AppError(422, "Loads can only be closed while the trip is Draft or Pending");
       }
       const legs = await listTripLegs(client, id);
       const last = legs[legs.length - 1];
@@ -3621,6 +3634,8 @@ export const tripsService = {
            farm_step_submitted = $3,
            pickup_step_submitted = $4,
            delivery_step_submitted = $5,
+           expenses_step_submitted = CASE WHEN status = 'Pending' THEN TRUE ELSE expenses_step_submitted END,
+           end_step_submitted = CASE WHEN status = 'Pending' THEN TRUE ELSE end_step_submitted END,
            updated_at = NOW()
          WHERE id = $1`,
         [id, previous.legIndex, previous.farmStepSubmitted, previous.pickupStepSubmitted, previous.deliveryStepSubmitted]
@@ -3907,7 +3922,7 @@ export const tripsService = {
    */
   async upsertDieselEntry(tripId: number, body: Record<string, unknown>) {
     return withTransaction(async (client) => {
-      const existing = await client.query(`SELECT id, trip_date, closing_meter, vehicle_id, is_rented_vehicle FROM trips WHERE id = $1 AND deleted = FALSE`, [
+      const existing = await client.query(`SELECT id, trip_date, closing_meter, expenses_step_submitted, vehicle_id, is_rented_vehicle FROM trips WHERE id = $1 AND deleted = FALSE`, [
         tripId,
       ]);
       if (!existing.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
@@ -3919,12 +3934,6 @@ export const tripsService = {
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
       if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
       if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
-      const destMax = await client.query<{ m: string | null }>(
-        `SELECT MAX(dest_meter) AS m FROM trip_legs
-          WHERE trip_id = $1 AND farm_step_submitted = TRUE AND dest_meter IS NOT NULL`,
-        [tripId]
-      );
-      const farmFloor = num(destMax.rows[0]?.m);
       const imageData = body.imageData != null ? str(body.imageData) : "";
       if (!imageData || imageData.length < 40) {
         throw new AppError(422, "Diesel bill image is required");
@@ -3967,7 +3976,7 @@ export const tripsService = {
           ORDER BY row_index DESC LIMIT 1`,
         [tripId, rowIndex]
       );
-      const meterFloor = Math.max(farmFloor, num(priorDiesel.rows[0]?.meter));
+      const meterFloor = num(priorDiesel.rows[0]?.meter);
       if (meterFloor > 0 && meter <= meterFloor) {
         throw new AppError(422, `Diesel meter (${meter} KM) must be greater than the last entered meter (${meterFloor} KM).`);
       }
@@ -4012,7 +4021,7 @@ export const tripsService = {
         throw new AppError(422, `Diesel bill image is already used in row ${num(duplicateBill.rows[0].row_index)}.`);
       }
       const closingMeter = num(existing.rows[0].closing_meter);
-      if (closingMeter > 0 && meter > closingMeter) {
+      if (Boolean(existing.rows[0].expenses_step_submitted) && closingMeter > 0 && meter > closingMeter) {
         throw new AppError(422, `Diesel meter (${meter} KM) cannot exceed the end meter (${closingMeter} KM).`);
       }
 
@@ -4091,7 +4100,7 @@ export const tripsService = {
   async updateDieselEntry(tripId: number, entryId: number, body: Record<string, unknown>) {
     return withTransaction(async (client) => {
       const existing = await client.query(
-        `SELECT d.id, d.row_index, t.closing_meter, t.vehicle_id, t.trip_date, t.is_rented_vehicle
+        `SELECT d.id, d.row_index, t.closing_meter, t.expenses_step_submitted, t.vehicle_id, t.trip_date, t.is_rented_vehicle
            FROM trip_diesel_entries d
            JOIN trips t ON t.id = d.trip_id
           WHERE d.id = $1 AND d.trip_id = $2`,
@@ -4106,12 +4115,6 @@ export const tripsService = {
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
       if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
       if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
-      const destMax = await client.query<{ m: string | null }>(
-        `SELECT MAX(dest_meter) AS m FROM trip_legs
-          WHERE trip_id = $1 AND farm_step_submitted = TRUE AND dest_meter IS NOT NULL`,
-        [tripId]
-      );
-      const farmFloor = num(destMax.rows[0]?.m);
       const rowIndex = num(existing.rows[0].row_index);
       const neighbors = await client.query<{ meter: string; row_index: number }>(
         `SELECT meter, row_index FROM trip_diesel_entries
@@ -4121,7 +4124,7 @@ export const tripsService = {
         [tripId, entryId, rowIndex]
       );
       const priorMeter = Math.max(
-        farmFloor,
+        0,
         ...neighbors.rows.filter((r) => num(r.row_index) < rowIndex).map((r) => num(r.meter))
       );
       // Serialize per vehicle and enforce the meter lock (stale Step 5 edits
@@ -4163,7 +4166,7 @@ export const tripsService = {
         throw new AppError(422, `Diesel meter (${meter} KM) must be less than the next entered meter (${nextMeter} KM).`);
       }
       const closingMeter = num(existing.rows[0].closing_meter);
-      if (closingMeter > 0 && meter > closingMeter) {
+      if (Boolean(existing.rows[0].expenses_step_submitted) && closingMeter > 0 && meter > closingMeter) {
         throw new AppError(422, `Diesel meter (${meter} KM) cannot exceed the end meter (${closingMeter} KM).`);
       }
       const imageData = body.imageData != null ? str(body.imageData) : "";

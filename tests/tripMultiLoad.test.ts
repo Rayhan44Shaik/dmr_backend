@@ -181,6 +181,70 @@ async function runLoad(
 }
 
 describe("trip multi-load (same Draft trip)", () => {
+  it("adds Load 2 to a Pending trip, reopens the workflow, and updates Recent Trips", async () => {
+    const { trip, m } = await startTrip(4700);
+    await runLoad(trip.id, 1, {
+      destMeter: 4750,
+      farmId: m.farm.id,
+      farmName: m.farm.farmName,
+      birdTypeId: m.birdType.id,
+      birdType: m.birdType.birdType,
+      shopId: m.shop.id,
+      shopName: m.shop.shopName,
+    });
+    const pending = await tripsService.submitStep(trip.id, "expenses", {
+      closingMeter: 4800,
+      deliveryTolls: 5,
+    });
+    assert.equal(pending.status, "Pending");
+    assert.equal(pending.expensesStepSubmitted, true);
+
+    const added = await tripsService.addLeg(trip.id);
+    assert.equal(added.status, "Pending", "adding a load must preserve Pending status");
+    assert.equal(added.legCount, 2);
+    assert.equal(added.activeLegIndex, 2);
+    assert.equal(added.farmStepSubmitted, false);
+    assert.equal(added.pickupStepSubmitted, false);
+    assert.equal(added.deliveryStepSubmitted, false);
+    assert.equal(added.expensesStepSubmitted, false, "shared expenses must be reviewed after the new load");
+    assert.equal(added.endStepSubmitted, false);
+
+    let recent = await tripsService.list() as Array<{
+      id: number;
+      status: string;
+      legCount: number;
+      submittedLoadCount: number;
+      loadSummaries: Array<{ load: number }>;
+    }>;
+    let row = recent.find((item) => item.id === trip.id)!;
+    assert.equal(row.status, "Pending");
+    assert.equal(row.legCount, 2, "Recent Trips must hydrate the newly opened load immediately");
+    assert.equal(row.submittedLoadCount, 1, "an empty Load 2 is not counted as submitted");
+    assert.deepEqual(row.loadSummaries.map((load) => load.load), [1]);
+
+    await runLoad(trip.id, 2, {
+      destMeter: 4850,
+      farmId: m.farm2.id,
+      farmName: m.farm2.farmName,
+      birdTypeId: m.birdType.id,
+      birdType: m.birdType.birdType,
+      shopId: m.shop.id,
+      shopName: m.shop.shopName,
+    });
+    const resubmitted = await tripsService.submitStep(trip.id, "expenses", {
+      closingMeter: 4900,
+      deliveryTolls: 8,
+    });
+    assert.equal(resubmitted.status, "Pending");
+    assert.equal(resubmitted.expensesStepSubmitted, true);
+
+    recent = await tripsService.list() as typeof recent;
+    row = recent.find((item) => item.id === trip.id)!;
+    assert.equal(row.status, "Pending");
+    assert.equal(row.submittedLoadCount, 2);
+    assert.deepEqual(row.loadSummaries.map((load) => load.load), [1, 2]);
+  });
+
   it("Recent Trips counts Step 2 loads and totals only Step 4 submitted loads", async () => {
     const { trip, m } = await startTrip(5000);
     await runLoad(trip.id, 1, {

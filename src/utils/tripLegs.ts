@@ -309,7 +309,10 @@ export async function maxDieselMeter(client: Client, tripId: number): Promise<nu
 /**
  * Floor for farm dest meter on a load:
  * - Load 1: opening meter
- * - Load N: max(all prior load destinations, max diesel so far)
+ * - Load N: highest prior load destination
+ *
+ * Diesel filling can happen before or after a farm reading, so diesel meters
+ * are deliberately not a lower bound for a farm meter (or vice versa).
  */
 export async function farmMeterFloor(
   client: Client,
@@ -328,13 +331,7 @@ export async function farmMeterFloor(
     [tripId, legIndex]
   );
   const prevDest = num(priorDestResult.rows[0]?.m);
-  const dieselMax = await maxDieselMeter(client, tripId);
-  const floor = Math.max(prevDest, dieselMax);
-  const label =
-    dieselMax >= prevDest && dieselMax > 0
-      ? "last diesel meter on this trip"
-      : "previous load destination meter";
-  return { floor, label };
+  return { floor: prevDest, label: "previous load destination meter" };
 }
 
 /** Persist Step 2–4 scalar fields onto a trip_legs row from a step body. */
@@ -469,8 +466,9 @@ export async function addTripLeg(client: Client, tripId: number): Promise<TripLe
   );
   if (!trip.rowCount) throw new AppError(404, `Trip ${tripId} not found`);
   if (trip.rows[0].deleted) throw new AppError(422, "Cannot modify a deleted trip");
-  if (str(trip.rows[0].status) !== "Draft") {
-    throw new AppError(422, "Additional loads can only be added while the trip is Draft");
+  const status = str(trip.rows[0].status);
+  if (status !== "Draft" && status !== "Pending") {
+    throw new AppError(422, "Additional loads can only be added while the trip is Draft or Pending");
   }
 
   const legs = await listTripLegs(client, tripId);
@@ -504,7 +502,9 @@ export async function addTripLeg(client: Client, tripId: number): Promise<TripLe
     `UPDATE trips SET
        farm_step_submitted = FALSE,
        pickup_step_submitted = FALSE,
-       delivery_step_submitted = FALSE
+       delivery_step_submitted = FALSE,
+       expenses_step_submitted = FALSE,
+       end_step_submitted = FALSE
      WHERE id = $1`,
     [tripId]
   );

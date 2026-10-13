@@ -467,8 +467,69 @@ for (const s of suites) {
         assert.ok(!(key in stored), `obsolete field ${key} must not be in the DB`);
       }
     });
+
+    if (s.name === "shops") {
+      it("18. updates an existing shop by Shop Number without changing its identity", async () => {
+        const seeded = await postJson(baseUrl, s.singularPath, {
+          ...s.makeValid(105),
+          shopName: "D.R.K Chicken Shop",
+          openingBalance: 100,
+        });
+        assert.equal(seeded.status, 201);
+        const shopNumber = String(seeded.body.shopNumber);
+
+        const body = await bulkOk([{
+          ...s.makeValid(105),
+          shopNumber,
+          shopName: "DRK Chicken Shop",
+          ownerName: "Updated Owner",
+          phoneNumber: "9876543210",
+          openingBalance: 250,
+        }], s.endpoint) as SuccessBody & { updated?: Array<Record<string, unknown>> };
+
+        assert.equal(body.created.length, 0);
+        assert.equal(body.updated?.length, 1);
+        assert.equal(body.updated?.[0].id, seeded.body.id);
+        assert.equal(body.updated?.[0].shopNumber, shopNumber);
+        assert.equal(body.updated?.[0].shopName, "DRK Chicken Shop");
+        assert.equal(body.updated?.[0].ownerName, "Updated Owner");
+        assert.equal(body.updated?.[0].phoneNumber, "9876543210");
+        assert.equal(body.updated?.[0].openingBalance, 250);
+        assert.equal(body.updated?.[0].currentBalance, 250);
+        assert.equal(await countRows("shops"), 1);
+      });
+    }
   });
 }
+
+describe("POST /api/masters/shops/opening-balances/bulk", () => {
+  it("updates multiple shops by their text Shop Number atomically", async () => {
+    const first = await postJson(baseUrl, "/api/masters/shops", {
+      ...suites[0].makeValid(1),
+      shopNumber: "SHOP-000001",
+      openingBalance: 100,
+    });
+    const second = await postJson(baseUrl, "/api/masters/shops", {
+      ...suites[0].makeValid(2),
+      shopNumber: "SHOP-000002",
+      openingBalance: 200,
+    });
+    assert.equal(first.status, 201);
+    assert.equal(second.status, 201);
+
+    const result = await postJson(baseUrl, "/api/masters/shops/opening-balances/bulk", [
+      { shopNumber: "SHOP-000001", shopName: first.body.shopName, openingBalance: 150 },
+      { shopNumber: "SHOP-000002", shopName: second.body.shopName, openingBalance: 275 },
+    ]);
+
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.equal(result.body.updated.length, 2);
+    assert.equal(result.body.updated[0].openingBalance, 150);
+    assert.equal(result.body.updated[0].currentBalance, 150);
+    assert.equal(result.body.updated[1].openingBalance, 275);
+    assert.equal(result.body.updated[1].currentBalance, 275);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Existing singular CRUD must keep working unchanged (regression check)

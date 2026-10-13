@@ -51,7 +51,11 @@ export async function listMaster(entity: MasterEntity, input: unknown) {
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const sort = q.sort === "name" ? config.name : q.sort === "status" ? "status" : config.no;
-  const order = `ORDER BY ${sort} ${q.direction}, id ${q.direction}`;
+  // Shop Master's name view is operationally grouped: active outlets first,
+  // then inactive outlets, with each group alphabetized independently.
+  const order = entity === "shops" && q.sort === "name"
+    ? `ORDER BY CASE WHEN status = 'Active' THEN 0 WHEN status = 'Inactive' THEN 1 ELSE 2 END ASC, ${config.name} ${q.direction}, id ${q.direction}`
+    : `ORDER BY ${sort} ${q.direction}, id ${q.direction}`;
   // Legacy consumers retain their complete array contract. Masters screens always pass page.
   if (q.page === undefined && !q.export) {
     const result = await query(`SELECT * FROM ${config.table} ${where} ${order}`, params);

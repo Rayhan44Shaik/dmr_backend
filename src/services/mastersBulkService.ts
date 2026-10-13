@@ -22,6 +22,7 @@ import {
   mapFarm,
   mapShop,
   mapVehicle,
+  propagateShopName,
 } from "./mastersService.js";
 import {
   validateBulkRows,
@@ -41,6 +42,7 @@ export interface BulkImportResult<T> {
   failed: number;
   errors: BulkRowError[];
   created: T[];
+  updated?: T[];
 }
 
 type PgRow = Record<string, unknown>;
@@ -75,7 +77,7 @@ const SHOP_CONFIG: KindConfig<NormalizedShopRow, Shop> = {
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,$12,$13,$14,$15,$15,$16)
        RETURNING *`,
       [
-        no, row.shopNumber, row.shopName, row.ownerName, row.phoneNumber,
+        no, `SHOP-${String(no).padStart(6, "0")}`, row.shopName, row.ownerName, row.phoneNumber,
         row.secondaryPhoneNumber, row.whatsappNumber, row.email, row.city,
         row.address, row.latitude, row.longitude, row.paperRate,
         row.associationType, row.openingBalance, row.status,
@@ -341,8 +343,93 @@ async function bulkImport<Row extends NormalizedBulkRow, Mapped>(
 }
 
 export const mastersBulkService = {
-  importShops(body: unknown): Promise<BulkImportResult<Shop>> {
-    return bulkImport(SHOP_CONFIG, body);
+  async importShops(body: unknown): Promise<BulkImportResult<Shop>> {
+    const { rows } = validateBulkRows("shops", body) as { rows: NormalizedShopRow[] };
+    let currentRow = 0;
+    try {
+      return await withTransaction(async (client) => {
+        const created: Shop[] = [];
+        const updated: Shop[] = [];
+
+        for (let index = 0; index < rows.length; index += 1) {
+          currentRow = index + 1;
+          const row = rows[index];
+          const shopNumber = row.shopNumber.trim();
+          const existing = shopNumber
+            ? await client.query(`SELECT * FROM shops WHERE LOWER(shop_number) = LOWER($1) LIMIT 2 FOR UPDATE`, [shopNumber])
+            : { rowCount: 0, rows: [] };
+
+          if ((existing.rowCount ?? 0) > 1) {
+            throw new AppError(409, `Row ${currentRow}: Shop Number "${shopNumber}" is not unique.`);
+          }
+
+          const existingId = existing.rowCount === 1 ? Number(existing.rows[0].id) : null;
+          if (existingId === null && row.shopNo !== null) {
+            const numberConflict = await client.query(
+              `SELECT 1 FROM shops WHERE shop_no = $1 LIMIT 1`,
+              [row.shopNo],
+            );
+            if (numberConflict.rowCount) {
+              throw new AppError(409, "Bulk import rejected: 1 row(s) conflict with existing records", {
+                total: rows.length,
+                successful: 0,
+                failed: 1,
+                errors: [{ row: currentRow, field: "shopNo", message: `shopNo ${row.shopNo} already exists` }],
+              });
+            }
+          }
+          const duplicateName = await client.query(
+            `SELECT id FROM shops WHERE LOWER(shop_name) = LOWER($1) AND ($2::int IS NULL OR id <> $2) LIMIT 1`,
+            [row.shopName, existingId],
+          );
+          if (duplicateName.rowCount) {
+            throw new AppError(409, `Row ${currentRow}: Shop Name "${row.shopName}" belongs to another shop.`);
+          }
+
+          if (existingId !== null) {
+            const result = await client.query(
+              `UPDATE shops SET
+                 shop_name=$2, owner_name=$3, phone_number=$4,
+                 secondary_phone_number=$5, whatsapp_number=$6, email=$7,
+                 city=$8, village=$8, address=$9, latitude=$10, longitude=$11,
+                 paper_rate=$12, association_type=$13, status=$14,
+                 current_balance=COALESCE(current_balance,0)+($15-opening_balance),
+                 opening_balance=$15
+               WHERE id=$1 RETURNING *`,
+              [
+                existingId, row.shopName, row.ownerName, row.phoneNumber,
+                row.secondaryPhoneNumber, row.whatsappNumber, row.email, row.city,
+                row.address, row.latitude, row.longitude, row.paperRate,
+                row.associationType, row.status, row.openingBalance,
+              ],
+            );
+            await propagateShopName(client, existingId, row.shopName);
+            updated.push(mapShop(result.rows[0]));
+            continue;
+          }
+
+          const allocated = await client.query<{ n: number }>(
+            "SELECT next_master_number($1, $2) AS n", [SHOP_CONFIG.table, row.shopNo],
+          );
+          const result = await SHOP_CONFIG.insert(client, row, allocated.rows[0].n);
+          created.push(mapShop(result.rows[0]));
+        }
+
+        return {
+          total: rows.length,
+          successful: created.length + updated.length,
+          failed: 0,
+          errors: [],
+          created,
+          ...(updated.length > 0 ? { updated } : {}),
+        };
+      });
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      const mapped = toBulkDbError(error, rows.length, currentRow);
+      if (mapped) throw mapped;
+      throw error;
+    }
   },
 
   importVehicles(body: unknown): Promise<BulkImportResult<Vehicle>> {
