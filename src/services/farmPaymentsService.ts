@@ -38,6 +38,7 @@ export interface TripFarmPaymentRow {
   paymentMode: string | null;
   referenceNo: string | null;
   vehicleNo: string | null;
+  isRentedVehicle: boolean;
   supervisorName: string | null;
   loads: Array<{
     load: number;
@@ -75,6 +76,7 @@ const LIST_SELECT = `
     COALESCE(t.farm_payment_mode, '') AS farm_payment_mode,
     COALESCE(t.farm_payment_reference, '') AS farm_payment_reference,
     t.vehicle_no,
+    t.is_rented_vehicle,
     t.supervisor_name
   FROM trips t
   LEFT JOIN LATERAL (
@@ -150,6 +152,7 @@ function mapRow(row: Record<string, unknown>): TripFarmPaymentRow {
     paymentMode: mode || null,
     referenceNo: reference || null,
     vehicleNo: row.vehicle_no == null ? null : str(row.vehicle_no),
+    isRentedVehicle: Boolean(row.is_rented_vehicle),
     supervisorName: row.supervisor_name == null ? null : str(row.supervisor_name),
     loads: rawLoads.map((value) => {
       const load = value as Record<string, unknown>;

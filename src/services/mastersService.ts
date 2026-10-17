@@ -35,6 +35,7 @@ export function mapEmployee(row: Record<string, unknown>): Employee {
     aadharNumber: row.aadhar_number ? str(row.aadhar_number) : null,
     licenseNumber: row.license_number ? str(row.license_number) : null,
     salary: num(row.salary),
+    isDummy: Boolean(row.is_dummy),
     status: str(row.status) as Employee["status"],
     avatar: row.avatar ? str(row.avatar) : null,
   };

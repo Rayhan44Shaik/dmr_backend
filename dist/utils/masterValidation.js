@@ -7,6 +7,10 @@ import { str } from "./coerce.js";
 // returns an array of { field, message } — empty when the row is valid.
 // ---------------------------------------------------------------------------
 export const EMPLOYEE_DEPARTMENTS = [
+    "Owner",
+    "Accounts",
+    "Office",
+    "Audit",
     "Accountant",
     "Collection",
     "Driver",
@@ -124,9 +128,10 @@ export function validateVehicleFields(raw) {
     const capacityKg = raw.capacityKg;
     const emiDay = raw.emiDay;
     const totalEMIs = raw.totalEMIs;
+    const isRented = raw.isRented === true || raw.is_rented === true;
     if (isMissing(vehicleNumber))
         errors.push({ field: "vehicleNumber", message: "Vehicle Number is required." });
-    if (isMissing(vehicleType))
+    if (!isRented && isMissing(vehicleType))
         errors.push({ field: "vehicleType", message: "Vehicle Type is required." });
     if (!isPositiveNumber(noOfBoxes))
         errors.push({ field: "noOfBoxes", message: "No. of Boxes must be a positive number." });
@@ -134,23 +139,23 @@ export function validateVehicleFields(raw) {
         errors.push({ field: "birdCapacity", message: "Bird Capacity must be a positive number." });
     if (!isPositiveNumber(capacityKg))
         errors.push({ field: "capacityKg", message: "Capacity (Kg) must be a positive number." });
-    if (isMissing(engineNumber))
+    if (!isRented && isMissing(engineNumber))
         errors.push({ field: "engineNumber", message: "Engine Number is required." });
-    if (isMissing(chassisNumber))
+    if (!isRented && isMissing(chassisNumber))
         errors.push({ field: "chassisNumber", message: "Chassis Number is required." });
-    if (!isMissing(emiDay)) {
+    if (!isRented && !isMissing(emiDay)) {
         const day = Number(emiDay);
         if (!Number.isInteger(day) || day < 1 || day > 31) {
             errors.push({ field: "emiDay", message: "EMI Day must be between 1 and 31." });
         }
     }
-    if (!isMissing(totalEMIs)) {
+    if (!isRented && !isMissing(totalEMIs)) {
         const count = Number(totalEMIs);
         if (!Number.isInteger(count) || count <= 0 || count > 1200) {
             errors.push({ field: "totalEMIs", message: "Total EMIs must be greater than zero." });
         }
     }
-    for (const field of VEHICLE_DATE_FIELDS) {
+    for (const field of isRented ? [] : VEHICLE_DATE_FIELDS) {
         if (!isValidDateInput(raw[field]))
             errors.push({ field, message: `${field} must be a valid date (YYYY-MM-DD).` });
     }
@@ -163,6 +168,7 @@ export function validateEmployeeFields(raw) {
     const errors = [];
     const employeeName = str(raw.employeeName ?? raw.employee_name).trim();
     const department = str(raw.department).trim();
+    const secondaryDepartment = str(raw.secondaryDepartment ?? raw.secondary_department).trim();
     const phoneNumber = str(raw.phoneNumber ?? raw.phone ?? raw.phone_number).trim();
     const email = str(raw.email).trim();
     const aadharNumber = str(raw.aadharNumber ?? raw.aadhar_number).replace(/\s/g, "");
@@ -174,6 +180,10 @@ export function validateEmployeeFields(raw) {
     else if (!EMPLOYEE_DEPARTMENTS.some((d) => d.toLowerCase() === department.toLowerCase())) {
         errors.push({ field: "department", message: `Department "${department}" is not valid.` });
     }
+    if (secondaryDepartment && !EMPLOYEE_DEPARTMENTS.some((d) => d.toLowerCase() === secondaryDepartment.toLowerCase()))
+        errors.push({ field: "secondaryDepartment", message: `Secondary Department "${secondaryDepartment}" is not valid.` });
+    if (secondaryDepartment && secondaryDepartment.toLowerCase() === department.toLowerCase())
+        errors.push({ field: "secondaryDepartment", message: "Secondary Department must differ from the primary department." });
     if (isMissing(phoneNumber))
         errors.push({ field: "phoneNumber", message: "Phone Number is required." });
     else if (!/^[0-9]{10}$/.test(phoneNumber))
@@ -188,7 +198,7 @@ export function validateEmployeeFields(raw) {
     if (aadharNumber && !/^[0-9]{12}$/.test(aadharNumber)) {
         errors.push({ field: "aadharNumber", message: "Aadhar Number must be exactly 12 digits." });
     }
-    if ((department.toLowerCase() === "driver" || department.toLowerCase() === "collection") &&
+    if (([department, secondaryDepartment].some((value) => value.toLowerCase() === "driver" || value.toLowerCase() === "collection")) &&
         isMissing(raw.licenseNumber)) {
         errors.push({ field: "licenseNumber", message: "License Number is required for Driver and Collection departments." });
     }

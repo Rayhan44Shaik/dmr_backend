@@ -266,6 +266,23 @@ function mapTrip(
     .reduce((sum, d) => sum + d.amount, 0);
   const totalBirds = deliveries.reduce((sum, delivery) => sum + delivery.birds, 0);
   const totalWeight = deliveries.reduce((sum, delivery) => sum + delivery.weight, 0);
+  const byLoad = new Map<number, RateEntryDelivery[]>();
+  for (const delivery of deliveries) {
+    const rows = byLoad.get(delivery.load) ?? [];
+    rows.push(delivery);
+    byLoad.set(delivery.load, rows);
+  }
+  const loadAmounts = [...byLoad.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([load, rows]) => {
+      const ratedRows = rows.filter(
+        (delivery) => delivery.rate != null && Number(delivery.rate) > 0
+      );
+      return {
+        load,
+        amount: Number(ratedRows.reduce((sum, delivery) => sum + delivery.amount, 0).toFixed(2)),
+      };
+    });
 
   return {
     id: num(row.id),
@@ -273,6 +290,7 @@ function mapTrip(
     tripDate: dateOnly(row.trip_date) ?? "",
     status: str(row.status) as RateEntryTrip["status"],
     vehicleNo: row.vehicle_no == null ? null : str(row.vehicle_no),
+    isRentedVehicle: Boolean(row.is_rented_vehicle),
     driverName: row.driver_name == null ? null : str(row.driver_name),
     supervisorName: row.supervisor_name == null ? null : str(row.supervisor_name),
     sourceFarm: row.source_farm == null ? null : str(row.source_farm),
@@ -287,6 +305,7 @@ function mapTrip(
     ratesEntered: deliveries.filter((d) => d.rate != null).length,
     deliveriesCount: deliveries.length,
     totalAmount: Number(totalAmount.toFixed(2)),
+    loadAmounts,
     deliveries,
   };
 }

@@ -152,7 +152,7 @@ function delivery(overrides: Partial<ShopDelivery> = {}): ShopDelivery {
 
 async function rowsFor(tripId: number) {
   const res = await pool.query(
-    `SELECT id, client_key, shop_name, birds, weight, mortality, mort_kg, delivery_mode
+    `SELECT id, client_key, shop_name, sub_shop_name, box_no, birds, weight, mortality, mort_kg, delivery_mode
        FROM trip_deliveries WHERE trip_id = $1 ORDER BY id`,
     [tripId]
   );
@@ -299,6 +299,106 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
     assert.equal(rows.length, 1);
     assert.equal(Number(rows[0].birds), 80);
     assert.equal(Number(rows[0].weight), 160);
+  });
+
+  it("reuses an exact saved row when a reconstructed client loses both id and client_key", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-03",
+      boxes: [{ boxNo: 1, birds: 3, weight: 15.2 }],
+    });
+
+    await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          clientKey: "original-browser-key",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          birds: 3,
+          weight: 15.2,
+          selectedBoxIds: [1],
+        }),
+      ],
+    });
+
+    // A restored UI can reconstruct the visible row but lack both stable
+    // identities. Its complete physical identity is enough to recover it.
+    await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          id: 0,
+          clientKey: "restored-browser-key",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          birds: 3,
+          weight: 15.2,
+          remarks: "RESTORED EDIT",
+          selectedBoxIds: [1],
+        }),
+      ],
+    });
+
+    const rows = await rowsFor(trip.id);
+    assert.equal(rows.length, 1, "the reconstructed save must reuse the existing row");
+    assert.equal(rows[0].client_key, "restored-browser-key");
+  });
+
+  it("keeps equal shop/birds/weight deliveries separate when sub-shop or boxes differ", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-03",
+      boxes: [
+        { boxNo: 1, birds: 3, weight: 15.2 },
+        { boxNo: 2, birds: 3, weight: 15.2 },
+      ],
+    });
+
+    await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          clientKey: "same-totals-a",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          subShopName: "COUNTER A",
+          birds: 3,
+          weight: 15.2,
+          selectedBoxIds: [1],
+        }),
+        delivery({
+          clientKey: "same-totals-b",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          subShopName: "COUNTER B",
+          birds: 3,
+          weight: 15.2,
+          selectedBoxIds: [2],
+        }),
+      ],
+    });
+
+    const initial = await rowsFor(trip.id);
+    assert.equal(initial.length, 2);
+
+    // With both stable identifiers missing, boxes + sub-shop must recover B,
+    // never overwrite A merely because the visible totals are equal.
+    await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          clientKey: "recovered-b",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          subShopName: "counter b",
+          birds: 3,
+          weight: 15.2,
+          selectedBoxIds: [2],
+        }),
+      ],
+    });
+
+    const rows = await rowsFor(trip.id);
+    assert.equal(rows.length, 2);
+    assert.equal(rows.find((row) => row.sub_shop_name === "COUNTER A")?.client_key, "same-totals-a");
+    assert.equal(rows.find((row) => row.sub_shop_name === "COUNTER B")?.client_key, "recovered-b");
   });
 
   it("rejects a new delivery to an Inactive shop but allows keeping an existing one", async () => {

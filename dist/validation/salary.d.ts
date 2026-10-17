@@ -174,8 +174,8 @@ export declare const salaryGenerateSchema: z.ZodObject<{
     month: string;
     department?: string | undefined;
 }, {
-    month?: unknown;
     department?: unknown;
+    month?: unknown;
 }>;
 export interface SalaryListQuery {
     month?: string;
@@ -185,11 +185,11 @@ export declare const salaryListQuerySchema: z.ZodObject<{
     month: z.ZodOptional<z.ZodEffects<z.ZodEffects<z.ZodString, string, string>, string, unknown>>;
     department: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
 }, "strip", z.ZodTypeAny, {
-    month?: string | undefined;
     department?: string | undefined;
+    month?: string | undefined;
 }, {
-    month?: unknown;
     department?: unknown;
+    month?: unknown;
 }>;
 export declare const salaryMonthSchema: z.ZodObject<{
     month: z.ZodEffects<z.ZodEffects<z.ZodString, string, string>, string, unknown>;

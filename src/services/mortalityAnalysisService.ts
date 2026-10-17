@@ -14,6 +14,7 @@ export interface MortalityAnalysisRow {
   tripNo: string;
   tripDate: string;
   vehicleNo: string | null;
+  isRentedVehicle: boolean;
   supervisorName: string | null;
   sourceFarm: string | null;
   farmBirds: number;
@@ -74,6 +75,7 @@ function mapRow(row: Record<string, unknown>): MortalityAnalysisRow {
     tripNo: String(row.trip_no ?? ""),
     tripDate: dateOnly(row.trip_date) ?? "",
     vehicleNo: row.vehicle_no == null ? null : String(row.vehicle_no),
+    isRentedVehicle: Boolean(row.is_rented_vehicle),
     supervisorName: row.supervisor_name == null ? null : String(row.supervisor_name),
     sourceFarm: row.source_farm == null ? null : String(row.source_farm),
     farmBirds,

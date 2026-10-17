@@ -66,10 +66,10 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         birdType?: string | undefined;
         weight?: number | undefined;
         birds?: number | undefined;
-        remarks?: string | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
+        remarks?: string | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -92,10 +92,10 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         birdType?: string | undefined;
         weight?: number | undefined;
         birds?: number | undefined;
-        remarks?: string | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
+        remarks?: string | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -117,6 +117,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         rowIndex: z.ZodNumber;
         litres: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         rate: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+        amount: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         meter: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         bunkName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         bunkSource: z.ZodOptional<z.ZodEnum<["MASTER", "OTHER"]>>;
@@ -134,6 +135,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         rowIndex: number;
         meter?: number | null | undefined;
         rate?: number | null | undefined;
+        amount?: number | null | undefined;
         gpsLat?: number | null | undefined;
         gpsLon?: number | null | undefined;
         gpsAccuracy?: number | null | undefined;
@@ -151,6 +153,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         rowIndex: number;
         meter?: number | null | undefined;
         rate?: number | null | undefined;
+        amount?: number | null | undefined;
         gpsLat?: number | null | undefined;
         gpsLon?: number | null | undefined;
         gpsAccuracy?: number | null | undefined;
@@ -231,10 +234,10 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         birdType?: string | undefined;
         weight?: number | undefined;
         birds?: number | undefined;
-        remarks?: string | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
+        remarks?: string | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -257,10 +260,10 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         birdType?: string | undefined;
         weight?: number | undefined;
         birds?: number | undefined;
-        remarks?: string | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
+        remarks?: string | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -282,6 +285,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         rowIndex: z.ZodNumber;
         litres: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         rate: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+        amount: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         meter: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         bunkName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         bunkSource: z.ZodOptional<z.ZodEnum<["MASTER", "OTHER"]>>;
@@ -299,6 +303,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         rowIndex: number;
         meter?: number | null | undefined;
         rate?: number | null | undefined;
+        amount?: number | null | undefined;
         gpsLat?: number | null | undefined;
         gpsLon?: number | null | undefined;
         gpsAccuracy?: number | null | undefined;
@@ -316,6 +321,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         rowIndex: number;
         meter?: number | null | undefined;
         rate?: number | null | undefined;
+        amount?: number | null | undefined;
         gpsLat?: number | null | undefined;
         gpsLon?: number | null | undefined;
         gpsAccuracy?: number | null | undefined;
@@ -396,10 +402,10 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         birdType?: string | undefined;
         weight?: number | undefined;
         birds?: number | undefined;
-        remarks?: string | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
+        remarks?: string | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -422,10 +428,10 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         birdType?: string | undefined;
         weight?: number | undefined;
         birds?: number | undefined;
-        remarks?: string | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
+        remarks?: string | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -447,6 +453,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         rowIndex: z.ZodNumber;
         litres: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         rate: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+        amount: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         meter: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         bunkName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         bunkSource: z.ZodOptional<z.ZodEnum<["MASTER", "OTHER"]>>;
@@ -464,6 +471,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         rowIndex: number;
         meter?: number | null | undefined;
         rate?: number | null | undefined;
+        amount?: number | null | undefined;
         gpsLat?: number | null | undefined;
         gpsLon?: number | null | undefined;
         gpsAccuracy?: number | null | undefined;
@@ -481,6 +489,7 @@ export declare const tripAutosaveSchema: z.ZodObject<{
         rowIndex: number;
         meter?: number | null | undefined;
         rate?: number | null | undefined;
+        amount?: number | null | undefined;
         gpsLat?: number | null | undefined;
         gpsLon?: number | null | undefined;
         gpsAccuracy?: number | null | undefined;
@@ -562,10 +571,10 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         birdType?: string | undefined;
         weight?: number | undefined;
         birds?: number | undefined;
-        remarks?: string | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
+        remarks?: string | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -588,10 +597,10 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         birdType?: string | undefined;
         weight?: number | undefined;
         birds?: number | undefined;
-        remarks?: string | undefined;
         shopId?: number | null | undefined;
         birdTypeId?: number | null | undefined;
         rate?: number | null | undefined;
+        remarks?: string | undefined;
         amount?: number | undefined;
         mortality?: number | undefined;
         boxNo?: number | null | undefined;
@@ -613,6 +622,7 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         rowIndex: z.ZodNumber;
         litres: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         rate: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+        amount: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         meter: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
         bunkName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         bunkSource: z.ZodOptional<z.ZodEnum<["MASTER", "OTHER"]>>;
@@ -630,6 +640,7 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         rowIndex: number;
         meter?: number | null | undefined;
         rate?: number | null | undefined;
+        amount?: number | null | undefined;
         gpsLat?: number | null | undefined;
         gpsLon?: number | null | undefined;
         gpsAccuracy?: number | null | undefined;
@@ -647,6 +658,7 @@ export declare function parseTripAutosave(body: unknown): z.objectOutputType<{
         rowIndex: number;
         meter?: number | null | undefined;
         rate?: number | null | undefined;
+        amount?: number | null | undefined;
         gpsLat?: number | null | undefined;
         gpsLon?: number | null | undefined;
         gpsAccuracy?: number | null | undefined;

@@ -67,18 +67,33 @@ export interface LeaveStatusBody {
 export declare const leaveStatusSchema: z.ZodEffects<z.ZodObject<{
     status: z.ZodEnum<["Approved", "Rejected", "Cancelled"]>;
     rejectionReason: z.ZodEffects<z.ZodOptional<z.ZodString>, string | undefined, unknown>;
-}, "strict", z.ZodTypeAny, {
+    approvedBy: z.ZodOptional<z.ZodString>;
+    rejectedBy: z.ZodOptional<z.ZodString>;
+    deletedBy: z.ZodOptional<z.ZodString>;
+}, "strip", z.ZodTypeAny, {
     status: "Approved" | "Rejected" | "Cancelled";
+    approvedBy?: string | undefined;
+    rejectedBy?: string | undefined;
     rejectionReason?: string | undefined;
+    deletedBy?: string | undefined;
 }, {
     status: "Approved" | "Rejected" | "Cancelled";
+    approvedBy?: string | undefined;
+    rejectedBy?: string | undefined;
     rejectionReason?: unknown;
+    deletedBy?: string | undefined;
 }>, {
     status: "Approved" | "Rejected" | "Cancelled";
+    approvedBy?: string | undefined;
+    rejectedBy?: string | undefined;
     rejectionReason?: string | undefined;
+    deletedBy?: string | undefined;
 }, {
     status: "Approved" | "Rejected" | "Cancelled";
+    approvedBy?: string | undefined;
+    rejectedBy?: string | undefined;
     rejectionReason?: unknown;
+    deletedBy?: string | undefined;
 }>;
 export interface LeaveListQuery {
     status?: string;
@@ -108,18 +123,18 @@ export declare const leaveListQuerySchema: z.ZodObject<{
     limit: number;
     search?: string | undefined;
     employeeId?: number | undefined;
+    department?: string | undefined;
     status?: "Pending" | "Approved" | "Rejected" | "Cancelled" | "All" | undefined;
     month?: string | undefined;
-    department?: string | undefined;
     fromDate?: string | undefined;
     toDate?: string | undefined;
     leaveType?: "Casual" | "Sick" | "Emergency" | "Annual" | undefined;
 }, {
     search?: unknown;
     employeeId?: unknown;
+    department?: unknown;
     status?: unknown;
     month?: unknown;
-    department?: unknown;
     fromDate?: unknown;
     toDate?: unknown;
     page?: unknown;
@@ -141,7 +156,7 @@ export declare const leaveReportQuerySchema: z.ZodObject<{
     department?: string | undefined;
 }, {
     employeeId?: unknown;
-    month?: unknown;
     department?: unknown;
+    month?: unknown;
 }>;
 export { parseBody };

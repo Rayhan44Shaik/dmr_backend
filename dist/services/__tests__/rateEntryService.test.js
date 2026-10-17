@@ -120,6 +120,8 @@ describe("rateEntryService", () => {
             assert.ok(row, "trip should still be listed after save, before lock");
             assert.equal(row.ratesEntered, 1);
             assert.equal(row.rateLocked, false);
+            assert.equal(row.totalAmount, 16000);
+            assert.deepEqual(row.loadAmounts, [{ load: 1, amount: 16000 }]);
         }
         finally {
             await cleanup(f);

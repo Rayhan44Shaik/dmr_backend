@@ -40,10 +40,10 @@ export declare const shopRateBodySchema: z.ZodObject<{
     status?: "Draft" | "Deleted" | "Approved" | "Rejected" | "Pending Approval" | undefined;
     shopName?: string | undefined;
     birdType?: string | undefined;
-    remarks?: string | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
     effectiveTo?: string | null | undefined;
+    remarks?: string | undefined;
     createdBy?: string | undefined;
 }, {
     rate: number;
@@ -51,10 +51,10 @@ export declare const shopRateBodySchema: z.ZodObject<{
     status?: "Draft" | "Deleted" | "Approved" | "Rejected" | "Pending Approval" | undefined;
     shopName?: string | undefined;
     birdType?: string | undefined;
-    remarks?: string | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
     effectiveTo?: string | null | undefined;
+    remarks?: string | undefined;
     createdBy?: string | undefined;
 }>;
 /**
@@ -90,11 +90,11 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     birdType?: string | undefined;
     weight?: number | undefined;
     birds?: number | undefined;
-    remarks?: string | undefined;
     tripId?: number | null | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
     rate?: number | undefined;
+    remarks?: string | undefined;
     createdBy?: string | undefined;
     saleNo?: string | undefined;
     saleDate?: string | undefined;
@@ -106,11 +106,11 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     birdType?: string | undefined;
     weight?: number | undefined;
     birds?: number | undefined;
-    remarks?: string | undefined;
     tripId?: number | null | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
     rate?: number | undefined;
+    remarks?: string | undefined;
     createdBy?: string | undefined;
     saleNo?: string | undefined;
     saleDate?: string | undefined;
@@ -160,8 +160,8 @@ export declare const rateEntryBodySchema: z.ZodObject<{
         id: number;
         rate: number;
     }[] | undefined;
-    remarks?: string | null | undefined;
     birdTypeId?: number | null | undefined;
+    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     updatedBy?: string | undefined;
 }, {
@@ -172,8 +172,8 @@ export declare const rateEntryBodySchema: z.ZodObject<{
         id: number;
         rate: number;
     }[] | undefined;
-    remarks?: string | null | undefined;
     birdTypeId?: number | null | undefined;
+    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     updatedBy?: string | undefined;
 }>;
@@ -199,9 +199,9 @@ export declare const rateEntryUpdateSchema: z.ZodObject<{
         id: number;
         rate: number;
     }[] | undefined;
-    remarks?: string | null | undefined;
     birdTypeId?: number | null | undefined;
     rate?: number | undefined;
+    remarks?: string | null | undefined;
     updatedBy?: string | undefined;
 }, {
     birdType?: string | undefined;
@@ -209,9 +209,9 @@ export declare const rateEntryUpdateSchema: z.ZodObject<{
         id: number;
         rate: number;
     }[] | undefined;
-    remarks?: string | null | undefined;
     birdTypeId?: number | null | undefined;
     rate?: number | undefined;
+    remarks?: string | null | undefined;
     updatedBy?: string | undefined;
 }>;
 export declare const rateEntryLockSchema: z.ZodObject<{
@@ -278,9 +278,9 @@ export declare const collectionBodySchema: z.ZodObject<{
     collectionDate: string;
     status?: "Draft" | "Deleted" | "Approved" | "Rejected" | "Pending Approval" | undefined;
     shopName?: string | undefined;
-    remarks?: string | undefined;
     tripId?: number | null | undefined;
     shopId?: number | null | undefined;
+    remarks?: string | undefined;
     createdBy?: string | undefined;
     collectionNo?: string | undefined;
     saleId?: number | null | undefined;
@@ -292,9 +292,9 @@ export declare const collectionBodySchema: z.ZodObject<{
     collectionDate: string;
     status?: "Draft" | "Deleted" | "Approved" | "Rejected" | "Pending Approval" | undefined;
     shopName?: string | undefined;
-    remarks?: string | undefined;
     tripId?: number | null | undefined;
     shopId?: number | null | undefined;
+    remarks?: string | undefined;
     createdBy?: string | undefined;
     collectionNo?: string | undefined;
     saleId?: number | null | undefined;
@@ -332,11 +332,11 @@ export declare const fuelExpenseBodySchema: z.ZodObject<{
     billDate: string;
     supervisorName?: string | null | undefined;
     vehicleNo?: string | null | undefined;
-    remarks?: string | null | undefined;
     tripId?: number | null | undefined;
     vehicleId?: number | null | undefined;
     driverId?: number | null | undefined;
     supervisorId?: number | null | undefined;
+    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     amount?: number | undefined;
     billNo?: string | undefined;
@@ -357,11 +357,11 @@ export declare const fuelExpenseBodySchema: z.ZodObject<{
     billDate: string;
     supervisorName?: string | null | undefined;
     vehicleNo?: string | null | undefined;
-    remarks?: string | null | undefined;
     tripId?: number | null | undefined;
     vehicleId?: number | null | undefined;
     driverId?: number | null | undefined;
     supervisorId?: number | null | undefined;
+    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     amount?: number | undefined;
     billNo?: string | undefined;

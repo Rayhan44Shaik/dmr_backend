@@ -8,6 +8,7 @@ export function mapEmployee(row) {
         employeeNo: num(row.employee_no),
         employeeName: str(row.employee_name),
         department: str(row.department),
+        secondaryDepartment: row.secondary_department == null ? null : str(row.secondary_department),
         role: str(row.role),
         phoneNumber: str(row.phone_number),
         email: str(row.email),
@@ -16,6 +17,7 @@ export function mapEmployee(row) {
         aadharNumber: row.aadhar_number ? str(row.aadhar_number) : null,
         licenseNumber: row.license_number ? str(row.license_number) : null,
         salary: num(row.salary),
+        isDummy: Boolean(row.is_dummy),
         status: str(row.status),
         avatar: row.avatar ? str(row.avatar) : null,
     };
@@ -29,6 +31,7 @@ export function mapVehicle(row) {
         noOfBoxes: num(row.no_of_boxes),
         birdCapacity: num(row.bird_capacity),
         capacityKg: num(row.capacity_kg),
+        isRented: Boolean(row.is_rented),
         trackingId: str(row.tracking_id),
         fastagBank: str(row.fastag_bank),
         engineNumber: str(row.engine_number),
@@ -83,7 +86,7 @@ export function mapShop(row) {
     };
 }
 /** Keep readable name snapshots synchronized by immutable shop identity. */
-async function propagateShopName(client, shopId, shopName) {
+export async function propagateShopName(client, shopId, shopName) {
     // Never match the old spelling. Rows without a shop id remain historical
     // free text and similarly named shops cannot be modified accidentally.
     for (const table of ["trip_deliveries", "shop_rates", "shop_sales", "collections"]) {
@@ -216,8 +219,8 @@ export const mastersService = {
     },
     async listEmployees(department) {
         const result = department
-            ? await query(`SELECT * FROM employees WHERE department = $1 ORDER BY employee_name`, [department])
-            : await query(`SELECT * FROM employees ORDER BY employee_name`);
+            ? await query(`SELECT * FROM employees WHERE department = $1 OR secondary_department = $1 ORDER BY CASE WHEN department='Owner' THEN 0 ELSE 1 END, employee_name`, [department])
+            : await query(`SELECT * FROM employees ORDER BY CASE WHEN department='Owner' THEN 0 ELSE 1 END, employee_name`);
         return result.rows.map(mapEmployee);
     },
     async upsertEmployee(body) {
@@ -230,7 +233,8 @@ export const mastersService = {
             const result = await query(`UPDATE employees SET
           employee_no=COALESCE($2,employee_no), employee_name=$3, department=$4, role=$5,
           phone_number=$6, email=$7, address=$8, joining_date=$9,
-          aadhar_number=$10, license_number=$11, salary=$12, status=$13, avatar=$14
+          aadhar_number=$10, license_number=$11, salary=$12, status=$13, avatar=$14,
+          secondary_department=$15
          WHERE id=$1 RETURNING *`, [
                 body.id,
                 body.employeeNo,
@@ -246,6 +250,7 @@ export const mastersService = {
                 body.salary ?? 0,
                 body.status ?? "Active",
                 body.avatar ?? null,
+                body.secondaryDepartment ?? null,
             ]);
             if (!result.rowCount)
                 throw new AppError(404, "Employee not found");
@@ -258,8 +263,8 @@ export const mastersService = {
         await assertEmployeeUnique(body);
         const result = await query(`INSERT INTO employees (
          employee_no, employee_name, department, role, phone_number, email,
-         address, joining_date, aadhar_number, license_number, salary, status, avatar
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`, [
+         address, joining_date, aadhar_number, license_number, salary, status, avatar, secondary_department
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`, [
             body.employeeNo ?? nextNo.rows[0].n,
             body.employeeName,
             body.department ?? "",
@@ -273,19 +278,45 @@ export const mastersService = {
             body.salary ?? 0,
             body.status ?? "Active",
             body.avatar ?? null,
+            body.secondaryDepartment ?? null,
         ]);
         return mapEmployee(result.rows[0]);
     },
     async updateEmployeeStatus(id, status) {
-        const result = await query(`UPDATE employees SET status=$2 WHERE id=$1 RETURNING *`, [id, status]);
-        if (!result.rowCount)
-            throw new AppError(404, "Employee not found");
-        return mapEmployee(result.rows[0]);
+        // Marking an employee Inactive must also kill their login completely:
+        // the linked application_user is revoked, its sessions are torn down, and
+        // login/session auth then refuses the account outright.
+        const result = await withTransaction(async (c) => {
+            const updated = await c.query(`UPDATE employees SET status=$2 WHERE id=$1 RETURNING *`, [id, status]);
+            if (!updated.rowCount)
+                throw new AppError(404, "Employee not found");
+            if (status !== "Active") {
+                const revokedLogin = await c.query(`UPDATE application_users SET access_status='REVOKED',active=FALSE,last_access_change_at=NOW(),updated_at=NOW() WHERE employee_id=$1 AND role<>'OWNER' RETURNING id`, [id]);
+                if (revokedLogin.rowCount) {
+                    await c.query(`UPDATE application_sessions SET revoked_at=COALESCE(revoked_at,NOW()) WHERE user_id=$1 AND revoked_at IS NULL`, [revokedLogin.rows[0].id]);
+                }
+            }
+            return updated.rows[0];
+        });
+        return mapEmployee(result);
     },
     async deleteEmployee(id) {
-        const result = await query(`UPDATE employees SET status='Inactive' WHERE id=$1 RETURNING *`, [id]);
-        if (!result.rowCount)
-            throw new AppError(404, "Employee not found");
+        const result = await withTransaction(async (c) => {
+            const employee = await c.query(`UPDATE employees SET status='Inactive' WHERE id=$1 RETURNING id`, [id]);
+            if (!employee.rowCount)
+                throw new AppError(404, "Employee not found");
+            const users = await c.query(`UPDATE application_users
+            SET access_status='REVOKED', active=FALSE,
+                last_access_change_at=NOW(), updated_at=NOW()
+          WHERE employee_id=$1 AND role<>'OWNER'
+          RETURNING id`, [id]);
+            for (const user of users.rows) {
+                await c.query(`UPDATE application_sessions
+              SET revoked_at=COALESCE(revoked_at,NOW())
+            WHERE user_id=$1 AND revoked_at IS NULL`, [user.id]);
+            }
+            return employee;
+        });
         return { id, deleted: true, deactivated: true };
     },
     async listVehicles() {
@@ -297,17 +328,27 @@ export const mastersService = {
     },
     async upsertVehicle(body) {
         assertValid(validateVehicleFields(body));
+        const isRented = Boolean(body.isRented);
+        if (isRented) {
+            Object.assign(body, {
+                vehicleType: "", trackingId: "", fastagBank: "", engineNumber: "", chassisNumber: "",
+                insuranceExpiry: null, permitExpiry: null, fitnessExpiry: null, purchaseDate: null,
+                purchaseAmount: null, emiStartDate: null, emiDay: null, totalEMIs: null, rcDate: null,
+            });
+        }
         if (body.id) {
             await assertUnique("vehicle", body.vehicleNumber, body.id);
-            await assertUnique("vehicleEngine", body.engineNumber ?? "", body.id);
-            await assertUnique("vehicleChassis", body.chassisNumber ?? "", body.id);
+            if (!isRented)
+                await assertUnique("vehicleEngine", body.engineNumber ?? "", body.id);
+            if (!isRented)
+                await assertUnique("vehicleChassis", body.chassisNumber ?? "", body.id);
             const result = await query(`UPDATE vehicles SET
           vehicle_no=COALESCE($2,vehicle_no), vehicle_number=$3, vehicle_type=$4, no_of_boxes=$5,
           bird_capacity=$6, capacity_kg=$7, tracking_id=$8, fastag_bank=$9,
           engine_number=$10, chassis_number=$11, insurance_expiry=$12,
           permit_expiry=$13, fitness_expiry=$14, purchase_date=$15,
           purchase_amount=$16, emi_start_date=$17, rc_date=$18, status=$19,
-          emi_day=$20, total_emis=$21
+          emi_day=$20, total_emis=$21, is_rented=$22
          WHERE id=$1 RETURNING *`, [
                 body.id,
                 body.vehicleNo,
@@ -330,6 +371,7 @@ export const mastersService = {
                 body.status ?? "Active",
                 body.emiDay ?? null,
                 body.totalEMIs ?? null,
+                isRented,
             ]);
             if (!result.rowCount)
                 throw new AppError(404, "Vehicle not found");
@@ -337,14 +379,16 @@ export const mastersService = {
         }
         const nextNo = await query(`SELECT next_master_number('vehicles') AS n`);
         await assertUnique("vehicle", body.vehicleNumber);
-        await assertUnique("vehicleEngine", body.engineNumber ?? "");
-        await assertUnique("vehicleChassis", body.chassisNumber ?? "");
+        if (!isRented)
+            await assertUnique("vehicleEngine", body.engineNumber ?? "");
+        if (!isRented)
+            await assertUnique("vehicleChassis", body.chassisNumber ?? "");
         const result = await query(`INSERT INTO vehicles (
          vehicle_no, vehicle_number, vehicle_type, no_of_boxes, bird_capacity,
          capacity_kg, tracking_id, fastag_bank, engine_number, chassis_number,
          insurance_expiry, permit_expiry, fitness_expiry, purchase_date,
-         purchase_amount, emi_start_date, rc_date, status, emi_day, total_emis
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+         purchase_amount, emi_start_date, rc_date, status, emi_day, total_emis, is_rented
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
        RETURNING *`, [
             body.vehicleNo ?? nextNo.rows[0].n,
             body.vehicleNumber,
@@ -366,6 +410,7 @@ export const mastersService = {
             body.status ?? "Active",
             body.emiDay ?? null,
             body.totalEMIs ?? null,
+            isRented,
         ]);
         return mapVehicle(result.rows[0]);
     },
@@ -459,7 +504,7 @@ export const mastersService = {
                 await assertUnique("shopNumber", body.shopNumber, shopId);
             return withTransaction(async (client) => {
                 const result = await client.query(`UPDATE shops SET
-          shop_no=COALESCE($2,shop_no), shop_number=$3, shop_name=$4, owner_name=$5, phone_number=$6,
+          shop_no=COALESCE($2,shop_no), shop_number='SHOP-' || LPAD(COALESCE($2,shop_no)::text,6,'0'), shop_name=$4, owner_name=$5, phone_number=$6,
           secondary_phone_number=$7, whatsapp_number=$8, email=$9,
           city=$10, village=$10, address=$11, latitude=$12, longitude=$13,
           paper_rate=$14, association_type=$15, status=$16, opening_balance=$17,
@@ -502,7 +547,7 @@ export const mastersService = {
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,$12,$13,$14,$15,$16,$16)
        RETURNING *`, [
             body.shopNo ?? nextNo.rows[0].n,
-            body.shopNumber ?? "",
+            `SHOP-${String(body.shopNo ?? nextNo.rows[0].n).padStart(6, "0")}`,
             body.shopName,
             body.ownerName ?? "",
             body.phoneNumber ?? "",
@@ -569,6 +614,46 @@ export const mastersService = {
                 created.push(mapShop(result.rows[0]));
             }
             return created;
+        });
+    },
+    /** Update opening balances for existing shops only, atomically. Existing
+     * ledger movement is preserved by applying only the opening-balance delta
+     * to current_balance. No shop or unrelated master field can be created or
+     * changed through this endpoint. */
+    async bulkUpdateShopOpeningBalances(inputs) {
+        if (!Array.isArray(inputs) || inputs.length === 0 || inputs.length > 5000) {
+            throw new AppError(400, "Provide between 1 and 5000 opening-balance rows.");
+        }
+        return withTransaction(async (client) => {
+            const seen = new Set();
+            const updated = [];
+            for (let index = 0; index < inputs.length; index += 1) {
+                const input = inputs[index];
+                const shopNumber = str(input.shopNumber).trim();
+                const shopName = str(input.shopName).trim();
+                const openingBalance = Number(input.openingBalance);
+                if ((!shopNumber && !shopName) || !Number.isFinite(openingBalance) || Math.abs(openingBalance) > 1_000_000_000) {
+                    throw new AppError(400, `Row ${index + 1}: valid Shop Number or Shop Name and Opening Balance are required.`);
+                }
+                const found = await client.query(`SELECT * FROM shops
+            WHERE ($1<>'' AND LOWER(COALESCE(shop_number, ''))=LOWER($1))
+               OR ($2<>'' AND LOWER(shop_name)=LOWER($2))
+            ORDER BY CASE WHEN $1<>'' AND LOWER(COALESCE(shop_number, ''))=LOWER($1) THEN 0 ELSE 1 END
+            LIMIT 2 FOR UPDATE`, [shopNumber, shopName]);
+                if (found.rowCount !== 1) {
+                    throw new AppError(found.rowCount ? 409 : 404, `Row ${index + 1}: existing shop could not be identified uniquely.`);
+                }
+                const shopId = num(found.rows[0].id);
+                if (seen.has(shopId))
+                    throw new AppError(409, `Row ${index + 1}: the same shop appears more than once.`);
+                seen.add(shopId);
+                const saved = await client.query(`UPDATE shops
+              SET current_balance=COALESCE(current_balance,0)+($2-opening_balance),
+                  opening_balance=$2
+            WHERE id=$1 RETURNING *`, [shopId, openingBalance]);
+                updated.push(mapShop(saved.rows[0]));
+            }
+            return updated;
         });
     },
     /**

@@ -16,32 +16,32 @@ export declare const permitBodySchema: z.ZodEffects<z.ZodObject<{
     removeDocument: z.ZodOptional<z.ZodBoolean>;
 }, "strip", z.ZodTypeAny, {
     expiryDate: string;
-    remarks?: string | null | undefined;
     vehicleId?: number | undefined;
+    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     documentNumber?: string | undefined;
     validFrom?: string | null | undefined;
     removeDocument?: boolean | undefined;
 }, {
     expiryDate: string;
-    remarks?: string | null | undefined;
     vehicleId?: number | undefined;
+    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     documentNumber?: string | undefined;
     validFrom?: string | null | undefined;
     removeDocument?: boolean | undefined;
 }>, {
     expiryDate: string;
-    remarks?: string | null | undefined;
     vehicleId?: number | undefined;
+    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     documentNumber?: string | undefined;
     validFrom?: string | null | undefined;
     removeDocument?: boolean | undefined;
 }, {
     expiryDate: string;
-    remarks?: string | null | undefined;
     vehicleId?: number | undefined;
+    remarks?: string | null | undefined;
     createdBy?: string | undefined;
     documentNumber?: string | undefined;
     validFrom?: string | null | undefined;

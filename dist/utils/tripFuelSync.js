@@ -53,7 +53,7 @@ export async function syncDieselToFuelExpenses(client, tripId, tripDate, entries
         if (litres <= 0 && rate <= 0)
             continue;
         activeIndices.push(entry.rowIndex);
-        const amount = Number((litres * rate).toFixed(2));
+        const amount = Number(entry.amount ?? Number((litres * rate).toFixed(2)));
         // Only allocate a new bill_no when inserting. Re-generating on every upsert
         // races under multi-bill trips and can fail UNIQUE(bill_no).
         const existingFuel = await client.query(`SELECT id, bill_no FROM fuel_expenses
@@ -183,6 +183,7 @@ export async function loadDcPhoto(client, tripId, dcPhotoKey, legId) {
         dcPhotoKey2: null,
         dcPhotoMime2: null,
         dcPhotoData2: null,
+        pickupPhotos: [],
     };
     const result = await client.query(`SELECT media_key, mime_type, data_base64 FROM trip_media
      WHERE trip_id = $1 AND media_type = 'image'
@@ -206,6 +207,11 @@ export async function loadDcPhoto(client, tripId, dcPhotoKey, legId) {
         dcPhotoKey2: secondary?.key ?? null,
         dcPhotoMime2: secondary?.mime ?? null,
         dcPhotoData2: secondary?.data ?? null,
+        pickupPhotos: photos.map((photo) => ({
+            key: photo.key,
+            mime: photo.mime ?? "image/jpeg",
+            data: photo.data,
+        })),
     };
 }
 //# sourceMappingURL=tripFuelSync.js.map

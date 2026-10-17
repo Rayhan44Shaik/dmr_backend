@@ -5,7 +5,26 @@ import { enforceSupervisorAssignment, requireTripAccess, requireTripPermission, 
 import { tripsService } from "../services/tripsService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { validateStepSubmit } from "../validation/trips.js";
+import { query } from "../config/db.js";
 export const tripsRouter = Router();
+async function applyAuthoritativeRentalStatus(body) {
+    if (!body || body.vehicleId == null)
+        return;
+    const vehicleId = Number(body.vehicleId);
+    if (!Number.isSafeInteger(vehicleId) || vehicleId <= 0)
+        return;
+    const vehicle = await query(`SELECT is_rented FROM vehicles WHERE id=$1 AND status='Active'`, [vehicleId]);
+    if (!vehicle.rowCount)
+        throw new AppError(422, "Selected vehicle no longer exists.");
+    body.isRentedVehicle = Boolean(vehicle.rows[0].is_rented);
+    if (body.isRentedVehicle) {
+        delete body.openingMeter;
+        delete body.destMeter;
+        delete body.closingMeter;
+        delete body.endMeter;
+        delete body.dieselEntries;
+    }
+}
 function positiveId(value, label = "Trip id") {
     const id = Number(value);
     if (!Number.isSafeInteger(id) || id <= 0) {
@@ -40,7 +59,7 @@ function tripListFilters(req, res) {
     return {
         fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
         toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
-        status: typeof req.query.status === "string" ? req.query.status : undefined,
+        status: user.role === "SUPERVISOR" ? "Draft" : typeof req.query.status === "string" ? req.query.status : undefined,
         vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
         supervisorId,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
@@ -73,6 +92,7 @@ tripsRouter.get("/next-number", asyncHandler(async (req, res) => {
 tripsRouter.post("/steps/start", asyncHandler(async (req, res) => {
     requireTripPermission(res, "trip.create");
     applySupervisorScope(res, req.body);
+    await applyAuthoritativeRentalStatus(req.body);
     validateStepSubmit("start", req.body);
     const payload = {
         ...req.body,
@@ -107,6 +127,7 @@ tripsRouter.post("/", asyncHandler(async (req, res) => {
     applySupervisorScope(res, req.body);
     // Create draft or full save without id
     if (req.body?.startStepSubmitted || req.body?.vehicleId || req.body?.helpers) {
+        await applyAuthoritativeRentalStatus(req.body);
         validateStepSubmit("start", req.body);
         const trip = await tripsService.save(null, req.body);
         res.status(201).json(trip);
@@ -200,6 +221,10 @@ tripsRouter.delete("/:id", asyncHandler(async (req, res) => {
 }));
 tripsRouter.patch("/:id/status", asyncHandler(async (req, res) => {
     const id = positiveId(req.params.id);
+    const user = authUser(res);
+    if (user.role === "OFFICE" && req.body?.status !== "Completed") {
+        throw new AppError(403, "Office can only complete a pending trip");
+    }
     await requireTripAccess(res, id, "trip.status_change");
     const trip = await tripsService.updateStatus(id, req.body);
     res.json(trip);

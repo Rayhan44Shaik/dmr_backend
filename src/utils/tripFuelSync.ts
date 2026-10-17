@@ -82,7 +82,7 @@ export async function syncDieselToFuelExpenses(
     if (litres <= 0 && rate <= 0) continue;
 
     activeIndices.push(entry.rowIndex);
-    const amount = Number((litres * rate).toFixed(2));
+    const amount = Number(entry.amount ?? Number((litres * rate).toFixed(2)));
 
     // Only allocate a new bill_no when inserting. Re-generating on every upsert
     // races under multi-bill trips and can fail UNIQUE(bill_no).
@@ -194,7 +194,7 @@ export async function syncTripFuelFromDb(
   const trip = tripRes.rows[0] as Record<string, unknown>;
 
   const dieselRows = await client.query(
-    `SELECT row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name
+    `SELECT row_index, litres, rate, amount, meter, bunk_name, bunk_gps, image_data, image_name
      FROM trip_diesel_entries WHERE trip_id = $1 ORDER BY row_index`,
     [tripId]
   );
@@ -202,6 +202,7 @@ export async function syncTripFuelFromDb(
     rowIndex: num(r.row_index),
     litres: r.litres == null ? null : num(r.litres),
     rate: r.rate == null ? null : num(r.rate),
+    amount: r.amount == null ? null : num(r.amount),
     meter: r.meter == null ? null : num(r.meter),
     bunkName: r.bunk_name == null ? null : str(r.bunk_name),
     bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),

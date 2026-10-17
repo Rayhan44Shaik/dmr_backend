@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { asyncHandler, AppError } from "../middleware/errorHandler.js";
+import { authUser } from "../middleware/auth.js";
 import { collectionEntryService } from "../services/collectionEntryService.js";
 import { collectionsService } from "../services/collectionsService.js";
 import { dashboardService } from "../services/dashboardService.js";
@@ -10,6 +11,7 @@ import { shopRatesService } from "../services/shopRatesService.js";
 import { shopSalesService } from "../services/shopSalesService.js";
 import { shopLedgerService } from "../services/shopLedgerService.js";
 import { tripsService } from "../services/tripsService.js";
+import { tripExpensesService } from "../services/tripExpensesService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { operationsSensitiveBoundary, operationsTripsBoundary } from "../middleware/businessBoundary.js";
 import { operationsPendingDeleteRouter } from "./operations_pending_delete.js";
@@ -59,6 +61,19 @@ operationsRouter.get("/mortality-analysis", asyncHandler(async (req, res) => {
 // ── Vehicle Trips / Trip List ────────────────────────────────────
 operationsRouter.get("/trips", asyncHandler(async (req, res) => {
     res.json(await tripsService.list(tripListFilters(req)));
+}));
+/** Completed Step-5 expense register. Draft/Pending/Deleted trips are excluded in SQL. */
+operationsRouter.get("/expenses", asyncHandler(async (req, res) => {
+    res.json(await tripExpensesService.list({
+        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
+        supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
+        search: typeof req.query.search === "string" ? req.query.search : undefined,
+        sortBy: typeof req.query.sortBy === "string" ? req.query.sortBy : undefined,
+        sortDir: req.query.sortDir === "asc" ? "asc" : "desc",
+        pagination: opsListPagination(req),
+    }));
 }));
 operationsRouter.get("/trips/:id", asyncHandler(async (req, res) => {
     res.json(await tripsService.getById(Number(req.params.id)));
@@ -136,6 +151,7 @@ operationsRouter.get("/trip-list", asyncHandler(async (req, res) => {
             : undefined,
         driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
         farmId: req.query.farmId ? Number(req.query.farmId) : undefined,
+        shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
         pagination: pagination ?? { page: 1, limit: 50, offset: 0 },
     }));
@@ -325,7 +341,10 @@ operationsRouter.patch("/collection-entry/:id/status", asyncHandler(async (req, 
 operationsRouter.delete("/collection-entry/:id", asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.softDelete(Number(req.params.id), {
         reason: typeof req.body?.reason === "string" ? req.body.reason : undefined,
-        deletedBy: typeof req.body?.deletedBy === "string" ? req.body.deletedBy : undefined,
+        // deletedBy is an audit identity; it must come from the authenticated
+        // session, not the client payload (serverActor is not mounted on this
+        // router path — be explicit here).
+        deletedBy: authUser(res).displayName,
     }));
 }));
 // ── Fuel Expenses ────────────────────────────────────────────────

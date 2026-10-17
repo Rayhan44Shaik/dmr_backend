@@ -7,6 +7,7 @@ export interface Employee {
     employeeNo: number;
     employeeName: string;
     department: string;
+    secondaryDepartment?: string | null;
     role: string;
     phoneNumber: string;
     email: string;
@@ -15,6 +16,7 @@ export interface Employee {
     aadharNumber?: string | null;
     licenseNumber?: string | null;
     salary: number;
+    isDummy?: boolean;
     status: EmployeeStatus;
     avatar?: string | null;
 }
@@ -26,6 +28,7 @@ export interface Vehicle {
     noOfBoxes: number;
     birdCapacity: number;
     capacityKg: number;
+    isRented: boolean;
     trackingId: string;
     fastagBank: string;
     engineNumber: string;
@@ -213,6 +216,7 @@ export interface DieselEntry {
     rowIndex: number;
     litres?: number | null;
     rate?: number | null;
+    amount?: number | null;
     meter?: number | null;
     bunkName?: string | null;
     bunkSource?: "MASTER" | "OTHER";
@@ -242,6 +246,8 @@ export interface Trip {
     startTime: string | null;
     vehicleId: number | null;
     vehicleNo: string | null;
+    /** Rental status captured when the trip selected the vehicle. */
+    isRentedVehicle?: boolean;
     /** From Vehicle Master `no_of_boxes` — used by Pickup Step 3 capacity UI. */
     vehicleBoxCapacity?: number | null;
     driverId: number | null;
@@ -365,6 +371,9 @@ export interface TripStepStatuses {
     expenses: TripStepStatus;
 }
 export interface TripSummary extends Trip {
+    /** Compact delivery-shop facets used by Trip List filtering/search. */
+    deliveryShopIds: number[];
+    deliveryShopNames: string[];
     /** Step-2-submitted loads, visible immediately in Recent Trips. */
     submittedLoadCount: number;
     /** Step-4-submitted load totals used by Recent Trips and its tooltips. */

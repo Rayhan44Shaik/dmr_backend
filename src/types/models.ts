@@ -18,6 +18,7 @@ export interface Employee {
   aadharNumber?: string | null;
   licenseNumber?: string | null;
   salary: number;
+  isDummy?: boolean;
   status: EmployeeStatus;
   avatar?: string | null;
 }
@@ -229,6 +230,7 @@ export interface DieselEntry {
   rowIndex: number;
   litres?: number | null;
   rate?: number | null;
+  amount?: number | null;
   meter?: number | null;
   bunkName?: string | null;
   bunkSource?: "MASTER" | "OTHER";
@@ -389,6 +391,9 @@ export interface TripStepStatuses {
 }
 
 export interface TripSummary extends Trip {
+  /** Compact delivery-shop facets used by Trip List filtering/search. */
+  deliveryShopIds: number[];
+  deliveryShopNames: string[];
   /** Step-2-submitted loads, visible immediately in Recent Trips. */
   submittedLoadCount: number;
   /** Step-4-submitted load totals used by Recent Trips and its tooltips. */

@@ -6,6 +6,7 @@ export interface BulkImportResult<T> {
     failed: number;
     errors: BulkRowError[];
     created: T[];
+    updated?: T[];
 }
 export declare const mastersBulkService: {
     importShops(body: unknown): Promise<BulkImportResult<Shop>>;

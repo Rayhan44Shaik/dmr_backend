@@ -86,6 +86,7 @@ const dieselEntrySchema = z.object({
     rowIndex: z.coerce.number().int().nonnegative(),
     litres: z.coerce.number().nonnegative().nullable().optional(),
     rate: z.coerce.number().nonnegative().nullable().optional(),
+    amount: z.coerce.number().nonnegative().nullable().optional(),
     meter: z.coerce.number().nonnegative().nullable().optional(),
     bunkName: z.string().nullable().optional(),
     bunkSource: z.enum(["MASTER", "OTHER"]).optional(),
@@ -130,18 +131,24 @@ const stepValidators = {
         supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int().positive(),
         helpers: crewNames,
         loaders: crewNames,
-        openingMeter: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? undefined : v), z.coerce.number({ required_error: "Opening meter is required" }).positive("Opening meter is required")),
+        isRentedVehicle: z.boolean().optional(),
+        openingMeter: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? undefined : v), z.coerce.number().positive("Opening meter is required").optional()),
         advanceAmount: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? null : v), z.number().nonnegative().nullable().optional()),
         startTime: z.string().optional(),
     })
-        .passthrough(),
+        .passthrough()
+        .superRefine((data, ctx) => {
+        if (!data.isRentedVehicle && data.openingMeter == null)
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["openingMeter"], message: "Opening meter is required" });
+    }),
     farm: z
         .object({
         sourceFarmId: idSchema,
         farmAddress: z
             .preprocess((v) => (v == null ? "" : String(v)), z.string().trim().max(500).optional())
             .optional(),
-        destMeter: z.coerce.number().nonnegative(),
+        isRentedVehicle: z.boolean().optional(),
+        destMeter: z.coerce.number().nonnegative().optional(),
         // reached_time is never sent by the frontend (backend captures it) — but
         // tolerate a null in case a legacy client sends one.
         reachedTime: z.string().nullable().optional(),
@@ -178,13 +185,19 @@ const stepValidators = {
         boxDetails: z.array(boxDetailSchema).min(1),
         dcPhotoKey: z.string().min(1, "DC Photo is required."),
         dcPhotoKey2: z.string().optional(),
+        pickupPhotos: z.array(z.object({
+            key: z.string().min(1).max(240),
+            mime: z.string().startsWith("image/").max(100),
+            // 50 KiB binary images become roughly 68k characters as base64.
+            data: z.string().startsWith("data:image/").max(70_000),
+        })).max(500).optional(),
     })
         .passthrough()
         .refine((data) => {
-        const photoCount = (data.dcPhotoKey ? 1 : 0) + (data.dcPhotoKey2 ? 1 : 0);
-        return photoCount >= 1 && photoCount <= 2;
+        const photoCount = data.pickupPhotos?.length || (data.dcPhotoKey ? 1 : 0) + (data.dcPhotoKey2 ? 1 : 0);
+        return photoCount >= 1;
     }, {
-        message: "Step 3 requires between 1 and 2 photos.",
+        message: "Step 3 requires at least one photo.",
         path: ["dcPhotoKey"],
     }),
     deliveries: z
@@ -236,12 +249,13 @@ const stepValidators = {
         .object({
         closingMeter: z.coerce.number().nonnegative().optional(),
         endMeter: z.coerce.number().nonnegative().optional(),
+        isRentedVehicle: z.boolean().optional(),
         // Optional — the server stamps end_time / expenses_step_submitted_at on
         // final submit. The client deliberately does not send browser clocks.
         endTime: z.string().optional(),
     })
         .passthrough()
-        .refine((data) => data.closingMeter != null || data.endMeter != null, {
+        .refine((data) => data.isRentedVehicle || data.closingMeter != null || data.endMeter != null, {
         message: "Either closingMeter or endMeter must be provided to finish the trip",
         path: ["closingMeter"],
     }),

@@ -608,6 +608,12 @@ function toTripSummary(row: Record<string, unknown>): TripSummary {
   return {
     ...base,
     submittedLoadCount: Math.max(1, num(row.submitted_load_count) || 1),
+    deliveryShopIds: Array.isArray(row.delivery_shop_ids)
+      ? row.delivery_shop_ids.map((value) => num(value)).filter((value) => value > 0)
+      : [],
+    deliveryShopNames: Array.isArray(row.delivery_shop_names)
+      ? row.delivery_shop_names.map((value) => str(value)).filter(Boolean)
+      : [],
     loadSummaries,
     totalBirds: totals.birds,
     totalBirdsDelivered: totals.birds,
@@ -749,6 +755,7 @@ async function loadTripExtras(client: Client, tripId: number, legId?: number | n
     rowIndex: num(r.row_index),
     litres: numOrNull(r.litres),
     rate: numOrNull(r.rate),
+    amount: numOrNull(r.amount) ?? Number((num(r.litres) * num(r.rate)).toFixed(2)),
     meter: numOrNull(r.meter),
     bunkName: r.bunk_name == null ? null : str(r.bunk_name),
     bunkSource: str(r.bunk_source) === "MASTER" ? "MASTER" : "OTHER",
@@ -1530,6 +1537,7 @@ function flattenDiesel(entries: DieselEntry[]): Record<string, unknown> {
     out[`dieselId${e.rowIndex}`] = e.id ?? null;
     out[`dieselLtr${e.rowIndex}`] = e.litres;
     out[`dieselRate${e.rowIndex}`] = e.rate;
+    out[`dieselAmount${e.rowIndex}`] = e.amount;
     out[`dieselMeter${e.rowIndex}`] = e.meter;
     out[`dieselBunk${e.rowIndex}`] = e.bunkName;
     out[`dieselBunkSource${e.rowIndex}`] = e.bunkSource ?? "OTHER";
@@ -1635,6 +1643,7 @@ function buildTripListWhere(filters: {
   supervisorId?: number;
   driverId?: number;
   farmId?: number;
+  shopId?: number;
   search?: string;
 }) {
   const clauses: string[] = [`deleted = FALSE`, `status = 'Completed'`];
@@ -1664,10 +1673,31 @@ function buildTripListWhere(filters: {
     params.push(filters.farmId);
     clauses.push(`source_farm_id = $${params.length}`);
   }
+  if (filters.shopId) {
+    params.push(filters.shopId);
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+          FROM trip_deliveries shop_delivery
+         WHERE shop_delivery.trip_id = trips.id
+           AND shop_delivery.shop_id = $${params.length}
+           AND COALESCE(shop_delivery.deleted, FALSE) = FALSE
+           AND (COALESCE(shop_delivery.birds, 0) > 0 OR COALESCE(shop_delivery.weight, 0) > 0)
+      )`
+    );
+  }
   if (filters.search) {
     params.push(`%${filters.search}%`);
     clauses.push(
-      `(trip_no ILIKE $${params.length} OR vehicle_no ILIKE $${params.length} OR driver_name ILIKE $${params.length} OR supervisor_name ILIKE $${params.length} OR source_farm ILIKE $${params.length})`
+      `(trip_no ILIKE $${params.length} OR vehicle_no ILIKE $${params.length} OR driver_name ILIKE $${params.length} OR supervisor_name ILIKE $${params.length} OR source_farm ILIKE $${params.length}
+        OR EXISTS (
+          SELECT 1
+            FROM trip_deliveries search_delivery
+           WHERE search_delivery.trip_id = trips.id
+             AND COALESCE(search_delivery.deleted, FALSE) = FALSE
+             AND (COALESCE(search_delivery.birds, 0) > 0 OR COALESCE(search_delivery.weight, 0) > 0)
+             AND (search_delivery.shop_name ILIKE $${params.length} OR COALESCE(search_delivery.sub_shop_name, '') ILIKE $${params.length})
+        ))`
     );
   }
 
@@ -1732,6 +1762,28 @@ function applyComputedFields(
  * and must be broken down (otherwise the per-load card hides served shops).
  */
 const recentLoadSummarySelect = `,
+  COALESCE((
+    SELECT jsonb_agg(shop_rows.shop_id ORDER BY shop_rows.shop_name, shop_rows.shop_id)
+      FROM (
+        SELECT DISTINCT delivery.shop_id, delivery.shop_name
+          FROM trip_deliveries delivery
+         WHERE delivery.trip_id = trips.id
+           AND COALESCE(delivery.deleted, FALSE) = FALSE
+           AND COALESCE(delivery.shop_id, 0) > 0
+           AND (COALESCE(delivery.birds, 0) > 0 OR COALESCE(delivery.weight, 0) > 0)
+      ) shop_rows
+  ), '[]'::jsonb) AS delivery_shop_ids,
+  COALESCE((
+    SELECT jsonb_agg(shop_rows.shop_name ORDER BY shop_rows.shop_name)
+      FROM (
+        SELECT DISTINCT delivery.shop_name
+          FROM trip_deliveries delivery
+         WHERE delivery.trip_id = trips.id
+           AND COALESCE(delivery.deleted, FALSE) = FALSE
+           AND COALESCE(delivery.shop_id, 0) > 0
+           AND (COALESCE(delivery.birds, 0) > 0 OR COALESCE(delivery.weight, 0) > 0)
+      ) shop_rows
+  ), '[]'::jsonb) AS delivery_shop_names,
   (SELECT COUNT(*) FROM trip_legs submitted
     WHERE submitted.trip_id = trips.id AND submitted.farm_step_submitted = TRUE) AS submitted_load_count,
   COALESCE((
@@ -1885,6 +1937,7 @@ export const tripsService = {
       supervisorId?: number;
       driverId?: number;
       farmId?: number;
+      shopId?: number;
       search?: string;
       pagination?: PaginationParams | null;
     } = {}
@@ -2876,9 +2929,16 @@ export const tripsService = {
 
       // Live deliveries for this load.
       const delRes = await client.query(
-        `SELECT id, client_key, shop_id, serial_no, box_no, birds, weight,
-                mortality, mort_kg, remarks, auto_capture_time
-           FROM trip_deliveries WHERE trip_id = $1 AND leg_id = $2`,
+        `SELECT d.id, d.client_key, d.shop_id, d.serial_no, d.box_no, d.birds, d.weight,
+                d.mortality, d.mort_kg, d.remarks, d.auto_capture_time, d.sub_shop_name,
+                COALESCE(
+                  (SELECT ARRAY_AGG(db.box_no ORDER BY db.box_no)
+                     FROM trip_delivery_boxes db
+                    WHERE db.delivery_id = d.id),
+                  ARRAY[]::INTEGER[]
+                ) AS selected_box_ids
+           FROM trip_deliveries d
+          WHERE trip_id = $1 AND leg_id = $2 AND COALESCE(deleted, FALSE) = FALSE`,
         [tripId, activeLeg.id]
       );
       const existingRows = delRes.rows.map((r) => ({
@@ -2893,6 +2953,10 @@ export const tripsService = {
         mortKg: num(r.mort_kg),
         remarks: str(r.remarks),
         autoCaptureTime: r.auto_capture_time == null ? null : str(r.auto_capture_time),
+        subShopName: str(r.sub_shop_name).trim().toLocaleUpperCase("en-IN"),
+        selectedBoxIds: Array.isArray(r.selected_box_ids)
+          ? r.selected_box_ids.map(Number).sort((a: number, b: number) => a - b)
+          : [],
       }));
 
       const findBy = (d: ShopDelivery) => {
@@ -2904,6 +2968,30 @@ export const tripsService = {
         if (d.id != null) {
           const byId = existingRows.find((r) => r.id === Number(d.id));
           if (byId) return byId;
+        }
+        // Legacy/reconstructed clients can lose both persisted identities.
+        // Recover only when the physical delivery identity is unambiguous:
+        // same shop, sub-shop, quantities, and exact selected pickup boxes.
+        // Birds/weight/shop alone are not identity; legitimate deliveries may
+        // share those values while using different boxes or sub-shops.
+        const shopId = d.shopId == null ? null : Number(d.shopId);
+        const birds = Number(d.birds ?? 0);
+        const weight = Number(Number(d.weight ?? 0).toFixed(3));
+        const subShopName = str(d.subShopName).trim().toLocaleUpperCase("en-IN");
+        const selectedBoxIds = Array.isArray(d.selectedBoxIds)
+          ? [...new Set(d.selectedBoxIds.map(Number))].sort((a, b) => a - b)
+          : [];
+        const boxIdentity = selectedBoxIds.join(",");
+        if (shopId != null && Number.isFinite(shopId) && selectedBoxIds.length > 0) {
+          const exact = existingRows.filter(
+            (r) =>
+              r.shopId === shopId &&
+              r.subShopName === subShopName &&
+              r.birds === birds &&
+              Number(r.weight.toFixed(3)) === weight &&
+              r.selectedBoxIds.join(",") === boxIdentity
+          );
+          if (exact.length === 1) return exact[0];
         }
         return null;
       };
@@ -3322,6 +3410,13 @@ export const tripsService = {
       if (!selectedVehicle.rowCount) throw new AppError(422, "Selected vehicle no longer exists.");
       body.isRentedVehicle = Boolean(selectedVehicle.rows[0].is_rented);
     }
+    if (body.isRentedVehicle) {
+      delete body.openingMeter;
+      delete body.destMeter;
+      delete body.closingMeter;
+      delete body.endMeter;
+      delete body.dieselEntries;
+    }
     if (!isSaveMode) validateStepSubmit(step, body);
 
     // Ensure Load 1 exists for legacy trips created before multi-load.
@@ -3429,39 +3524,41 @@ export const tripsService = {
       if (body.farmAddress != null) {
         body.farmAddress = str(body.farmAddress).trim();
       }
-      const farmMeter = numOrNull(body.destMeter);
-      if (farmMeter == null || farmMeter <= 0) {
-        throw new AppError(422, "Farm meter is required for Step 2 submission.");
-      }
-      const floorInfo = await withTransaction(async (client) =>
-        farmMeterFloor(client, id, legIndex, numOrNull(current.opening_meter))
-      );
-      if (floorInfo.floor > 0 && farmMeter <= floorInfo.floor) {
-        throw new AppError(
-          422,
-          `Farm meter (${farmMeter} KM) must be strictly greater than the ${floorInfo.label} (${floorInfo.floor} KM).`
+      if (!body.isRentedVehicle) {
+        const farmMeter = numOrNull(body.destMeter);
+        if (farmMeter == null || farmMeter <= 0) {
+          throw new AppError(422, "Farm meter is required for Step 2 submission.");
+        }
+        const floorInfo = await withTransaction(async (client) =>
+          farmMeterFloor(client, id, legIndex, numOrNull(current.opening_meter))
         );
-      }
-      const nextReading = await withTransaction(async (client) => {
-        const result = await client.query<{ meter: string | null }>(
-          `WITH later_readings AS (
-             SELECT dest_meter AS meter
-               FROM trip_legs
-              WHERE trip_id = $1 AND leg_index > $2 AND dest_meter IS NOT NULL
-             UNION ALL
-             SELECT closing_meter FROM trips
-              WHERE id = $1 AND closing_meter IS NOT NULL
-                AND expenses_step_submitted = TRUE
-           ) SELECT MIN(meter) AS meter FROM later_readings`,
-          [id, legIndex]
-        );
-        return num(result.rows[0]?.meter);
-      });
-      if (nextReading > 0 && farmMeter >= nextReading) {
-        throw new AppError(
-          422,
-          `Farm meter (${farmMeter} KM) must be less than the next entered meter (${nextReading} KM).`
-        );
+        if (floorInfo.floor > 0 && farmMeter <= floorInfo.floor) {
+          throw new AppError(
+            422,
+            `Farm meter (${farmMeter} KM) must be strictly greater than the ${floorInfo.label} (${floorInfo.floor} KM).`
+          );
+        }
+        const nextReading = await withTransaction(async (client) => {
+          const result = await client.query<{ meter: string | null }>(
+            `WITH later_readings AS (
+               SELECT dest_meter AS meter
+                 FROM trip_legs
+                WHERE trip_id = $1 AND leg_index > $2 AND dest_meter IS NOT NULL
+               UNION ALL
+               SELECT closing_meter FROM trips
+                WHERE id = $1 AND closing_meter IS NOT NULL
+                  AND expenses_step_submitted = TRUE
+             ) SELECT MIN(meter) AS meter FROM later_readings`,
+            [id, legIndex]
+          );
+          return num(result.rows[0]?.meter);
+        });
+        if (nextReading > 0 && farmMeter >= nextReading) {
+          throw new AppError(
+            422,
+            `Farm meter (${farmMeter} KM) must be less than the next entered meter (${nextReading} KM).`
+          );
+        }
       }
     }
 
@@ -3527,7 +3624,7 @@ export const tripsService = {
       }
       const closing =
         numOrNull(body.closingMeter) ?? numOrNull(body.endMeter) ?? numOrNull(current.closing_meter);
-      if (closing != null) {
+      if (!body.isRentedVehicle && closing != null) {
         const maxDest = Math.max(0, ...legRows.map((l) => l.destMeter ?? 0));
         const dieselMax = await withTransaction(async (client) => maxDieselMeter(client, id));
         const opening = numOrNull(current.opening_meter) ?? 0;
@@ -3929,10 +4026,11 @@ export const tripsService = {
       if (Boolean(existing.rows[0].is_rented_vehicle)) throw new AppError(422, "Diesel entries are not available for rented vehicles.");
 
       const litres = numOrNull(body.litres);
-      const rate = numOrNull(body.rate);
+      const amount = numOrNull(body.amount);
       const meter = numOrNull(body.meter);
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
-      if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
+      if (!(amount != null && amount > 0)) throw new AppError(422, "Diesel amount must be greater than zero");
+      const rate = Number((amount / litres).toFixed(2));
       if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
       const imageData = body.imageData != null ? str(body.imageData) : "";
       if (!imageData || imageData.length < 40) {
@@ -4039,13 +4137,14 @@ export const tripsService = {
 
       await client.query(
         `INSERT INTO trip_diesel_entries (
-           trip_id, row_index, litres, rate, meter, bunk_name, bunk_source, fuel_bunk_id,
+           trip_id, row_index, litres, rate, amount, meter, bunk_name, bunk_source, fuel_bunk_id,
            bunk_gps, image_data, image_name, client_key, gps_lat, gps_lon, gps_accuracy,
            gps_captured_at, submitted_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,NOW())
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
          ON CONFLICT (trip_id, row_index) DO UPDATE SET
            litres = EXCLUDED.litres,
            rate = EXCLUDED.rate,
+           amount = EXCLUDED.amount,
            meter = EXCLUDED.meter,
            bunk_name = EXCLUDED.bunk_name,
            bunk_source = EXCLUDED.bunk_source,
@@ -4064,6 +4163,7 @@ export const tripsService = {
           rowIndex,
           litres,
           rate,
+          amount,
           meter,
           bunkName,
           bunkSource,
@@ -4110,10 +4210,11 @@ export const tripsService = {
       if (Boolean(existing.rows[0].is_rented_vehicle)) throw new AppError(422, "Diesel entries are not available for rented vehicles.");
 
       const litres = numOrNull(body.litres);
-      const rate = numOrNull(body.rate);
+      const amount = numOrNull(body.amount);
       const meter = numOrNull(body.meter);
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
-      if (!(rate != null && rate > 0)) throw new AppError(422, "Diesel rate must be greater than zero");
+      if (!(amount != null && amount > 0)) throw new AppError(422, "Diesel amount must be greater than zero");
+      const rate = Number((amount / litres).toFixed(2));
       if (!(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
       const rowIndex = num(existing.rows[0].row_index);
       const neighbors = await client.query<{ meter: string; row_index: number }>(
@@ -4202,18 +4303,19 @@ export const tripsService = {
         `UPDATE trip_diesel_entries SET
            litres = $3,
            rate = $4,
-           meter = $5,
-           bunk_name = $6,
-           bunk_source = $7,
-           fuel_bunk_id = $8,
-           bunk_gps = $9,
-           image_data = $10,
-           image_name = $11,
-           client_key = COALESCE($12, client_key),
-           gps_lat = $13,
-           gps_lon = $14,
-           gps_accuracy = $15,
-           gps_captured_at = $16,
+           amount = $5,
+           meter = $6,
+           bunk_name = $7,
+           bunk_source = $8,
+           fuel_bunk_id = $9,
+           bunk_gps = $10,
+           image_data = $11,
+           image_name = $12,
+           client_key = COALESCE($13, client_key),
+           gps_lat = $14,
+           gps_lon = $15,
+           gps_accuracy = $16,
+           gps_captured_at = $17,
            submitted_at = NOW()
          WHERE id = $1 AND trip_id = $2`,
         [
@@ -4221,6 +4323,7 @@ export const tripsService = {
           tripId,
           litres,
           rate,
+          amount,
           meter,
           bunkName,
           bunkSource,

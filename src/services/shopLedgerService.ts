@@ -79,6 +79,7 @@ export interface ShopLedgerResponse {
 export interface ShopLedgerCumulativeQuantity {
   shopId: number;
   shopName: string;
+  subShopName: string;
   birds: number;
   weight: number;
   mortalityBirds: number;
@@ -414,6 +415,7 @@ export const shopLedgerService = {
       `WITH delivery_by_load_shop AS (
          SELECT t.id AS trip_id, COALESCE(d.leg_id, 0) AS load_key,
                 d.shop_id, MAX(d.shop_name) AS shop_name,
+                COALESCE(NULLIF(BTRIM(d.sub_shop_name), ''), '') AS sub_shop_name,
                 SUM(d.birds)::numeric AS raw_birds,
                 SUM(d.weight)::numeric AS raw_weight,
                 SUM(d.mortality)::numeric AS mortality_birds,
@@ -428,7 +430,8 @@ export const shopLedgerService = {
             AND (d.leg_id IS NULL OR tl.pickup_step_submitted = TRUE)
             AND ($1::date IS NULL OR t.trip_date >= $1::date)
             AND ($2::date IS NULL OR t.trip_date <= $2::date)
-          GROUP BY t.id, COALESCE(d.leg_id, 0), d.shop_id
+          GROUP BY t.id, COALESCE(d.leg_id, 0), d.shop_id,
+                   COALESCE(NULLIF(BTRIM(d.sub_shop_name), ''), '')
        ), load_totals AS (
          SELECT trip_id, load_key,
                 SUM(raw_birds) AS raw_birds,
@@ -452,16 +455,19 @@ export const shopLedgerService = {
            FROM delivery_by_load_shop d
            JOIN load_totals t USING (trip_id, load_key)
        )
-       SELECT shop_id, MAX(shop_name) AS shop_name,
+       SELECT shop_id, MAX(shop_name) AS shop_name, sub_shop_name,
               SUM(birds)::float AS birds, SUM(weight)::float AS weight,
               SUM(mortality_birds)::float AS mortality_birds,
               SUM(mortality_weight)::float AS mortality_weight,
               SUM(weight_loss)::float AS weight_loss
-         FROM normalized GROUP BY shop_id ORDER BY MAX(shop_name), shop_id`,
+         FROM normalized
+        GROUP BY shop_id, sub_shop_name
+        ORDER BY MAX(shop_name), sub_shop_name, shop_id`,
       [filters.fromDate ?? null, filters.toDate ?? null],
     );
     const rows = result.rows.map((row) => ({
       shopId: num(row.shop_id), shopName: str(row.shop_name),
+      subShopName: str(row.sub_shop_name),
       birds: num(row.birds), weight: num(row.weight),
       mortalityBirds: Math.round(num(row.mortality_birds)), mortalityWeight: num(row.mortality_weight),
       weightLoss: num(row.weight_loss),

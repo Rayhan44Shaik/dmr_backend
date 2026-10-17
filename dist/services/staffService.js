@@ -506,10 +506,13 @@ export const staffService = {
     /** Look up the DB employee (validates employeeId) and resolve the default
      *  basicSalary from the Employee Master when the client did not supply one. */
     async resolveEmployeeBase(employeeId) {
-        const result = await query("SELECT id, employee_name, department, salary FROM employees WHERE id = $1", [employeeId]);
+        const result = await query("SELECT id, employee_name, department, salary, is_dummy FROM employees WHERE id = $1", [employeeId]);
         if (!result.rowCount)
             throw new AppError(404, "Employee not found");
         const row = result.rows[0];
+        if (Boolean(row.is_dummy)) {
+            throw new AppError(422, "Dummy trip profiles are excluded from payroll");
+        }
         return {
             name: str(row.employee_name),
             department: str(row.department),
@@ -931,7 +934,7 @@ export const staffService = {
         if (await salaryMonthIsClosed(month)) {
             throw new AppError(409, "This payroll month is closed — salary regeneration is not allowed");
         }
-        const empClauses = ["status IN ('Active','Inactive','Suspended')"];
+        const empClauses = ["status IN ('Active','Inactive','Suspended')", "COALESCE(is_dummy, FALSE) = FALSE"];
         const empParams = [];
         if (department) {
             empParams.push(department);

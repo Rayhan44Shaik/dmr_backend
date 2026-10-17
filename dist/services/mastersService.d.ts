@@ -3,6 +3,10 @@ export declare function mapEmployee(row: Record<string, unknown>): Employee;
 export declare function mapVehicle(row: Record<string, unknown>): Vehicle;
 export declare function mapFarm(row: Record<string, unknown>): Farm;
 export declare function mapShop(row: Record<string, unknown>): Shop;
+/** Keep readable name snapshots synchronized by immutable shop identity. */
+export declare function propagateShopName(client: {
+    query: (text: string, values?: unknown[]) => Promise<unknown>;
+}, shopId: number, shopName: string): Promise<void>;
 export declare function mapBank(row: Record<string, unknown>): Bank;
 export declare function mapBirdType(row: Record<string, unknown>): BirdType;
 export declare const mastersService: {
@@ -54,6 +58,15 @@ export declare const mastersService: {
     bulkCreateShops(inputs: (Partial<Shop> & {
         shopName: string;
     })[]): Promise<Shop[]>;
+    /** Update opening balances for existing shops only, atomically. Existing
+     * ledger movement is preserved by applying only the opening-balance delta
+     * to current_balance. No shop or unrelated master field can be created or
+     * changed through this endpoint. */
+    bulkUpdateShopOpeningBalances(inputs: Array<{
+        shopNumber?: string;
+        shopName?: string;
+        openingBalance: number;
+    }>): Promise<Shop[]>;
     /**
      * Bulk create farms — validates the whole batch first, then inserts all
      * rows in one transaction. Any failure rolls back the entire batch.

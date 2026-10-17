@@ -82,6 +82,9 @@ mastersRouter.patch("/farms/:id/status", asyncHandler(async (req, res) => {
 mastersRouter.post("/shops/bulk", asyncHandler(async (req, res) => {
     res.status(201).json(await mastersBulkService.importShops(req.body));
 }));
+mastersRouter.post("/shops/opening-balances/bulk", asyncHandler(async (req, res) => {
+    res.json({ updated: await mastersService.bulkUpdateShopOpeningBalances(req.body) });
+}));
 mastersRouter.post("/shops", asyncHandler(async (req, res) => {
     res.status(201).json(await mastersService.upsertShop(parseMaster(shopSchema, req.body)));
 }));

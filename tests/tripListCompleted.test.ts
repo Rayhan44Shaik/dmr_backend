@@ -245,6 +245,25 @@ describe("Trip List completed data", () => {
     assert.equal(row.totalShops, 1);
     assert.equal(row.totalBirds, 40);
     assert.equal(row.totalWeight, 80);
+    assert.deepEqual(row.deliveryShopIds, [m.shopA.id]);
+    assert.deepEqual(row.deliveryShopNames, [m.shopA.shopName]);
+
+    const byShop = await getJson(baseUrl, `/api/operations/trip-list?shopId=${m.shopA.id}`);
+    assert.equal(byShop.status, 200);
+    assert.ok((byShop.body.data ?? byShop.body).some((t: { id: number }) => t.id === trip.id));
+    assert.ok(
+      (byShop.body.data ?? byShop.body).every((t: { deliveryShopIds: number[] }) =>
+        t.deliveryShopIds.includes(m.shopA.id)
+      ),
+      "shop filter returns only trips containing that shop"
+    );
+
+    const byShopName = await getJson(
+      baseUrl,
+      `/api/operations/trip-list?search=${encodeURIComponent(m.shopA.shopName)}`
+    );
+    assert.equal(byShopName.status, 200);
+    assert.ok((byShopName.body.data ?? byShopName.body).some((t: { id: number }) => t.id === trip.id));
   });
 
   it("3. filters, pagination, soft-delete and authorization", async () => {

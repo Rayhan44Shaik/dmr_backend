@@ -65,6 +65,7 @@ export interface ShopSale {
   tripId: number | null;
   tripNo: string;
   vehicleNo: string | null;
+  isRentedVehicle: boolean;
   farmName: string | null;
   birds: number;
   weight: number;
@@ -248,6 +249,7 @@ export interface RateEntryTrip {
   tripDate: string;
   status: TripStatus;
   vehicleNo: string | null;
+  isRentedVehicle: boolean;
   driverName: string | null;
   supervisorName: string | null;
   sourceFarm: string | null;
@@ -260,5 +262,10 @@ export interface RateEntryTrip {
   ratesEntered: number;
   deliveriesCount: number;
   totalAmount: number;
+    /** Per-load saved amounts for compact multi-load display in the queue. */
+    loadAmounts: Array<{
+      load: number;
+      amount: number;
+    }>;
   deliveries: RateEntryDelivery[];
 }

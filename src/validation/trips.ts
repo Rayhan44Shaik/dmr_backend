@@ -98,6 +98,7 @@ const dieselEntrySchema = z.object({
   rowIndex: z.coerce.number().int().nonnegative(),
   litres: z.coerce.number().nonnegative().nullable().optional(),
   rate: z.coerce.number().nonnegative().nullable().optional(),
+  amount: z.coerce.number().nonnegative().nullable().optional(),
   meter: z.coerce.number().nonnegative().nullable().optional(),
   bunkName: z.string().nullable().optional(),
   bunkSource: z.enum(["MASTER", "OTHER"]).optional(),

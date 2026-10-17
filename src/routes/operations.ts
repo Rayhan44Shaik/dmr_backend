@@ -230,6 +230,7 @@ operationsRouter.get(
           : undefined,
         driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
         farmId: req.query.farmId ? Number(req.query.farmId) : undefined,
+        shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
         pagination: pagination ?? { page: 1, limit: 50, offset: 0 },
       })

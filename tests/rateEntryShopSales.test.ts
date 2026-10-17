@@ -233,6 +233,8 @@ describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
       ],
     });
     assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.equal(saved.body.totalAmount, 94500);
+    assert.deepEqual(saved.body.loadAmounts, [{ load: 1, amount: 94500 }]);
 
     const shopSalesStillBeforeLock = await getJson(baseUrl, "/api/operations/shop-sales");
     assert.ok(

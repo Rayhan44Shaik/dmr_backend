@@ -1,6 +1,7 @@
 import type { BoxDetail, DieselEntry, ShopDelivery, Trip, TripStatus, TripStepStatuses, TripSummary } from "../types/models.js";
 import { type PaginationParams, type PaginatedResult } from "../utils/pagination.js";
 import { type TripWizardStep } from "../utils/tripResume.js";
+export declare function scopeTripStepBody(step: TripWizardStep, body: Partial<Trip> & Record<string, unknown>): Partial<Trip> & Record<string, unknown>;
 export declare const tripsService: {
     /**
      * Preview the next trip number for a selected business date.
@@ -35,6 +36,7 @@ export declare const tripsService: {
         supervisorId?: number;
         driverId?: number;
         farmId?: number;
+        shopId?: number;
         search?: string;
         pagination?: PaginationParams | null;
     }): Promise<TripSummary[] | PaginatedResult<TripSummary>>;
@@ -57,6 +59,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -169,6 +172,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     getById(id: number, viewLegIndex?: number): Promise<{
         resumeStep: TripWizardStep | null;
@@ -185,6 +193,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -296,6 +305,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     createDraft(body?: Partial<Trip>): Promise<{
         resumeStep: TripWizardStep;
@@ -312,6 +326,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -423,6 +438,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     /** Autosave engine â€” partial upsert with optimistic locking */
     save(id: number | null, body: Partial<Trip> & Record<string, unknown>): Promise<{
@@ -440,6 +460,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -551,6 +572,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     /**
      * Step 4 per-shop persistence (PUT /trips/:id/deliveries).
@@ -593,6 +619,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -704,6 +731,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     submitStep(id: number, step: TripWizardStep, body: Partial<Trip> & Record<string, unknown>): Promise<{
         resumeStep: TripWizardStep | null;
@@ -720,6 +752,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -831,8 +864,13 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
-    /** Add Load 2–4 on the same Draft trip (max 4). */
+    /** Add Load 2–4 on the same Draft or Pending trip (max 4). */
     addLeg(id: number): Promise<{
         activeLegIndex: number;
         id: number;
@@ -844,6 +882,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -956,6 +995,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     /** Remove only the last, completely unsubmitted load opened by mistake. */
     removeEmptyLeg(id: number, legIndex: number): Promise<{
@@ -969,6 +1013,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -1081,6 +1126,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     softDelete(id: number, reason?: string): Promise<{
         id: number;
@@ -1103,6 +1153,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -1215,6 +1266,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     /** Backs GET /trips/vehicle/:vehicleId/last-meter â€” the Trip Step 1 opening
      * meter hint. Upgraded to the universal cross-module latest (trips + fuel +
@@ -1238,6 +1294,7 @@ export declare const tripsService: {
             id: number;
             vehicleNumber: string;
             noOfBoxes: number;
+            isRented: boolean;
         }[];
         drivers: {
             id: number;
@@ -1278,6 +1335,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -1389,6 +1447,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     updateDieselEntry(tripId: number, entryId: number, body: Record<string, unknown>): Promise<{
         dieselEntries: DieselEntry[];
@@ -1402,6 +1465,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -1513,6 +1577,11 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
     deleteDieselEntry(tripId: number, entryId: number): Promise<{
         id: number;
@@ -1525,6 +1594,7 @@ export declare const tripsService: {
         startTime: string | null;
         vehicleId: number | null;
         vehicleNo: string | null;
+        isRentedVehicle?: boolean;
         vehicleBoxCapacity?: number | null;
         driverId: number | null;
         driverName: string | null;
@@ -1637,5 +1707,10 @@ export declare const tripsService: {
         dcPhotoMime?: string | null;
         dcPhotoMime2?: string | null;
         dcPhotoData2?: string | null;
+        pickupPhotos?: Array<{
+            key: string;
+            mime: string;
+            data: string;
+        }>;
     }>;
 };

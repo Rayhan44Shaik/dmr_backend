@@ -97,6 +97,7 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
     tripId: row.trip_id == null ? null : num(row.trip_id),
     tripNo: str(row.trip_no),
     vehicleNo: row.vehicle_no == null ? null : str(row.vehicle_no),
+    isRentedVehicle: Boolean(row.is_rented_vehicle),
     farmName: row.source_farm == null ? null : str(row.source_farm),
     birds: num(row.birds),
     weight,
@@ -125,7 +126,7 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
 const SALE_SELECT = `
   SELECT d.*,
          t.trip_no, t.trip_date, t.status AS trip_status, t.deleted AS trip_deleted,
-         t.deleted_reason, t.approved_by, t.approved_at, t.vehicle_no, t.source_farm,
+         t.deleted_reason, t.approved_by, t.approved_at, t.vehicle_no, t.is_rented_vehicle, t.source_farm,
          t.rate_completed, t.rate_locked_at, t.rate_locked_by,
          re.rate AS re_rate
   FROM trip_deliveries d

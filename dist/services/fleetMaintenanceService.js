@@ -375,7 +375,7 @@ export const fleetMaintenanceService = {
                     str(data.mechanic).trim(),
                     totalCost,
                     JSON.stringify(parts),
-                    data.remarks ?? null,
+                    data.remarks?.trim() || null,
                     data.createdBy ?? "",
                     data.idempotencyKey ?? null,
                 ]);
@@ -450,6 +450,8 @@ export const fleetMaintenanceService = {
                 const totalCost = parts != null ? computeTotalCost(parts) : null;
                 const maintenanceType = data.maintenanceType != null ? normalizeMaintenanceType(data.maintenanceType) : null;
                 const { vehicleNo, driverName } = await resolveSnapshots(client, data);
+                const hasRemarks = Object.prototype.hasOwnProperty.call(data, "remarks");
+                const normalizedRemarks = data.remarks?.trim() || null;
                 const result = await client.query(`UPDATE fleet_maintenance SET
              maintenance_date = COALESCE($2, maintenance_date),
              vehicle_id = COALESCE($3, vehicle_id),
@@ -464,7 +466,7 @@ export const fleetMaintenanceService = {
              mechanic = COALESCE($12, mechanic),
              total_cost = COALESCE($13, total_cost),
              parts = COALESCE($14, parts),
-             remarks = COALESCE($15, remarks)
+             remarks = CASE WHEN $15::boolean THEN $16 ELSE remarks END
            WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE
            RETURNING id`, [
                     id,
@@ -481,7 +483,8 @@ export const fleetMaintenanceService = {
                     data.mechanic ?? null,
                     totalCost,
                     parts != null ? JSON.stringify(parts) : null,
-                    data.remarks ?? null,
+                    hasRemarks,
+                    normalizedRemarks,
                 ]);
                 if (!result.rowCount)
                     throw new AppError(404, "Maintenance record not found");

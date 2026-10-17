@@ -50,5 +50,10 @@ export declare function loadDcPhoto(client: Client, tripId: number, dcPhotoKey: 
     dcPhotoKey2: string | null;
     dcPhotoMime2: string | null;
     dcPhotoData2: string | null;
+    pickupPhotos: Array<{
+        key: string;
+        mime: string;
+        data: string;
+    }>;
 }>;
 export {};

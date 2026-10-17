@@ -20,6 +20,13 @@ async function applyAuthoritativeRentalStatus(body: Record<string, unknown> | un
   const vehicle = await query(`SELECT is_rented FROM vehicles WHERE id=$1 AND status='Active'`, [vehicleId]);
   if (!vehicle.rowCount) throw new AppError(422, "Selected vehicle no longer exists.");
   body.isRentedVehicle = Boolean(vehicle.rows[0].is_rented);
+  if (body.isRentedVehicle) {
+    delete body.openingMeter;
+    delete body.destMeter;
+    delete body.closingMeter;
+    delete body.endMeter;
+    delete body.dieselEntries;
+  }
 }
 
 function positiveId(value: string, label = "Trip id"): number {
