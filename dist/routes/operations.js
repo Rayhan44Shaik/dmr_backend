@@ -312,7 +312,7 @@ operationsRouter.get("/mortality-analysis/:tripId/deliveries", asyncHandler(asyn
     res.json(await mortalityAnalysisService.deliveries(Number(req.params.tripId)));
 }));
 operationsRouter.get("/collection-entry/week-bounds", asyncHandler(async (req, res) => {
-    res.json(await collectionEntryService.weekBounds(typeof req.query.date === "string" ? req.query.date : undefined));
+    res.json(await collectionEntryService.weekBounds(typeof req.query.date === "string" ? req.query.date : undefined, req.query.period === "previous-completed"));
 }));
 operationsRouter.get("/collection-entry/pending-summary", asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.pendingSummary(typeof req.query.date === "string" ? req.query.date : undefined));

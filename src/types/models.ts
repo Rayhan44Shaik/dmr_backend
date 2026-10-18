@@ -332,6 +332,7 @@ export interface Trip {
   loading?: number;
   mealsTiffin?: number;
   vehicleMaintenance?: number;
+  vehicleMaintenanceNote?: string;
   othersRC?: number;
   others1Amt?: number;
   others2Amt?: number;

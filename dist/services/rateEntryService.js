@@ -149,6 +149,11 @@ async function loadDeliveries(client, tripId) {
     return result.rows.map((r) => {
         const key = marketKey(numOrNull(r.shop_id), numOrNull(r.bird_type_id));
         const rate = numOrNull(r.rate);
+        const weight = num(r.weight);
+        // `amount` can be stale on historical rows when delivery weight changed
+        // after a draft rate was saved. Rate Entry has one canonical formula:
+        // current delivery weight × current rate, rounded to paise.
+        const amount = rate == null ? 0 : Number((weight * rate).toFixed(2));
         return {
             id: num(r.id),
             serialNo: numOrNull(r.serial_no),
@@ -160,11 +165,11 @@ async function loadDeliveries(client, tripId) {
             birdTypeId: numOrNull(r.bird_type_id),
             birdType: str(r.bird_type),
             birds: num(r.birds),
-            weight: num(r.weight),
+            weight,
             mortality: num(r.mortality),
             mortKg: numOrNull(r.mort_kg),
             rate,
-            amount: num(r.amount),
+            amount,
             remarks: str(r.remarks),
             deliveryMode: str(r.delivery_mode) || "box",
             autoCaptureTime: r.auto_capture_time == null

@@ -62,13 +62,13 @@ function mapEntry(row: Record<string, unknown>): CollectionEntry {
   };
 }
 
-function collectionWeekBounds(input?: string) {
+export function collectionWeekBounds(input?: string, weekOffset = 0) {
   const parsed = input && /^\d{4}-\d{2}-\d{2}$/.test(input) ? new Date(`${input}T00:00:00Z`) : new Date();
   if (Number.isNaN(parsed.getTime())) throw new AppError(400, "Invalid date");
   const day = parsed.getUTCDay();
   const mondayOffset = day === 0 ? -6 : 1 - day;
   const start = new Date(parsed);
-  start.setUTCDate(start.getUTCDate() + mondayOffset);
+  start.setUTCDate(start.getUTCDate() + mondayOffset + weekOffset * 7);
   const end = new Date(start);
   end.setUTCDate(end.getUTCDate() + 6);
   const iso = (value: Date) => value.toISOString().slice(0, 10);
@@ -178,11 +178,14 @@ export const collectionEntryService = {
   },
 
   async weeklySummaries(date?: string, shopId?: number) {
-    const bounds = collectionWeekBounds(date);
+    // Collection Entry reconciles against the last fully completed business
+    // week. Example: an entry dated Mon 05-Oct reads Mon 28-Sep–Sun 04-Oct.
+    const bounds = collectionWeekBounds(date, -1);
+    const collectionBounds = collectionWeekBounds(date);
     const result = await query(
       `SELECT s.id AS shop_id, s.shop_name,
               COALESCE(s.current_balance, 0) AS balance,
-              COALESCE(s.current_balance, 0) - COALESCE(from_week.net, 0) AS opening_balance,
+              COALESCE(s.current_balance, 0) - COALESCE(sales.amount, 0) + COALESCE(approved.amount, 0) AS opening_balance,
               COALESCE(sales.amount, 0) AS weekly_sales,
               COALESCE(sales.row_count, 0) AS sales_count,
               COALESCE(approved.amount, 0) AS approved_collections,
@@ -190,11 +193,6 @@ export const collectionEntryService = {
               COALESCE(pending.amount, 0) AS pending_collections,
               COALESCE(pending.row_count, 0) AS pending_collections_count
          FROM shops s
-         LEFT JOIN LATERAL (
-           SELECT SUM(l.debit) - SUM(l.credit) AS net
-             FROM shop_ledger l
-            WHERE l.shop_id = s.id AND l.entry_date >= $1::date
-         ) from_week ON TRUE
          LEFT JOIN LATERAL (
            SELECT SUM(COALESCE(d.amount, 0)) AS amount, COUNT(*)::int AS row_count
              FROM trip_deliveries d
@@ -211,7 +209,7 @@ export const collectionEntryService = {
              FROM collections c
             WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
               AND COALESCE(c.is_financial, FALSE) = TRUE
-              AND c.collection_date BETWEEN $1::date AND $2::date
+              AND c.collection_date BETWEEN $3::date AND $4::date
          ) approved ON TRUE
          LEFT JOIN LATERAL (
            SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount,
@@ -220,12 +218,12 @@ export const collectionEntryService = {
             WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
               AND COALESCE(c.is_financial, FALSE) = FALSE
               AND c.status = 'Pending Approval'
-              AND c.collection_date BETWEEN $1::date AND $2::date
+              AND c.collection_date BETWEEN $3::date AND $4::date
          ) pending ON TRUE
-        WHERE ($3::int IS NULL OR s.id = $3)
-          AND ($3::int IS NOT NULL OR s.status = 'Active')
+        WHERE ($5::int IS NULL OR s.id = $5)
+          AND ($5::int IS NOT NULL OR s.status = 'Active')
         ORDER BY s.shop_name`,
-      [bounds.weekStart, bounds.weekEnd, shopId ?? null]
+      [bounds.weekStart, bounds.weekEnd, collectionBounds.weekStart, collectionBounds.weekEnd, shopId ?? null]
     );
     const previousWeekEnd = new Date(`${bounds.weekStart}T00:00:00Z`);
     previousWeekEnd.setUTCDate(previousWeekEnd.getUTCDate() - 1);
@@ -238,6 +236,8 @@ export const collectionEntryService = {
         shopName: str(row.shop_name),
         weekStart: bounds.weekStart,
         weekEnd: bounds.weekEnd,
+        collectionWeekStart: collectionBounds.weekStart,
+        collectionWeekEnd: collectionBounds.weekEnd,
         previousWeekEnd: previousWeekEnd.toISOString().slice(0, 10),
         openingBalance,
         balance: num(row.balance),
@@ -345,8 +345,8 @@ export const collectionEntryService = {
     };
   },
 
-  async weekBounds(date?: string) {
-    return collectionWeekBounds(date);
+  async weekBounds(date?: string, previousCompleted = false) {
+    return collectionWeekBounds(date, previousCompleted ? -1 : 0);
   },
 
   async pendingSummary(date?: string) {

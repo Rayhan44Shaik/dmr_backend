@@ -304,7 +304,8 @@ describe("trip multi-load (same Draft trip)", () => {
     const load2View = await tripsService.getById(trip.id, 2);
     assert.equal(load1View.dcPhotoKey, "dc-1");
     assert.equal(load2View.dcPhotoKey, "dc-recent-2");
-    assert.equal(load2View.deliveries[0]?.subShopName, "Counter B");
+    // Product canonical rule: sub-shop names are normalized with toLocaleUpperCase("en-IN") on persist/hydrate.
+    assert.equal(load2View.deliveries[0]?.subShopName, "COUNTER B");
     assert.notEqual(load1View.dcPhotoData, load2View.dcPhotoData, "each load must hydrate its own submitted image");
   });
 
@@ -328,7 +329,9 @@ describe("trip multi-load (same Draft trip)", () => {
     assert.equal(done.status, "Pending");
   });
 
-  it("rejects load-2 farm meter ≤ diesel meter; accepts higher; expenses need all loads", async () => {
+  it("allows load-2 farm meter interleaved with diesel meters; expenses need all loads", async () => {
+    // Product policy (farmMeterFloor): diesel meters are deliberately NOT a
+    // lower/upper bound for farm dest meters — only prior load dest / opening.
     const { trip, m } = await startTrip(2000);
     await runLoad(trip.id, 1, {
       destMeter: 2050,
@@ -342,7 +345,7 @@ describe("trip multi-load (same Draft trip)", () => {
 
     await tripsService.upsertDieselEntry(trip.id, {
       litres: 15,
-      rate: 95,
+      amount: 1425,
       meter: 2080,
       bunkName: "Bunk",
       gpsLat: 12.98,
@@ -355,7 +358,7 @@ describe("trip multi-load (same Draft trip)", () => {
     });
     await tripsService.upsertDieselEntry(trip.id, {
       litres: 10,
-      rate: 96,
+      amount: 960,
       meter: 2090,
       bunkName: "Bunk",
       gpsLat: 12.98,
@@ -378,13 +381,14 @@ describe("trip multi-load (same Draft trip)", () => {
     const added = await tripsService.addLeg(trip.id);
     assert.equal(added.legCount, 2);
 
+    // Still rejects farm meter ≤ previous load destination (true floor).
     await assert.rejects(
       () =>
         tripsService.submitStep(trip.id, "farm", {
           legIndex: 2,
           sourceFarmId: m.farm2.id,
           sourceFarm: m.farm2.farmName,
-          destMeter: 2080,
+          destMeter: 2050,
           pickupTolls: 0,
           avgBirdWeight: 2.5,
           farmBirdTypeId: m.birdType.id,
@@ -398,8 +402,9 @@ describe("trip multi-load (same Draft trip)", () => {
       (err: unknown) => err instanceof AppError && err.status === 422
     );
 
+    // 2080 sits at/under diesel meters 2080/2090 — must still be accepted.
     await runLoad(trip.id, 2, {
-      destMeter: 2095,
+      destMeter: 2080,
       farmId: m.farm2.id,
       farmName: m.farm2.farmName,
       birdTypeId: m.birdType.id,

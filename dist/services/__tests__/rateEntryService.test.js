@@ -127,6 +127,31 @@ describe("rateEntryService", () => {
             await cleanup(f);
         }
     });
+    test("outside list and modal detail derive the same total when a stored amount is stale", async () => {
+        const f = newFixture();
+        try {
+            const shop = await makeShop(f, "Canonical Total Shop");
+            const tripId = await makeTrip(f, { tripNo: `RT-${uniqueInt()}`, status: "Completed" });
+            const deliveryId = await addDelivery(tripId, {
+                shopId: shop.id,
+                shopName: "Canonical Total Shop",
+                birds: 1,
+                weight: 2.24,
+            });
+            await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 138 }] });
+            // Simulate a legacy/stale persisted amount. Both endpoints must ignore it
+            // and use the current weight × rate formula.
+            await pool.query(`UPDATE trip_deliveries SET amount = 400 WHERE id = $1`, [deliveryId]);
+            const listRow = asArray(await rateEntryService.list()).find((row) => row.id === tripId);
+            const detail = await rateEntryService.getById(tripId);
+            assert.equal(listRow?.totalAmount, 309.12);
+            assert.equal(detail.totalAmount, 309.12);
+            assert.equal(detail.deliveries[0]?.amount, 309.12);
+        }
+        finally {
+            await cleanup(f);
+        }
+    });
     test("8 & 9. Locking valid rates succeeds, and the trip disappears from Rate Entry", async () => {
         const f = newFixture();
         try {

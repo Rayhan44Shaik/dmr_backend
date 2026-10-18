@@ -552,7 +552,10 @@ operationsRouter.get(
 operationsRouter.get(
   "/collection-entry/week-bounds",
   asyncHandler(async (req, res) => {
-    res.json(await collectionEntryService.weekBounds(typeof req.query.date === "string" ? req.query.date : undefined));
+    res.json(await collectionEntryService.weekBounds(
+      typeof req.query.date === "string" ? req.query.date : undefined,
+      req.query.period === "previous-completed"
+    ));
   })
 );
 

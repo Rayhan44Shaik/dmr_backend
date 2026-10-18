@@ -14,12 +14,21 @@ app.disable("x-powered-by");
 app.use(requestId);
 app.use(securityHeaders);
 
+app.use((req, res, next) => {
+  const origin = req.get("Origin");
+  if (origin && !env.corsOrigin.includes(origin)) {
+    res.status(403).json({ error: "CORS origin not allowed" });
+    return;
+  }
+  next();
+});
+
 app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
       if (env.corsOrigin.includes(origin)) return callback(null, true);
-      return callback(new Error("CORS origin not allowed"));
+      return callback(null, false);
     },
     credentials: true,
     exposedHeaders: ["X-DMR-Session-Token"],

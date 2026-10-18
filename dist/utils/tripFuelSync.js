@@ -137,17 +137,18 @@ export async function syncDieselToFuelExpenses(client, tripId, tripDate, entries
  */
 export async function syncTripFuelFromDb(client, tripId, opts = {}) {
     const tripRes = await client.query(`SELECT id, trip_date, status, vehicle_id, vehicle_no, driver_id, driver_name,
-            supervisor_id, supervisor_name
+            supervisor_id, supervisor_name, is_rented_vehicle
      FROM trips WHERE id = $1`, [tripId]);
     if (!tripRes.rowCount)
         return 0;
     const trip = tripRes.rows[0];
-    const dieselRows = await client.query(`SELECT row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name
+    const dieselRows = await client.query(`SELECT row_index, litres, rate, amount, meter, bunk_name, bunk_gps, image_data, image_name
      FROM trip_diesel_entries WHERE trip_id = $1 ORDER BY row_index`, [tripId]);
     const entries = dieselRows.rows.map((r) => ({
         rowIndex: num(r.row_index),
         litres: r.litres == null ? null : num(r.litres),
         rate: r.rate == null ? null : num(r.rate),
+        amount: r.amount == null ? null : num(r.amount),
         meter: r.meter == null ? null : num(r.meter),
         bunkName: r.bunk_name == null ? null : str(r.bunk_name),
         bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
@@ -155,7 +156,7 @@ export async function syncTripFuelFromDb(client, tripId, opts = {}) {
         imageName: r.image_name == null ? null : str(r.image_name),
     }));
     await syncDieselToFuelExpenses(client, tripId, dateOnly(trip.trip_date) ?? "", entries, {
-        vehicleId: numOrNull(trip.vehicle_id),
+        vehicleId: Boolean(trip.is_rented_vehicle) ? null : numOrNull(trip.vehicle_id),
         vehicleNo: trip.vehicle_no == null ? null : str(trip.vehicle_no),
         driverId: numOrNull(trip.driver_id),
         driverName: trip.driver_name == null ? null : str(trip.driver_name),

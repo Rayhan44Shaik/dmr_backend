@@ -185,6 +185,7 @@ function mapTripBase(row) {
         loading: num(row.loading),
         mealsTiffin: num(row.meals_tiffin),
         vehicleMaintenance: num(row.vehicle_maintenance),
+        vehicleMaintenanceNote: str(row.vehicle_maintenance_note),
         othersRC: num(row.others_rc),
         others1Amt: num(row.others1_amt),
         others2Amt: num(row.others2_amt),
@@ -1110,6 +1111,77 @@ async function replaceDiesel(client, tripId, entries = []) {
         ]);
     }
 }
+async function syncTripVehicleMaintenance(client, tripId, approvedBy) {
+    const row = await client.query(`SELECT t.id, t.trip_no, t.trip_date, t.vehicle_id, t.vehicle_no, t.driver_id, t.driver_name,
+            t.closing_meter, t.end_meter, t.vehicle_maintenance, t.vehicle_maintenance_note,
+            COALESCE(t.is_rented_vehicle, FALSE) AS is_rented_vehicle
+       FROM trips t WHERE t.id = $1`, [tripId]);
+    if (!row.rowCount)
+        return;
+    const trip = row.rows[0];
+    const amount = num(trip.vehicle_maintenance);
+    if (amount <= 0 || Boolean(trip.is_rented_vehicle))
+        return;
+    const vehicleId = numOrNull(trip.vehicle_id);
+    if (vehicleId == null)
+        return;
+    const note = str(trip.vehicle_maintenance_note).trim();
+    if (!note) {
+        throw new AppError(422, "Vehicle maintenance details are required when maintenance amount is greater than zero.");
+    }
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`trip_maintenance_${tripId}`]);
+    const existing = await client.query(`SELECT id FROM fleet_maintenance WHERE source_trip_id = $1`, [tripId]);
+    let billNo;
+    if (existing.rowCount) {
+        const bill = await client.query(`SELECT bill_no FROM fleet_maintenance WHERE id = $1`, [existing.rows[0].id]);
+        billNo = str(bill.rows[0].bill_no);
+    }
+    else {
+        const counter = await client.query(`INSERT INTO fleet_maintenance_number_counters (vehicle_id, last_sequence)
+       VALUES ($1, 1)
+       ON CONFLICT (vehicle_id)
+       DO UPDATE SET last_sequence = fleet_maintenance_number_counters.last_sequence + 1
+       RETURNING last_sequence`, [vehicleId]);
+        billNo = `MNT-${str(trip.vehicle_no).trim()}-${String(Number(counter.rows[0].last_sequence)).padStart(3, "0")}`;
+    }
+    const parts = JSON.stringify([{ name: note, specification: "Trip expense", quantity: 1, rate: amount, amount }]);
+    await client.query(`INSERT INTO fleet_maintenance (
+       bill_no, maintenance_date, vehicle_id, vehicle_no, driver_id, driver_name,
+       current_km, maintenance_type, service_type, total_cost, parts, remarks,
+       status, approved_by, approved_at, created_by, source_trip_id
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'Trip expense',$9,$10,$11,
+       'Approved'::ops_record_status,$12,NOW(),$12,$13)
+     ON CONFLICT (source_trip_id) WHERE source_trip_id IS NOT NULL AND COALESCE(deleted, FALSE) = FALSE
+     DO UPDATE SET
+       maintenance_date = EXCLUDED.maintenance_date,
+       vehicle_id = EXCLUDED.vehicle_id,
+       vehicle_no = EXCLUDED.vehicle_no,
+       driver_id = EXCLUDED.driver_id,
+       driver_name = EXCLUDED.driver_name,
+       current_km = EXCLUDED.current_km,
+       maintenance_type = EXCLUDED.maintenance_type,
+       total_cost = EXCLUDED.total_cost,
+       parts = EXCLUDED.parts,
+       remarks = EXCLUDED.remarks,
+       status = 'Approved'::ops_record_status,
+       approved_by = EXCLUDED.approved_by,
+       approved_at = COALESCE(fleet_maintenance.approved_at, NOW()),
+       updated_at = NOW()`, [
+        billNo,
+        dateOnly(trip.trip_date),
+        vehicleId,
+        str(trip.vehicle_no),
+        numOrNull(trip.driver_id),
+        str(trip.driver_name),
+        num(trip.closing_meter ?? trip.end_meter),
+        note,
+        amount,
+        parts,
+        `Vehicle Maintenance (${note}) = ${amount.toFixed(2)}; synced from ${str(trip.trip_no)}`,
+        approvedBy,
+        tripId,
+    ]);
+}
 function extractDieselFromBody(body) {
     if (Array.isArray(body.dieselEntries)) {
         return body.dieselEntries;
@@ -1984,6 +2056,7 @@ export const tripsService = {
             others3_name = COALESCE($75, others3_name),
             others4_name = COALESCE($76, others4_name),
             others5_name = COALESCE($77, others5_name),
+            vehicle_maintenance_note = COALESCE($78, vehicle_maintenance_note),
             approved_by = COALESCE($66, approved_by)
            WHERE id = $1`, [
                     tripId,
@@ -2078,6 +2151,7 @@ export const tripsService = {
                     body.others3Name == null ? null : str(body.others3Name).trim().slice(0, 120),
                     body.others4Name == null ? null : str(body.others4Name).trim().slice(0, 120),
                     body.others5Name == null ? null : str(body.others5Name).trim().slice(0, 120),
+                    body.vehicleMaintenanceNote == null ? null : str(body.vehicleMaintenanceNote).trim().slice(0, 120),
                 ]);
                 try {
                     await client.query(`UPDATE trips SET is_rented_vehicle = $2 WHERE id = $1`, [tripId, isRentedVehicle]);
@@ -2178,6 +2252,31 @@ export const tripsService = {
                         : undefined,
                 });
                 if (body.boxDetails) {
+                    const fingerprint = body.importFingerprint;
+                    if (fingerprint) {
+                        const algorithm = str(fingerprint.algorithm).trim().toUpperCase();
+                        const version = numOrNull(fingerprint.version);
+                        const hash = str(fingerprint.contentHash).trim().toLowerCase();
+                        const filename = str(fingerprint.originalFilename).trim();
+                        const byteLength = numOrNull(fingerprint.byteLength);
+                        if (algorithm !== "SHA-256" || version !== 1 || !/^[0-9a-f]{64}$/.test(hash) || !filename || !(byteLength && byteLength > 0)) {
+                            throw new AppError(422, "Invalid pickup import fingerprint.");
+                        }
+                        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+                            `pickup_import_${tripId}_${activeLeg.id}`,
+                        ]);
+                        const inserted = await client.query(`INSERT INTO trip_pickup_import_fingerprints
+                 (trip_id, leg_id, hash_algorithm, hash_version, content_hash, original_filename, byte_length)
+               VALUES ($1,$2,$3,$4,$5,$6,$7)
+               ON CONFLICT (trip_id, leg_id, hash_algorithm, hash_version, content_hash) DO NOTHING
+               RETURNING id`, [tripId, activeLeg.id, algorithm, version, hash, filename.slice(0, 255), byteLength]);
+                        if (!inserted.rowCount) {
+                            throw new AppError(409, "This file has already been imported for the current load.");
+                        }
+                    }
+                    if (body.boxDetails.length === 0 && body.clearBoxDetails === true) {
+                        await client.query(`DELETE FROM trip_pickup_import_fingerprints WHERE trip_id = $1 AND leg_id = $2`, [tripId, activeLeg.id]);
+                    }
                     await replaceBoxes(client, tripId, body.boxDetails, activeLeg.id);
                 }
                 if (body.deliveries) {
@@ -2860,7 +2959,9 @@ export const tripsService = {
         }
         // Backend-authoritative Step 2 (Farm) validation — never trust the frontend.
         // Farm Meter must be present and STRICTLY greater than the prior floor
-        // (opening meter for Load 1; prior farm dest / diesel for later loads).
+        // from farmMeterFloor (Load 1: opening meter; Load N: prior load destination).
+        // Diesel meters are intentionally excluded from that floor — filling may
+        // happen before or after a farm reading without constraining destMeter.
         if (step === "farm") {
             // Normalize negative tolls to 0 (tolls may legitimately be zero).
             const tolls = numOrNull(body.pickupTolls);
@@ -3133,6 +3234,7 @@ export const tripsService = {
                     approveIfCompleted: true,
                     createdBy: body.approvedBy ?? "trip-complete-sync",
                 });
+                await syncTripVehicleMaintenance(client, id, body.approvedBy ?? "trip-complete-sync");
             }
             const trip = await hydrateTrip(client, result.rows[0], { includeDcPhoto: true });
             return { ...trip, ...flattenDiesel(trip.dieselEntries ?? []) };
@@ -3285,8 +3387,7 @@ export const tripsService = {
             ]);
             if (!existing.rowCount)
                 throw new AppError(404, `Trip ${tripId} not found`);
-            if (Boolean(existing.rows[0].is_rented_vehicle))
-                throw new AppError(422, "Diesel entries are not available for rented vehicles.");
+            const isRentedVehicle = Boolean(existing.rows[0].is_rented_vehicle);
             const litres = numOrNull(body.litres);
             const amount = numOrNull(body.amount);
             const meter = numOrNull(body.meter);
@@ -3295,7 +3396,7 @@ export const tripsService = {
             if (!(amount != null && amount > 0))
                 throw new AppError(422, "Diesel amount must be greater than zero");
             const rate = Number((amount / litres).toFixed(2));
-            if (!(meter != null && meter > 0))
+            if (!isRentedVehicle && !(meter != null && meter > 0))
                 throw new AppError(422, "Diesel meter reading is required");
             const imageData = body.imageData != null ? str(body.imageData) : "";
             if (!imageData || imageData.length < 40) {
@@ -3318,7 +3419,7 @@ export const tripsService = {
             // Serialize per vehicle and enforce the meter lock: a stale Step 5 page
             // that validated before a later same-vehicle approval must fail here,
             // and inactive vehicles are rejected by the lock itself.
-            const upsertVehicleId = numOrNull(existing.rows[0].vehicle_id);
+            const upsertVehicleId = isRentedVehicle ? null : numOrNull(existing.rows[0].vehicle_id);
             if (upsertVehicleId != null) {
                 await lockVehicleForMeterWrite(client, upsertVehicleId);
             }
@@ -3327,7 +3428,7 @@ export const tripsService = {
           WHERE trip_id = $1 AND row_index < $2 AND meter IS NOT NULL
           ORDER BY row_index DESC LIMIT 1`, [tripId, rowIndex]);
             const meterFloor = num(priorDiesel.rows[0]?.meter);
-            if (meterFloor > 0 && meter <= meterFloor) {
+            if (!isRentedVehicle && meterFloor > 0 && meter <= meterFloor) {
                 throw new AppError(422, `Diesel meter (${meter} KM) must be greater than the last entered meter (${meterFloor} KM).`);
             }
             const laterDiesel = await client.query(`SELECT meter, row_index FROM trip_diesel_entries
@@ -3351,7 +3452,7 @@ export const tripsService = {
                     context: `Diesel entry #${rowIndex} meter reading`,
                 });
             }
-            if (nextMeter > 0 && meter >= nextMeter) {
+            if (!isRentedVehicle && nextMeter > 0 && meter >= nextMeter) {
                 throw new AppError(422, `Diesel meter (${meter} KM) must be less than the next entered meter (${nextMeter} KM).`);
             }
             const duplicateBill = await client.query(`SELECT row_index FROM trip_diesel_entries
@@ -3361,7 +3462,7 @@ export const tripsService = {
                 throw new AppError(422, `Diesel bill image is already used in row ${num(duplicateBill.rows[0].row_index)}.`);
             }
             const closingMeter = num(existing.rows[0].closing_meter);
-            if (Boolean(existing.rows[0].expenses_step_submitted) && closingMeter > 0 && meter > closingMeter) {
+            if (!isRentedVehicle && Boolean(existing.rows[0].expenses_step_submitted) && closingMeter > 0 && meter > closingMeter) {
                 throw new AppError(422, `Diesel meter (${meter} KM) cannot exceed the end meter (${closingMeter} KM).`);
             }
             const { bunkName, bunkSource, fuelBunkId, gpsLat, gpsLon, gpsAccuracy, gpsCapturedAt, } = await resolveDieselBunk(client, body);
@@ -3431,8 +3532,7 @@ export const tripsService = {
           WHERE d.id = $1 AND d.trip_id = $2`, [entryId, tripId]);
             if (!existing.rowCount)
                 throw new AppError(404, `Diesel entry ${entryId} not found`);
-            if (Boolean(existing.rows[0].is_rented_vehicle))
-                throw new AppError(422, "Diesel entries are not available for rented vehicles.");
+            const isRentedVehicle = Boolean(existing.rows[0].is_rented_vehicle);
             const litres = numOrNull(body.litres);
             const amount = numOrNull(body.amount);
             const meter = numOrNull(body.meter);
@@ -3441,7 +3541,7 @@ export const tripsService = {
             if (!(amount != null && amount > 0))
                 throw new AppError(422, "Diesel amount must be greater than zero");
             const rate = Number((amount / litres).toFixed(2));
-            if (!(meter != null && meter > 0))
+            if (!isRentedVehicle && !(meter != null && meter > 0))
                 throw new AppError(422, "Diesel meter reading is required");
             const rowIndex = num(existing.rows[0].row_index);
             const neighbors = await client.query(`SELECT meter, row_index FROM trip_diesel_entries
@@ -3451,7 +3551,7 @@ export const tripsService = {
             const priorMeter = Math.max(0, ...neighbors.rows.filter((r) => num(r.row_index) < rowIndex).map((r) => num(r.meter)));
             // Serialize per vehicle and enforce the meter lock (stale Step 5 edits
             // after a later same-vehicle approval fail here).
-            const updateVehicleId = numOrNull(existing.rows[0].vehicle_id);
+            const updateVehicleId = isRentedVehicle ? null : numOrNull(existing.rows[0].vehicle_id);
             if (updateVehicleId != null) {
                 await lockVehicleForMeterWrite(client, updateVehicleId);
             }
@@ -3478,14 +3578,14 @@ export const tripsService = {
                     context: `Diesel entry #${rowIndex} meter reading`,
                 });
             }
-            if (priorMeter > 0 && meter <= priorMeter) {
+            if (!isRentedVehicle && priorMeter > 0 && meter <= priorMeter) {
                 throw new AppError(422, `Diesel meter (${meter} KM) must be greater than the last entered meter (${priorMeter} KM).`);
             }
-            if (nextMeter > 0 && meter >= nextMeter) {
+            if (!isRentedVehicle && nextMeter > 0 && meter >= nextMeter) {
                 throw new AppError(422, `Diesel meter (${meter} KM) must be less than the next entered meter (${nextMeter} KM).`);
             }
             const closingMeter = num(existing.rows[0].closing_meter);
-            if (Boolean(existing.rows[0].expenses_step_submitted) && closingMeter > 0 && meter > closingMeter) {
+            if (!isRentedVehicle && Boolean(existing.rows[0].expenses_step_submitted) && closingMeter > 0 && meter > closingMeter) {
                 throw new AppError(422, `Diesel meter (${meter} KM) cannot exceed the end meter (${closingMeter} KM).`);
             }
             const imageData = body.imageData != null ? str(body.imageData) : "";

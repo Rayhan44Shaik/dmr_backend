@@ -83,10 +83,11 @@ async function mkTrip(tripNo: string, vehicleId: number, meter: number, dayOffse
   return { id: Number(r.rows[0].id), tripNo: String(r.rows[0].trip_no) };
 }
 
-async function addDiesel(tripId: number, rowIndex: number, meter: number) {
-  await tripsService.upsertDieselEntry(tripId, {
-    litres: 10,
-    rate: 90,
+async function addDiesel(tripId: number, rowIndex: number, meter: number, litres = 10, amount = 900) {
+  // Product policy: litres and amount are mandatory; rate is calculated as amount/litres (2 dp).
+  const trip = await tripsService.upsertDieselEntry(tripId, {
+    litres,
+    amount,
     meter,
     bunkName: "Test Bunk",
     gpsLat: 12.98,
@@ -96,8 +97,12 @@ async function addDiesel(tripId: number, rowIndex: number, meter: number) {
     rowIndex,
     clientKey: randomUUID(),
   });
-  // upsertDieselEntry returns the hydrated trip; the authoritative bill number
-  // lives on the synced fuel_expenses row — read it back directly.
+  const entry = (trip.dieselEntries ?? []).find((e: { rowIndex?: number }) => Number(e.rowIndex) === rowIndex)
+    ?? (trip.dieselEntries ?? []).at(-1);
+  if (entry && litres > 0) {
+    assert.equal(Number(entry.rate), Number((amount / litres).toFixed(2)), "rate must equal amount/litres");
+  }
+  // Authoritative bill number lives on the synced fuel_expenses row.
   const fuel = await pool.query(
     `SELECT bill_no FROM fuel_expenses
       WHERE trip_id = $1 AND trip_fuel_entry_index = $2
@@ -105,11 +110,11 @@ async function addDiesel(tripId: number, rowIndex: number, meter: number) {
     [tripId, rowIndex]
   );
   assert.ok(fuel.rowCount, `expected synced fuel bill for trip ${tripId} row ${rowIndex}`);
-  const entry = await pool.query(`SELECT id FROM trip_diesel_entries WHERE trip_id = $1 AND row_index = $2`, [
+  const row = await pool.query(`SELECT id FROM trip_diesel_entries WHERE trip_id = $1 AND row_index = $2`, [
     tripId,
     rowIndex,
   ]);
-  return { billNo: String(fuel.rows[0].bill_no), id: Number(entry.rows[0].id) };
+  return { billNo: String(fuel.rows[0].bill_no), id: Number(row.rows[0].id) };
 }
 
 async function syncedBillNo(tripId: number, rowIndex: number) {
@@ -234,7 +239,7 @@ describe("fuel bill numbering (per-trip authoritative sequence)", () => {
     const first = await addDiesel(t.id, 1, 80100);
     await tripsService.upsertDieselEntry(t.id, {
       litres: 10,
-      rate: 90,
+      amount: 900,
       meter: 80100,
       bunkName: "Test Bunk",
       gpsLat: 12.98,
@@ -245,6 +250,32 @@ describe("fuel bill numbering (per-trip authoritative sequence)", () => {
       clientKey: randomUUID(),
     });
     assert.equal(await syncedBillNo(t.id, 1), first.billNo);
+  });
+
+  it("rejects zero/missing litres and missing amount; rate is amount/litres", async () => {
+    const v = await mkVehicle(tag("VAL"));
+    const t = await mkTrip(`TRP-VAL-${tag("v")}`, Number(v.id), 85000);
+    await assert.rejects(
+      () => tripsService.upsertDieselEntry(t.id, {
+        litres: 0, amount: 100, meter: 85100, bunkName: "B", gpsLat: 1, gpsLon: 1, gpsAccuracy: 1,
+        imageData: BILL_IMG, rowIndex: 1, clientKey: randomUUID(),
+      }),
+      /litres must be greater than zero/i,
+    );
+    await assert.rejects(
+      () => tripsService.upsertDieselEntry(t.id, {
+        litres: 10, meter: 85100, bunkName: "B", gpsLat: 1, gpsLon: 1, gpsAccuracy: 1,
+        imageData: BILL_IMG, rowIndex: 1, clientKey: randomUUID(),
+      }),
+      /amount must be greater than zero/i,
+    );
+    const ok = await tripsService.upsertDieselEntry(t.id, {
+      litres: 12.5, amount: 1187.5, meter: 85100, bunkName: "B", gpsLat: 1, gpsLon: 1, gpsAccuracy: 1,
+      imageData: BILL_IMG, rowIndex: 1, clientKey: randomUUID(),
+    });
+    const entry = (ok.dieselEntries ?? []).find((e: { rowIndex?: number }) => Number(e.rowIndex) === 1);
+    assert.ok(entry);
+    assert.equal(Number(entry!.rate), Number((1187.5 / 12.5).toFixed(2)));
   });
 
   it("allocates distinct numbers under concurrent creation", async () => {

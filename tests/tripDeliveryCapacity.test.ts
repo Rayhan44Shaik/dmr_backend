@@ -68,7 +68,38 @@ async function seedMasters() {
     capacity: 30000,
     status: "Active",
   });
-  return { vehicle, driver, supervisor, farm };
+  // Real shop master rows are required by trip_delivery shop-master guards.
+  // Prior fixtures used shopId:null + shopName-only labels and failed with
+  // "Referenced record does not exist" — that was stale fixture debt, not product capacity logic.
+  const shopA = await mastersService.upsertShop({
+    shopName: `Cap Shop A ${vehicleSeq}`,
+    ownerName: "Owner A",
+    phoneNumber: `90010000${String(vehicleSeq).padStart(2, "0")}`,
+    village: "Village",
+    status: "Active",
+  });
+  const shopB = await mastersService.upsertShop({
+    shopName: `Cap Shop B ${vehicleSeq}`,
+    ownerName: "Owner B",
+    phoneNumber: `90020000${String(vehicleSeq).padStart(2, "0")}`,
+    village: "Village",
+    status: "Active",
+  });
+  const shopC = await mastersService.upsertShop({
+    shopName: `Cap Shop C ${vehicleSeq}`,
+    ownerName: "Owner C",
+    phoneNumber: `90030000${String(vehicleSeq).padStart(2, "0")}`,
+    village: "Village",
+    status: "Active",
+  });
+  const shopCity = await mastersService.upsertShop({
+    shopName: `City Broiler DMR ${vehicleSeq}`,
+    ownerName: "Owner City",
+    phoneNumber: `90040000${String(vehicleSeq).padStart(2, "0")}`,
+    village: "Village",
+    status: "Active",
+  });
+  return { vehicle, driver, supervisor, farm, shopA, shopB, shopC, shopCity };
 }
 
 async function makeDraftTrip(
@@ -94,11 +125,17 @@ async function makeDraftTrip(
   } as Record<string, unknown>);
 }
 
-function delivery(overrides: Record<string, unknown>) {
+function delivery(
+  m: Awaited<ReturnType<typeof seedMasters>>,
+  shopKey: "A" | "B" | "C" | "CITY",
+  overrides: Record<string, unknown> = {},
+) {
+  const shop =
+    shopKey === "A" ? m.shopA : shopKey === "B" ? m.shopB : shopKey === "C" ? m.shopC : m.shopCity;
   return {
     id: 0,
-    shopId: null,
-    shopName: "Shop",
+    shopId: shop.id,
+    shopName: shop.shopName,
     birds: 0,
     weight: 0,
     mortality: 0,
@@ -116,14 +153,14 @@ describe("Trip Delivery capacity validation (birds)", () => {
 
     // Below capacity — fine.
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 50, weight: 90 })],
+      deliveries: [delivery(m, "A", { birds: 50, weight: 90 })],
     } as Record<string, unknown>);
     const row1 = await pool.query(`SELECT birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     assert.equal(Number(row1.rows[0].birds), 50);
 
     // Exactly at capacity — fine.
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 100, weight: 190 })],
+      deliveries: [delivery(m, "A", { birds: 100, weight: 190 })],
     } as Record<string, unknown>);
     const row2 = await pool.query(`SELECT birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     assert.equal(Number(row2.rows[0].birds), 100);
@@ -132,7 +169,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     await assert.rejects(
       () =>
         tripsService.save(trip.id, {
-          deliveries: [delivery({ shopName: "A", birds: 101, weight: 190 })],
+          deliveries: [delivery(m, "A", { birds: 101, weight: 190 })],
         } as Record<string, unknown>),
       /exceed/i
     );
@@ -146,7 +183,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
 
     // 95 delivered + 5 mortality = 100 -> exactly at capacity, must succeed.
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 95, weight: 190, mortality: 5 })],
+      deliveries: [delivery(m, "A", { birds: 95, weight: 190, mortality: 5 })],
     } as Record<string, unknown>);
     const ok = await pool.query(`SELECT birds, mortality FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     assert.equal(Number(ok.rows[0].birds), 95);
@@ -155,7 +192,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     await assert.rejects(
       () =>
         tripsService.save(trip.id, {
-          deliveries: [delivery({ shopName: "A", birds: 95, weight: 190, mortality: 6 })],
+          deliveries: [delivery(m, "A", { birds: 95, weight: 190, mortality: 6 })],
         } as Record<string, unknown>),
       /exceed/i
     );
@@ -166,7 +203,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-03", totalBirds: 100, dcWeight: 200 });
 
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 0, weight: 0 })],
+      deliveries: [delivery(m, "A", { birds: 0, weight: 0 })],
     } as Record<string, unknown>);
     const zero = await pool.query(`SELECT birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     assert.equal(Number(zero.rows[0].birds), 0);
@@ -177,7 +214,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     // rejected end-to-end, just by an earlier layer.
     await assert.rejects(() =>
       tripsService.save(trip.id, {
-        deliveries: [delivery({ shopName: "A", birds: -5, weight: 10 })],
+        deliveries: [delivery(m, "A", { birds: -5, weight: 10 })],
       } as Record<string, unknown>)
     );
   });
@@ -190,7 +227,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     // before the capacity check runs.
     await assert.rejects(() =>
       tripsService.save(trip.id, {
-        deliveries: [delivery({ shopName: "A", birds: 10.5, weight: 20 })],
+        deliveries: [delivery(m, "A", { birds: 10.5, weight: 20 })],
       } as Record<string, unknown>)
     );
   });
@@ -201,9 +238,9 @@ describe("Trip Delivery capacity validation (birds)", () => {
 
     await tripsService.save(trip.id, {
       deliveries: [
-        delivery({ shopName: "A", birds: 40, weight: 70 }),
-        delivery({ shopName: "B", birds: 40, weight: 70 }),
-        delivery({ shopName: "C", birds: 20, weight: 40 }),
+        delivery(m, "A", { birds: 40, weight: 70 }),
+        delivery(m, "B", { birds: 40, weight: 70 }),
+        delivery(m, "C", { birds: 20, weight: 40 }),
       ],
     } as Record<string, unknown>);
     const rows = await pool.query(`SELECT birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
@@ -213,9 +250,9 @@ describe("Trip Delivery capacity validation (birds)", () => {
       () =>
         tripsService.save(trip.id, {
           deliveries: [
-            delivery({ shopName: "A", birds: 40, weight: 70 }),
-            delivery({ shopName: "B", birds: 40, weight: 70 }),
-            delivery({ shopName: "C", birds: 21, weight: 40 }), // pushes total to 101
+            delivery(m, "A", { birds: 40, weight: 70 }),
+            delivery(m, "B", { birds: 40, weight: 70 }),
+            delivery(m, "C", { birds: 21, weight: 40 }), // pushes total to 101
           ],
         } as Record<string, unknown>),
       /exceed/i
@@ -227,12 +264,12 @@ describe("Trip Delivery capacity validation (birds)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-06", totalBirds: 100, dcWeight: 200 });
 
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 60, weight: 100 })],
+      deliveries: [delivery(m, "A", { birds: 60, weight: 100 })],
     } as Record<string, unknown>);
 
     // Edit up to 100 -> still fine.
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 100, weight: 190 })],
+      deliveries: [delivery(m, "A", { birds: 100, weight: 190 })],
     } as Record<string, unknown>);
     const row = await pool.query(`SELECT birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     assert.equal(Number(row.rows[0].birds), 100);
@@ -241,7 +278,7 @@ describe("Trip Delivery capacity validation (birds)", () => {
     await assert.rejects(
       () =>
         tripsService.save(trip.id, {
-          deliveries: [delivery({ shopName: "A", birds: 101, weight: 190 })],
+          deliveries: [delivery(m, "A", { birds: 101, weight: 190 })],
         } as Record<string, unknown>),
       /exceed/i
     );
@@ -261,18 +298,18 @@ describe("Trip Delivery capacity validation (birds)", () => {
 
     const results = await Promise.allSettled([
       tripsService.save(trip.id, {
-        deliveries: [delivery({ shopName: "A", birds: 100, weight: 190 })],
+        deliveries: [delivery(m, "A", { birds: 100, weight: 190 })],
       } as Record<string, unknown>),
       tripsService.save(trip.id, {
-        deliveries: [delivery({ shopName: "B", birds: 90, weight: 150 })],
+        deliveries: [delivery(m, "B", { birds: 90, weight: 150 })],
       } as Record<string, unknown>),
     ]);
     const fulfilled = results.filter((r) => r.status === "fulfilled").length;
     assert.ok(fulfilled >= 1, "at least one concurrent submission must succeed without crashing");
     const rows = await pool.query(`SELECT shop_name, birds FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     for (const row of rows.rows) {
-      assert.ok(["A", "B"].includes(row.shop_name), "every row must come from a real submission");
-      const expected = row.shop_name === "A" ? 100 : 90;
+      assert.ok([m.shopA.shopName, m.shopB.shopName].includes(row.shop_name), "every row must come from a real submission");
+      const expected = row.shop_name === m.shopA.shopName ? 100 : 90;
       assert.equal(Number(row.birds), expected, "row values must never be corrupted/partial");
     }
   });
@@ -284,11 +321,11 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-10", totalBirds: 1000, dcWeight: 200 });
 
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 50, weight: 150 })],
+      deliveries: [delivery(m, "A", { birds: 50, weight: 150 })],
     } as Record<string, unknown>);
 
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 50, weight: 200 })],
+      deliveries: [delivery(m, "A", { birds: 50, weight: 200 })],
     } as Record<string, unknown>);
     const atCap = await pool.query(`SELECT weight FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     assert.equal(Number(atCap.rows[0].weight), 200);
@@ -298,7 +335,7 @@ describe("Trip Delivery capacity validation (weight)", () => {
     // to exactly the 200.00 cap and is accepted — the stored row can still
     // never exceed capacity.
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 50, weight: 200.001 })],
+      deliveries: [delivery(m, "A", { birds: 50, weight: 200.001 })],
     } as Record<string, unknown>);
     const rounded = await pool.query(`SELECT weight FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     assert.equal(Number(rounded.rows[0].weight), 200, "sub-precision overage rounds to exactly the cap");
@@ -307,7 +344,7 @@ describe("Trip Delivery capacity validation (weight)", () => {
     await assert.rejects(
       () =>
         tripsService.save(trip.id, {
-          deliveries: [delivery({ shopName: "A", birds: 50, weight: 200.01 })],
+          deliveries: [delivery(m, "A", { birds: 50, weight: 200.01 })],
         } as Record<string, unknown>),
       /exceed/i
     );
@@ -321,9 +358,9 @@ describe("Trip Delivery capacity validation (weight)", () => {
 
     await tripsService.save(trip.id, {
       deliveries: [
-        delivery({ shopName: "A", birds: 10, weight: 66.333 }),
-        delivery({ shopName: "B", birds: 10, weight: 66.333 }),
-        delivery({ shopName: "C", birds: 10, weight: 66.333 }),
+        delivery(m, "A", { birds: 10, weight: 66.333 }),
+        delivery(m, "B", { birds: 10, weight: 66.333 }),
+        delivery(m, "C", { birds: 10, weight: 66.333 }),
       ],
     } as Record<string, unknown>); // sums to 198.999, under 200
     const rows = await pool.query(`SELECT weight FROM trip_deliveries WHERE trip_id = $1 ORDER BY id`, [trip.id]);
@@ -339,13 +376,13 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-12", totalBirds: 1000, dcWeight: 200 });
 
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 50, weight: 150 })],
+      deliveries: [delivery(m, "A", { birds: 50, weight: 150 })],
     } as Record<string, unknown>);
 
     await assert.rejects(
       () =>
         tripsService.save(trip.id, {
-          deliveries: [delivery({ shopName: "A", birds: 50, weight: 201 })],
+          deliveries: [delivery(m, "A", { birds: 50, weight: 201 })],
         } as Record<string, unknown>),
       /exceed/i
     );
@@ -356,13 +393,13 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-13", totalBirds: 1000, dcWeight: 200 });
 
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 0, weight: 0 })],
+      deliveries: [delivery(m, "A", { birds: 0, weight: 0 })],
     } as Record<string, unknown>);
 
     // Rejected by the existing schema's `weight: z.coerce.number().nonnegative()`.
     await assert.rejects(() =>
       tripsService.save(trip.id, {
-        deliveries: [delivery({ shopName: "A", birds: 5, weight: -1 })],
+        deliveries: [delivery(m, "A", { birds: 5, weight: -1 })],
       } as Record<string, unknown>)
     );
   });
@@ -383,10 +420,10 @@ describe("Trip Delivery capacity validation (weight)", () => {
 
     const results = await Promise.allSettled([
       tripsService.save(trip.id, {
-        deliveries: [delivery({ shopName: "A", birds: 10, weight: 20 })],
+        deliveries: [delivery(m, "A", { birds: 10, weight: 20 })],
       } as Record<string, unknown>),
       tripsService.save(trip.id, {
-        deliveries: [delivery({ shopName: "B", birds: 10, weight: 18 })],
+        deliveries: [delivery(m, "B", { birds: 10, weight: 18 })],
       } as Record<string, unknown>),
     ]);
     // Both settling (fulfilled or rejected) without an unhandled throw/hang
@@ -397,8 +434,8 @@ describe("Trip Delivery capacity validation (weight)", () => {
     assert.equal(results.length, 2, "both concurrent calls must settle, not hang");
     const rows = await pool.query(`SELECT shop_name, birds, weight FROM trip_deliveries WHERE trip_id = $1`, [trip.id]);
     for (const row of rows.rows) {
-      assert.ok(["A", "B"].includes(row.shop_name), "every row must come from a real submission");
-      const expectedWeight = row.shop_name === "A" ? 20 : 18;
+      assert.ok([m.shopA.shopName, m.shopB.shopName].includes(row.shop_name), "every row must come from a real submission");
+      const expectedWeight = row.shop_name === m.shopA.shopName ? 20 : 18;
       assert.equal(Number(row.birds), 10, "row values must never be corrupted/partial");
       assert.equal(Number(row.weight), expectedWeight, "row values must never be corrupted/partial");
     }
@@ -409,7 +446,7 @@ describe("Trip Delivery capacity validation (weight)", () => {
     const trip = await makeDraftTrip(m, { tripDate: "2026-06-15", totalBirds: 100, dcWeight: 200 });
 
     await tripsService.save(trip.id, {
-      deliveries: [delivery({ shopName: "A", birds: 50, weight: 100 })],
+      deliveries: [delivery(m, "A", { birds: 50, weight: 100 })],
     } as Record<string, unknown>);
 
     // Both birds (150 > 100) AND weight (250 > 200) are over capacity in the
@@ -417,7 +454,7 @@ describe("Trip Delivery capacity validation (weight)", () => {
     await assert.rejects(
       () =>
         tripsService.save(trip.id, {
-          deliveries: [delivery({ shopName: "A", birds: 150, weight: 250 })],
+          deliveries: [delivery(m, "A", { birds: 150, weight: 250 })],
         } as Record<string, unknown>),
       /exceed/i
     );
@@ -435,7 +472,7 @@ describe("Trip 52 regression — the exact scenario that was previously accepted
     await assert.rejects(
       () =>
         tripsService.save(trip.id, {
-          deliveries: [delivery({ shopName: "City Broiler DMR", birds: 2000, weight: 940 })],
+          deliveries: [delivery(m, "CITY", { birds: 2000, weight: 940 })],
         } as Record<string, unknown>),
       /exceed/i,
       "the exact Trip 52 scenario (100 loaded, 2000 attempted) must now be rejected"

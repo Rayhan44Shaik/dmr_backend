@@ -60,7 +60,7 @@ export async function startApp(env: Record<string, string>, requestedPort?: numb
       env: {
         ...process.env,
         PORT: String(port),
-        CORS_ORIGIN: "*",
+        CORS_ORIGIN: `http://127.0.0.1:${port}`,
         ...env,
       },
       stdio: ["ignore", "pipe", "pipe"],

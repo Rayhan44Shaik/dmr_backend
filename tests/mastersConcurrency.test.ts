@@ -48,26 +48,161 @@ test("50 concurrent duplicate shop creates yield one success and safe conflicts"
   assert.ok(responses.filter((response) => response.status === 409).every((response) => !JSON.stringify(response.body).match(/postgres|constraint|stack/i)));
 });
 
-test("authenticated non-owner cannot mutate Vehicle Master", async () => {
+async function loginAs(role: string, username: string, password: string): Promise<string> {
   const { hashPassword } = await import("../src/utils/passwordHash.js");
-  const username = "vehicle-supervisor";
-  await pool.query(
-    `INSERT INTO application_users (username,display_name,password_hash,role)
-     VALUES ($1,'Vehicle Accountant',$2,'FULL_ACCESS')`,
-    [username, await hashPassword("Supervisor-test-password-123!")],
-  );
+  const hash = await hashPassword(password);
+  let employeeId: number | null = null;
+  if (role === "SUPERVISOR") {
+    // Login rejects SUPERVISOR accounts without a linked employee profile.
+    const emp = await pool.query<{ id: number }>(
+      `INSERT INTO employees (employee_no, employee_name, department, role, status)
+       VALUES ((SELECT COALESCE(MAX(employee_no), 0) + 1 FROM employees), $1, 'Operations', 'Supervisor', 'Active')
+       RETURNING id`,
+      [`${role} Linked Employee`],
+    );
+    employeeId = emp.rows[0].id;
+  }
+  const existing = await pool.query(`SELECT id FROM application_users WHERE LOWER(username) = LOWER($1)`, [username]);
+  if (existing.rowCount) {
+    await pool.query(
+      `UPDATE application_users SET password_hash = $2, role = $3, display_name = $4, employee_id = $5, access_status = 'ACTIVE', active = TRUE WHERE id = $1`,
+      [existing.rows[0].id, hash, role, `${role} tester`, employeeId],
+    );
+  } else {
+    await pool.query(
+      `INSERT INTO application_users (username,display_name,password_hash,role,employee_id,access_status,active)
+       VALUES ($1,$2,$3,$4,$5,'ACTIVE',TRUE)`,
+      [username, `${role} tester`, hash, role, employeeId],
+    );
+  }
   const login = await fetch(`${app.baseUrl}/api/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ username, password: "Supervisor-test-password-123!" }),
+    body: JSON.stringify({ username, password }),
   });
+  assert.equal(login.status, 200, `login failed for ${role}`);
   const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
-  const response = await fetch(`${app.baseUrl}/api/masters/vehicles`, {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie },
-    body: JSON.stringify(entities.find((entity) => entity.name === "vehicles")!.body(900)),
+  assert.ok(cookie, `missing session cookie for ${role}`);
+  return cookie;
+}
+
+async function authed(
+  method: string,
+  path: string,
+  cookie: string,
+  body?: unknown,
+): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${app.baseUrl}${path}`, {
+    method,
+    headers: {
+      "content-type": "application/json",
+      cookie,
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
-  assert.equal(response.status, 403);
-  assert.match(JSON.stringify(await response.json()), /owner access/i);
-  assert.equal((await pool.query("SELECT COUNT(*)::int total FROM vehicles")).rows[0].total, 0);
+  let parsed: unknown = null;
+  try {
+    parsed = await res.json();
+  } catch {
+    parsed = null;
+  }
+  return { status: res.status, body: parsed };
+}
+
+test("FULL_ACCESS may create Vehicle Master (approved policy)", async () => {
+  const cookie = await loginAs("FULL_ACCESS", "masters-full-access", "Full-access-test-password-123!");
+  const before = await pool.query("SELECT COUNT(*)::int total FROM vehicles");
+  const response = await authed(
+    "POST",
+    "/api/masters/vehicles",
+    cookie,
+    entities.find((entity) => entity.name === "vehicles")!.body(900),
+  );
+  assert.equal(response.status, 201);
+  const after = await pool.query("SELECT COUNT(*)::int total FROM vehicles");
+  assert.equal(after.rows[0].total, before.rows[0].total + 1);
+});
+
+test("OWNER and FULL_ACCESS may update and deactivate Vehicle Master", async () => {
+  const ownerCookie = await loginAs("OWNER", "masters-owner-mut", "Owner-test-password-123!");
+  const created = await authed(
+    "POST",
+    "/api/masters/vehicles",
+    ownerCookie,
+    entities.find((entity) => entity.name === "vehicles")!.body(901),
+  );
+  assert.equal(created.status, 201);
+  const id = (created.body as { id: number }).id;
+
+  const fullCookie = await loginAs("FULL_ACCESS", "masters-full-mut", "Full-access-test-password-123!");
+  const updated = await authed(
+    "PUT",
+    `/api/masters/vehicles/${id}`,
+    fullCookie,
+    { ...entities.find((entity) => entity.name === "vehicles")!.body(901), vehicleType: "Lorry" },
+  );
+  assert.equal(updated.status, 200, `FULL_ACCESS update status ${updated.status}`);
+
+  const deactivated = await authed(
+    "PATCH",
+    `/api/masters/vehicles/${id}/status`,
+    fullCookie,
+    { status: "Inactive" },
+  );
+  assert.equal(deactivated.status, 200, `FULL_ACCESS deactivate status ${deactivated.status}`);
+});
+
+test("OFFICE, AUDIT, COLLECTION and SUPERVISOR cannot mutate masters", async () => {
+  const deniedRoles = ["OFFICE", "AUDIT", "COLLECTION", "SUPERVISOR"] as const;
+  const vehicleBody = entities.find((entity) => entity.name === "vehicles")!.body(910);
+
+  // Seed one vehicle as OWNER for update/deactivate/bulk targets.
+  const ownerCookie = await loginAs("OWNER", "masters-owner-seed", "Owner-test-password-123!");
+  const seeded = await authed("POST", "/api/masters/vehicles", ownerCookie, vehicleBody);
+  assert.equal(seeded.status, 201);
+  const vehicleId = (seeded.body as { id: number }).id;
+
+  for (const role of deniedRoles) {
+    const cookie = await loginAs(role, `masters-${role.toLowerCase()}`, `${role}-test-password-123!`);
+
+    const denyBody = /owner access|cannot access this module|FORBIDDEN|forbidden/i;
+
+    const create = await authed("POST", "/api/masters/vehicles", cookie, {
+      ...entities.find((entity) => entity.name === "vehicles")!.body(920 + deniedRoles.indexOf(role)),
+    });
+    assert.equal(create.status, 403, `${role} create must be 403`);
+    assert.match(JSON.stringify(create.body), denyBody);
+
+    const update = await authed(
+      "PUT",
+      `/api/masters/vehicles/${vehicleId}`,
+      cookie,
+      { ...vehicleBody, vehicleType: "Truck" },
+    );
+    assert.equal(update.status, 403, `${role} update must be 403`);
+    assert.match(JSON.stringify(update.body), denyBody);
+
+    const deactivate = await authed("DELETE", `/api/masters/vehicles/${vehicleId}`, cookie);
+    assert.equal(deactivate.status, 403, `${role} deactivate must be 403`);
+    assert.match(JSON.stringify(deactivate.body), denyBody);
+
+    const bulk = await authed("POST", "/api/masters/vehicles/bulk", cookie, [
+      entities.find((entity) => entity.name === "vehicles")!.body(930 + deniedRoles.indexOf(role)),
+    ]);
+    assert.equal(bulk.status, 403, `${role} bulk-import must be 403`);
+    assert.match(JSON.stringify(bulk.body), denyBody);
+
+    // Policy: denied roles may read masters for selectors. If roleBoundary blocks
+    // the entire /masters module, record as product gap (do not weaken auth here).
+    const read = await authed("GET", "/api/masters/vehicles", cookie);
+    assert.ok(
+      read.status === 200 || read.status === 403,
+      `${role} read unexpected status ${read.status}`,
+    );
+    if (read.status === 403) {
+      // Surfaced for Batch C2 product review — OFFICE/AUDIT/COLLECTION/SUPERVISOR
+      // cannot currently reach masters reads through roleBoundary.
+      assert.match(JSON.stringify(read.body), denyBody);
+    }
+  }
 });

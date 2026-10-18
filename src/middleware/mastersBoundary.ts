@@ -25,9 +25,11 @@ export const mastersBoundary: RequestHandler = (req, res, next) => {
   // until authenticated identity exists; created_by/updated_by must never use a fake user.
   res.locals.mastersAccess = access;
   // Master mutations change reference data used across operations and finance.
-  // They are owner-only unless an installation provides a stricter/custom
-  // server-side authorizer below. Read access remains available to authenticated
-  // operational roles because selectors depend on these registers.
+  // Create/update/deactivate/bulk-import are allowed for OWNER and FULL_ACCESS.
+  // OFFICE, AUDIT, COLLECTION and SUPERVISOR may read masters for selectors but
+  // must not mutate them unless a stricter custom authorizeMasters adapter
+  // documents a scoped exception. OWNER remains uniquely responsible for
+  // owner-account assignment and other access-administration actions elsewhere.
   if (action !== "read" && !["OWNER", "FULL_ACCESS"].includes(authUser(res).role)) {
     throw new AppError(403, "Owner access is required to change master data");
   }

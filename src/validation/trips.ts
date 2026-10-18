@@ -146,6 +146,8 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
       helpers: crewNames,
       loaders: crewNames,
       isRentedVehicle: z.boolean().optional(),
+      vehicleMaintenance: z.coerce.number().nonnegative().optional(),
+      vehicleMaintenanceNote: z.string().trim().max(120).optional(),
       openingMeter: z.preprocess(
         (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
         z.coerce.number().positive("Opening meter is required").optional()
@@ -286,6 +288,10 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
     .refine((data) => data.isRentedVehicle || data.closingMeter != null || data.endMeter != null, {
       message: "Either closingMeter or endMeter must be provided to finish the trip",
       path: ["closingMeter"],
+    })
+    .refine((data) => !(Number(data.vehicleMaintenance ?? 0) > 0) || Boolean(String(data.vehicleMaintenanceNote ?? "").trim()), {
+      message: "Vehicle maintenance details are required when maintenance amount is greater than zero",
+      path: ["vehicleMaintenanceNote"],
     }),
 };
 

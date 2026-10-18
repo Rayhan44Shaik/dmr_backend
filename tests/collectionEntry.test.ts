@@ -127,10 +127,10 @@ async function makeCompletedTrip(
 async function addDelivery(tripId: number, shopId: number, shopName: string, amount: number): Promise<number> {
   const result = await pool.query<{ id: number }>(
     `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, mortality, rate, amount)
-     VALUES ($1, $2, $3, $4, 300, 500, 0, 200, ROUND($5::numeric, 2))
+     VALUES ($1, $2, $3, $4, 300, 500, 0, $5::numeric / 500, ROUND($5::numeric, 2))
      RETURNING id`,
-    // rate 200 × weight 500 = 100000 base; we force `amount` directly to the
-    // desired value to keep the test focused on the ledger, not sales math.
+    // Migration 086 enforces amount = weight × rate, so derive the fixture
+    // rate from the desired ledger amount instead of inserting stale data.
     [tripId, `CE-SALE-${seq}-${shopId}`, shopId, shopName, amount]
   );
   return result.rows[0].id;
@@ -482,7 +482,7 @@ describe("HTTP API and transaction safety", () => {
   it("21. named recent and weekly-summary routes are not captured by /:id", async () => {
     const { shop } = await seedShopWithDebit(10000, 5000, "2026-08-06");
     const collection = await collectionEntryService.create({
-      collectionDate: "2026-08-16",
+      collectionDate: "2026-08-10",
       shopId: shop.id,
       amount: 2000,
     });
@@ -502,18 +502,31 @@ describe("HTTP API and transaction safety", () => {
 
     const weekly = await getJson(
       baseUrl,
-      `/api/operations/collection-entry/weekly-summary?shopId=${shop.id}&date=2026-08-16`
+      `/api/operations/collection-entry/weekly-summary?shopId=${shop.id}&date=2026-08-10`
     );
     assert.equal(weekly.status, 200, JSON.stringify(weekly.body));
-    assert.equal(weekly.body.openingBalance, 15000);
+    assert.equal(weekly.body.weekStart, "2026-08-03");
+    assert.equal(weekly.body.weekEnd, "2026-08-09");
+    assert.equal(weekly.body.collectionWeekStart, "2026-08-10");
+    assert.equal(weekly.body.collectionWeekEnd, "2026-08-16");
+    assert.equal(weekly.body.openingBalance, 10000);
+    assert.equal(weekly.body.weeklySales, 5000);
     assert.equal(weekly.body.approvedCollections, 2000);
     assert.equal(weekly.body.closingBalance, 13000);
 
     const allWeekly = await getJson(
       baseUrl,
-      "/api/operations/collection-entry/weekly-summaries?date=2026-08-16"
+      "/api/operations/collection-entry/weekly-summaries?date=2026-08-10"
     );
     assert.equal(allWeekly.status, 200, JSON.stringify(allWeekly.body));
     assert.ok(allWeekly.body.some((row: { shopId: number }) => row.shopId === shop.id));
+
+    const previousWeekBounds = await getJson(
+      baseUrl,
+      "/api/operations/collection-entry/week-bounds?date=2026-10-05&period=previous-completed"
+    );
+    assert.equal(previousWeekBounds.status, 200, JSON.stringify(previousWeekBounds.body));
+    assert.equal(previousWeekBounds.body.weekStart, "2026-09-28");
+    assert.equal(previousWeekBounds.body.weekEnd, "2026-10-04");
   });
 });

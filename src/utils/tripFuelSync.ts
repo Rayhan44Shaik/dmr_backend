@@ -186,7 +186,7 @@ export async function syncTripFuelFromDb(
 ): Promise<number> {
   const tripRes = await client.query(
     `SELECT id, trip_date, status, vehicle_id, vehicle_no, driver_id, driver_name,
-            supervisor_id, supervisor_name
+            supervisor_id, supervisor_name, is_rented_vehicle
      FROM trips WHERE id = $1`,
     [tripId]
   );
@@ -211,7 +211,7 @@ export async function syncTripFuelFromDb(
   }));
 
   await syncDieselToFuelExpenses(client, tripId, dateOnly(trip.trip_date) ?? "", entries, {
-    vehicleId: numOrNull(trip.vehicle_id),
+    vehicleId: Boolean(trip.is_rented_vehicle) ? null : numOrNull(trip.vehicle_id),
     vehicleNo: trip.vehicle_no == null ? null : str(trip.vehicle_no),
     driverId: numOrNull(trip.driver_id),
     driverName: trip.driver_name == null ? null : str(trip.driver_name),

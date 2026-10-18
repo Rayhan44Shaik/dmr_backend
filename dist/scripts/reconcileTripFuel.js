@@ -47,12 +47,13 @@ async function main() {
         let createdTrips = 0;
         let createdBills = 0;
         for (const t of trips.rows) {
-            const dieselRows = await client.query(`SELECT row_index, litres, rate, meter, bunk_name, bunk_gps, image_data, image_name
+            const dieselRows = await client.query(`SELECT row_index, litres, rate, amount, meter, bunk_name, bunk_gps, image_data, image_name
          FROM trip_diesel_entries WHERE trip_id = $1 ORDER BY row_index`, [t.id]);
             const entries = dieselRows.rows.map((r) => ({
                 rowIndex: num(r.row_index),
                 litres: r.litres == null ? null : num(r.litres),
                 rate: r.rate == null ? null : num(r.rate),
+                amount: r.amount == null ? null : num(r.amount),
                 meter: r.meter == null ? null : num(r.meter),
                 bunkName: r.bunk_name == null ? null : str(r.bunk_name),
                 bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
