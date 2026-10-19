@@ -479,7 +479,7 @@ operationsRouter.use("/collection-entry", operationsPendingDeleteRouter);
 
 // ── Collection Entry (real financial collections) ──────────────────────────
 // Distinct from the legacy derived /collections view. Persists real collection
-// records, generates permanent Col-YYYYMMDD-NNN numbers, snapshots Shop
+// records, generates permanent COL-YYYYMMDD-NNN numbers, snapshots Shop
 // opening/closing balances and writes the Shop Ledger CREDIT at approval.
 // The existing /collections endpoints above are preserved unmodified.
 function collectionEntryFilters(req: { query: Record<string, unknown> }) {

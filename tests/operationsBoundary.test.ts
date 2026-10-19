@@ -17,7 +17,7 @@ import { describe, it } from "node:test";
 const { accountsBoundary, fleetBoundary, operationsSensitiveBoundary, operationsTripsBoundary } =
   await import("../src/middleware/businessBoundary.js");
 
-type Role = "OWNER" | "FULL_ACCESS" | "OFFICE" | "SUPERVISOR";
+type Role = "OWNER" | "FULL_ACCESS" | "OFFICE" | "COLLECTION" | "SUPERVISOR";
 
 function mockRes(role: Role) {
   const res: Record<string, unknown> = {
@@ -136,6 +136,30 @@ describe("operationsSensitiveBoundary: rate-entry lock", () => {
       (await run(operationsSensitiveBoundary, "SUPERVISOR", "PUT", "/rate-entry/9")).passed,
       true,
     );
+  });
+});
+
+describe("operationsSensitiveBoundary: collection-entry RBAC", () => {
+  it("entry roles may save drafts but cannot approve, reject, or delete collections", async () => {
+    assert.equal(
+      (await run(operationsSensitiveBoundary, "COLLECTION", "POST", "/collection-entry")).passed,
+      true,
+    );
+    assert.equal(
+      (await run(operationsSensitiveBoundary, "COLLECTION", "PUT", "/collection-entry/9")).passed,
+      true,
+    );
+
+    for (const [method, path] of [
+      ["PATCH", "/collection-entry/9/status"],
+      ["DELETE", "/collection-entry/9"],
+      ["DELETE", "/collection-entry/pending/9"],
+    ] as Array<[string, string]>) {
+      const denied = await run(operationsSensitiveBoundary, "COLLECTION", method, path);
+      assert.equal(denied.passed, false, `${method} ${path}`);
+      assert.equal(denied.status, 403, `${method} ${path}`);
+      assert.equal((await run(operationsSensitiveBoundary, "OWNER", method, path)).passed, true);
+    }
   });
 });
 

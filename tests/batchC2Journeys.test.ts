@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
 import { startApp, type TestApp } from "./helpers/app.js";
+import type { ShopDelivery } from "../src/types/models.js";
 
 const testDb: TestDb = await startTestDb();
 process.env.DATABASE_URL = testDb.url;
@@ -129,7 +130,7 @@ function delivery(
   m: Awaited<ReturnType<typeof masters>>,
   shop: { id: number; shopName: string },
   opts: { key: string; birds: number; weight: number; boxes: number[]; mortality?: number; mortKg?: number },
-) {
+): ShopDelivery {
   return {
     id: 0,
     clientKey: opts.key,
@@ -221,8 +222,8 @@ describe("C2-A Step 4 persistence (API/DB refresh semantics)", () => {
     assert.equal(Number(b.weight), 80);
     assert.equal(Number(b.shop_id), m.shopB.id);
     assert.equal(Number(a.shop_id), m.shopA.id);
-    const uiA = reopened.deliveries.find((d: { clientKey?: string }) => d.clientKey === "a1");
-    const uiB = reopened.deliveries.find((d: { clientKey?: string }) => d.clientKey === "b1");
+    const uiA = reopened.deliveries.find((d: { clientKey?: string | null }) => d.clientKey === "a1");
+    const uiB = reopened.deliveries.find((d: { clientKey?: string | null }) => d.clientKey === "b1");
     assert.equal(Number(uiA?.birds), 38);
     assert.equal(Number(uiB?.birds), 40);
   });

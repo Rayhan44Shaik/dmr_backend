@@ -129,11 +129,16 @@ async function makeCompletedTrip(
 }
 
 async function addDelivery(tripId: number, shopId: number, shopName: string, amount: number): Promise<number> {
+  // Migration 086 enforces amount = weight × rate at the database boundary, so
+  // the fixture must derive the rate from the amount it wants (weight 500).
+  // A fixed rate of 200 used to rewrite a ₹5,000 sale to ₹100,000.
+  const weight = 500;
+  const rate = Number((amount / weight).toFixed(2));
   const result = await pool.query<{ id: number }>(
     `INSERT INTO trip_deliveries (trip_id, sale_no, shop_id, shop_name, birds, weight, mortality, rate, amount)
-     VALUES ($1, $2, $3, $4, 300, 500, 0, 200, ROUND($5::numeric, 2))
+     VALUES ($1, $2, $3, $4, 300, $5, 0, $6, ROUND($7::numeric, 2))
      RETURNING id`,
-    [tripId, `LG-SALE-${seq}-${shopId}`, shopId, shopName, amount]
+    [tripId, `LG-SALE-${seq}-${shopId}`, shopId, shopName, weight, rate, amount]
   );
   return result.rows[0].id;
 }

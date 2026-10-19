@@ -5,11 +5,11 @@
  * Validates the production business flow:
  *   Shop opening balance → Completed Trip → Rate Entry Save & Lock →
  *   Shop Sales (DEBIT baked at lock) → Collection (CREDIT at approval) →
- *   Shop Ledger reconcile → permanent unique Col-YYYYMMDD-NNN numbers.
+ *   Shop Ledger reconcile → permanent unique COL-YYYYMMDD-NNN numbers.
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { getJson, postJson, patchJson, startApp, type TestApp } from "./helpers/app.js";
+import { getJson, postJson, putJson, patchJson, startApp, type TestApp } from "./helpers/app.js";
 import { applySchema, startTestDb, type TestDb } from "./helpers/testDb.js";
 
 const testDb: TestDb = await startTestDb();
@@ -183,10 +183,10 @@ async function ledgerNet(shopId: number): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// 1–4. Unique collection numbering (Col-YYYYMMDD-001, no reuse, gaps allowed)
+// 1–4. Unique collection numbering (COL-YYYYMMDD-001, no reuse, gaps allowed)
 // ---------------------------------------------------------------------------
 describe("Collection numbering — permanent, unique, no reuse", () => {
-  it("1-3. Col-YYYYMMDD-001, -002 then delete #002, next = #003", async () => {
+  it("1-3. COL-YYYYMMDD-001, -002 then delete #002, next = #003", async () => {
     const { shop } = await seedShopWithDebit(10000, 5000);
     const c1 = await collectionEntryService.create({
       collectionDate: "2026-08-16",
@@ -200,8 +200,8 @@ describe("Collection numbering — permanent, unique, no reuse", () => {
       amount: 1000,
       collector: "Alpha",
     });
-    assert.equal(c1.collectionNo, "Col-20260816-001");
-    assert.equal(c2.collectionNo, "Col-20260816-002");
+    assert.equal(c1.collectionNo, "COL-20260816-001");
+    assert.equal(c2.collectionNo, "COL-20260816-002");
 
     await collectionEntryService.softDelete(c2.id, { reason: "test" });
     const c3 = await collectionEntryService.create({
@@ -211,7 +211,7 @@ describe("Collection numbering — permanent, unique, no reuse", () => {
       collector: "Alpha",
     });
     // Deleted #002 is never reused — next is #003.
-    assert.equal(c3.collectionNo, "Col-20260816-003");
+    assert.equal(c3.collectionNo, "COL-20260816-003");
   });
 
   it("4. Status transitions (approve/reject/delete) preserve the same number", async () => {
@@ -245,7 +245,7 @@ describe("Collection numbering — permanent, unique, no reuse", () => {
       )
     );
     const nos = results.map((r) => r.collectionNo).sort();
-    assert.deepEqual(nos, ["Col-20260817-001", "Col-20260817-002", "Col-20260817-003", "Col-20260817-004"]);
+    assert.deepEqual(nos, ["COL-20260817-001", "COL-20260817-002", "COL-20260817-003", "COL-20260817-004"]);
   });
 
   it("DB UNIQUE enforces uniqueness of collection_no", async () => {
@@ -292,7 +292,7 @@ describe("Collection approval credits the Shop and snapshots balances", () => {
       collector: "Beta",
     });
     const approved2 = await collectionEntryService.approve(c2.id, { approvedBy: "auditor" });
-    assert.equal(approved2.collectionNo, "Col-20260820-002");
+    assert.equal(approved2.collectionNo, "COL-20260820-002");
     assert.equal(approved2.openingBalance, 13000);
     assert.equal(approved2.closingBalance, 10000);
     assert.equal(await currentOutstanding(shop.id), 10000, "two collections credit correctly");
@@ -410,12 +410,17 @@ describe("Collection prerequisite gating cannot be bypassed", () => {
     );
   });
 
-  it("17. Amount > outstanding and amount = 0 are rejected", async () => {
+  it("17. Over-collection is accepted and produces a negative balance; amount = 0 is rejected", async () => {
     const { shop } = await seedShopWithDebit(10000, 0, "2026-08-06");
-    await assert.rejects(
-      collectionEntryService.create({ collectionDate: "2026-08-16", shopId: shop.id, amount: 20000 }),
-      /exceeds/i
-    );
+    const overCollection = await collectionEntryService.create({
+      collectionDate: "2026-08-16",
+      shopId: shop.id,
+      amount: 20000,
+    });
+    const approved = await collectionEntryService.approve(overCollection.id);
+    assert.equal(approved.openingBalance, 10000);
+    assert.equal(approved.closingBalance, -10000);
+    assert.equal(await currentOutstanding(shop.id), -10000);
     await assert.rejects(
       collectionEntryService.create({ collectionDate: "2026-08-16", shopId: shop.id, amount: 0 }),
       /amount|Validation|greater/i
@@ -456,7 +461,7 @@ describe("HTTP API and transaction safety", () => {
       collector: "HTTP",
     });
     assert.equal(created.status, 201, JSON.stringify(created.body));
-    assert.match(created.body.collectionNo, /^Col-20260816-\d{3}$/);
+    assert.match(created.body.collectionNo, /^COL-20260816-\d{3}$/);
     assert.equal(created.body.status, "Pending Approval");
     // Approve through the HTTP API (status route is PATCH).
     const approved = await patchJson(baseUrl, `/api/operations/collection-entry/${created.body.id}/status`, { status: "Approved", approvedBy: "web" });
@@ -464,19 +469,46 @@ describe("HTTP API and transaction safety", () => {
     assert.equal(approved.body.status, "Approved");
   });
 
-  it("20. Transaction rollback: failed approval leaves no partial financial state", async () => {
+  it("20. Sequential approvals can carry a shop balance below zero without losing either credit", async () => {
     const { shop } = await seedShopWithDebit(10000, 5000, "2026-08-06");
-    // Two valid collections at create time (outstanding 15000), but approving
-    // the first drains enough to make the second exceed the balance at
-    // approval — so approve() must fail AFTER locking the shop and roll back.
     const a = await collectionEntryService.create({ collectionDate: "2026-08-16", shopId: shop.id, amount: 12000 });
     const b = await collectionEntryService.create({ collectionDate: "2026-08-16", shopId: shop.id, amount: 12000 });
     await collectionEntryService.approve(b.id); // outstanding 15000 → 3000
-    await assert.rejects(collectionEntryService.approve(a.id), /exceeds/i);
+    const approved = await collectionEntryService.approve(a.id); // 3000 → -9000
     const row = await pool.query(`SELECT is_financial, status FROM collections WHERE id=$1`, [a.id]);
-    assert.equal(row.rows[0].is_financial, false, "failed approval must not be financial");
-    assert.equal(await currentOutstanding(shop.id), 3000, "only the approved (b) credit persisted");
-    assert.equal(await ledgerNet(shop.id), 5000 - 12000, "ledger holds sale debit and b-credit only");
+    assert.equal(row.rows[0].is_financial, true);
+    assert.equal(row.rows[0].status, "Approved");
+    assert.equal(approved.closingBalance, -9000);
+    assert.equal(await currentOutstanding(shop.id), -9000);
+    assert.equal(await ledgerNet(shop.id), 5000 - 24000, "ledger holds both collection credits");
+  });
+
+  it("20b. Remarks persist through create, API reload, and update", async () => {
+    const { shop } = await seedShopWithDebit(10000, 0, "2026-08-06");
+    const initialRemarks = "Cash received with rounding adjustment";
+    const created = await postJson(baseUrl, "/api/operations/collection-entry", {
+      collectionDate: "2026-08-16",
+      shopId: shop.id,
+      amount: 14372,
+      collector: "HTTP",
+      remarks: initialRemarks,
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.equal(created.body.remarks, initialRemarks);
+
+    const reloaded = await getJson(baseUrl, `/api/operations/collection-entry/${created.body.id}`);
+    assert.equal(reloaded.status, 200, JSON.stringify(reloaded.body));
+    assert.equal(reloaded.body.remarks, initialRemarks);
+
+    const updatedRemarks = "Verified and saved in backend";
+    const updated = await putJson(baseUrl, `/api/operations/collection-entry/${created.body.id}`, {
+      remarks: updatedRemarks,
+    });
+    assert.equal(updated.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.remarks, updatedRemarks);
+
+    const stored = await pool.query(`SELECT remarks FROM collections WHERE id = $1`, [created.body.id]);
+    assert.equal(stored.rows[0].remarks, updatedRemarks);
   });
 
   it("21. named recent and weekly-summary routes are not captured by /:id", async () => {
@@ -528,5 +560,47 @@ describe("HTTP API and transaction safety", () => {
     assert.equal(previousWeekBounds.status, 200, JSON.stringify(previousWeekBounds.body));
     assert.equal(previousWeekBounds.body.weekStart, "2026-09-28");
     assert.equal(previousWeekBounds.body.weekEnd, "2026-10-04");
+  });
+
+  it("22. 05-Oct selection uses 28-Sep–04-Oct sales and 05–11-Oct collections only", async () => {
+    const { shop } = await seedShopWithDebit(10000, 5000, "2026-10-03");
+
+    const previousWeekCollection = await collectionEntryService.create({
+      collectionDate: "2026-10-04",
+      shopId: shop.id,
+      amount: 100,
+    });
+    await collectionEntryService.approve(previousWeekCollection.id);
+
+    const currentWeekApproved = await collectionEntryService.create({
+      collectionDate: "2026-10-05",
+      shopId: shop.id,
+      amount: 200,
+    });
+    await collectionEntryService.approve(currentWeekApproved.id);
+
+    await collectionEntryService.create({
+      collectionDate: "2026-10-11",
+      shopId: shop.id,
+      amount: 300,
+    });
+
+    const nextWeekCollection = await collectionEntryService.create({
+      collectionDate: "2026-10-12",
+      shopId: shop.id,
+      amount: 400,
+    });
+    await collectionEntryService.approve(nextWeekCollection.id);
+
+    const summary = await collectionEntryService.weeklySummary(shop.id, "2026-10-05");
+    assert.equal(summary.weekStart, "2026-09-28");
+    assert.equal(summary.weekEnd, "2026-10-04");
+    assert.equal(summary.weeklySales, 5000, "approved sales come from the previous completed week");
+    assert.equal(summary.collectionWeekStart, "2026-10-05");
+    assert.equal(summary.collectionWeekEnd, "2026-10-11");
+    assert.equal(summary.approvedCollections, 200, "previous/next-week approvals are excluded");
+    assert.equal(summary.approvedCollectionsCount, 1);
+    assert.equal(summary.pendingCollections, 300, "Sunday pending collection remains in the selected week");
+    assert.equal(summary.pendingCollectionsCount, 1);
   });
 });

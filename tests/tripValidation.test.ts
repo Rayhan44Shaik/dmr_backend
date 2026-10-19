@@ -22,8 +22,8 @@ describe("Trip step boundary validation", () => {
       mode: "submit",
       sourceFarmId: 999_999,
       farmBirdTypeId: 888_888,
-      deliveries: [{ shopId: 77 }],
-      boxDetails: [{ boxNo: 59 }],
+      deliveries: [{ shopId: 77 } as never],
+      boxDetails: [{ boxNo: 59 } as never],
     });
 
     assert.equal(scoped.advanceAmount, 5_000);

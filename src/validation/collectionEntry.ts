@@ -12,7 +12,8 @@ export const collectionEntryBodySchema = z.object({
   collector: z.string().optional(),
   paymentMode: z.string().optional(),
   referenceNo: z.string().optional(),
-  remarks: z.string().optional(),
+  // Stored and returned verbatim so Collection Entry remarks survive reloads.
+  remarks: z.string().max(2000, "remarks must be 2000 characters or fewer").optional(),
   // The credit amount (> 0). amountCollected is never trusted from the client.
   amount: z.number().positive("amount must be greater than 0"),
   // Optional linkage to a delivery / trip for Rate-Entry + Shop-Sales gating.

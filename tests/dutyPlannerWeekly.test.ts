@@ -71,6 +71,40 @@ function saturdayOf(weekStart: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * Daily minimum staffing (approved C5 decision): every active employee must be
+ * assigned on Saturday — the required operating day that the production
+ * validation enforces. Migrations 081/082 seed 28 dummy staff rows, so a
+ * one-employee fixture was 28 short and could never submit.
+ *
+ * `skipEmployeeId` leaves exactly one active employee unassigned so the
+ * understaffed case can be proved against the same rule.
+ */
+async function assignAllActiveOnSaturday(
+  weekStart: string,
+  opts: { skipEmployeeId?: number } = {}
+): Promise<number> {
+  const saturday = saturdayOf(weekStart);
+  const active = await pool.query<{
+    id: number;
+    employee_name: string;
+    department: string;
+    role: string;
+  }>("SELECT id, employee_name, department, role FROM employees WHERE status = 'Active' ORDER BY id");
+  let assigned = 0;
+  for (const emp of active.rows) {
+    if (opts.skipEmployeeId === emp.id) continue;
+    await pool.query(
+      `INSERT INTO duty_assignments (employee_id, employee_name, department, role, duty_type, duty_date)
+       VALUES ($1,$2,$3,$4,'Delivery',$5)
+       ON CONFLICT (employee_id, duty_date) DO NOTHING`,
+      [emp.id, emp.employee_name, emp.department, emp.role || emp.department, saturday]
+    );
+    assigned += 1;
+  }
+  return assigned;
+}
+
 // ---------------------------------------------------------------------------
 // Closed weeks (completed Sunday already passed)
 // ---------------------------------------------------------------------------
@@ -105,13 +139,11 @@ describe("Duty Planner — previous (Closed) weeks", () => {
 
 describe("Duty Planner — current week lifecycle", () => {
   it("submits an Open week that passes validation", async () => {
-    const sat = saturdayOf(curMonday);
-    // One active employee covering Saturday → no staff shortage → valid.
-    await dutyPlannerService.upsertDuty({
-      employeeId: empId,
-      dutyType: "Delivery",
-      date: sat,
-    });
+    // Daily minimum: staff every active employee on Saturday, otherwise the
+    // requirement (all active staff, including migration-seeded dummy rows) is
+    // unmet and the week cannot submit.
+    const staffed = await assignAllActiveOnSaturday(curMonday);
+    assert.ok(staffed > 0, "fixture precondition: at least one active employee");
 
     const week = await dutyPlannerService.getDutyWeek(curMonday);
     assert.equal(week.status, "Open");
@@ -160,6 +192,35 @@ describe("Duty Planner — current week lifecycle", () => {
       () => dutyPlannerService.autoAssignApply(curMonday),
       (err: Error & { status?: number }) =>
         err.message.toLowerCase().includes("submitted") && err.status === 409
+    );
+  });
+});
+
+describe("Duty Planner — daily minimum staffing", () => {
+  it("still rejects an individual Saturday that is one employee short", async () => {
+    const next: Date = new Date(cur);
+    next.setDate(cur.getDate() + 7);
+    const nextMonday = loc(next);
+
+    const active = await pool.query<{ id: number }>(
+      "SELECT id FROM employees WHERE status = 'Active' ORDER BY id"
+    );
+    assert.ok(active.rows.length > 0);
+    const lastEmployee = active.rows[active.rows.length - 1].id;
+
+    await assignAllActiveOnSaturday(nextMonday, { skipEmployeeId: lastEmployee });
+
+    const week = await dutyPlannerService.getDutyWeek(nextMonday);
+    assert.equal(week.validation.ok, false, "one unassigned employee must fail the day");
+    assert.ok(
+      week.validation.problems.includes("Saturday requires 1 more assigned employee(s)."),
+      JSON.stringify(week.validation.problems)
+    );
+
+    await assert.rejects(
+      () => dutyPlannerService.submitWeek(nextMonday),
+      (err: Error & { status?: number }) =>
+        err.status === 422 && /Saturday requires 1 more assigned employee\(s\)/.test(err.message)
     );
   });
 });

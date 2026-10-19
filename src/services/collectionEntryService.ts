@@ -33,9 +33,10 @@ const SEL = `
 
 function mapEntry(row: Record<string, unknown>): CollectionEntry {
   const amount = num(row.amount ?? row.amount_collected);
+  const collectionNo = str(row.collection_no).replace(/^col-/i, "COL-");
   return {
     id: num(row.id),
-    collectionNo: str(row.collection_no),
+    collectionNo,
     collectionDate: dateOnly(row.collection_date) ?? "",
     shopId: row.shop_id == null ? null : num(row.shop_id),
     shopName: str(row.shop_name),
@@ -491,13 +492,6 @@ export const collectionEntryService = {
             shopId: data.shopId,
           });
         }
-        const currentOutstanding = shop.currentBalance;
-        if (data.amount > currentOutstanding) {
-          throw new AppError(
-            409,
-            `Collection ₹${data.amount} exceeds the shop's outstanding balance ₹${currentOutstanding}`
-          );
-        }
         const collectionDate = dateOnly(data.collectionDate);
         if (!collectionDate) throw new AppError(400, "Invalid collection date");
 
@@ -649,12 +643,6 @@ export const collectionEntryService = {
         }
 
         const opening = shop.currentBalance;
-        if (existing.amount > opening) {
-          throw new AppError(
-            409,
-            `Collection ₹${existing.amount} exceeds the shop's outstanding balance ₹${opening}`
-          );
-        }
         const closing = Number((opening - existing.amount).toFixed(2));
         const approvedBy = body.approvedBy ?? "system";
 

@@ -72,7 +72,7 @@ WHERE NOT EXISTS (
 -- atomically: concurrent transactions serialize on the row lock and each gets
 -- a strictly increasing last_value. Because the counter is never decremented,
 -- numbers are never reused, even when a collection is deleted. The actual
--- Col-YYYYMMDD-NNN string is produced in the same statement.
+-- COL-YYYYMMDD-NNN string is produced in the same statement.
 CREATE TABLE IF NOT EXISTS collection_sequences (
   seq_date   DATE PRIMARY KEY,
   last_value INTEGER NOT NULL DEFAULT 0
@@ -89,7 +89,7 @@ BEGIN
   DO UPDATE SET last_value = collection_sequences.last_value + 1
   RETURNING last_value INTO v_seq;
 
-  RETURN 'Col-' || to_char(p_date, 'YYYYMMDD') || '-' || lpad(v_seq::text, 3, '0');
+  RETURN 'COL-' || to_char(p_date, 'YYYYMMDD') || '-' || lpad(v_seq::text, 3, '0');
 END;
 $$ LANGUAGE plpgsql;
 -- VOLATILE (default for plpgsql) because it WRITES to collection_sequences via

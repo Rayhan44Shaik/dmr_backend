@@ -1,13 +1,18 @@
 /**
- * Isolated PGlite + production server on :4100 for Batch C2 / trip-workflow browser runs.
+ * Isolated test database + production server on :4100 for browser runs.
+ * Defaults to PGlite. Set E2E_DATABASE_URL to a disposable, migrated PostgreSQL
+ * database when the browser page's parallel requests need true transactions
+ * (the PGlite pg-gateway shares one session across pool connections).
  * Never connects to the operational database.
  */
 import { startApp } from "./helpers/app.js";
 import { applySchema, startTestDb } from "./helpers/testDb.js";
 
-const testDb = await startTestDb();
-process.env.DATABASE_URL = testDb.url;
-await applySchema();
+const externalDbUrl = process.env.E2E_DATABASE_URL?.trim() || null;
+const testDb = externalDbUrl ? null : await startTestDb();
+const databaseUrl = externalDbUrl ?? testDb!.url;
+process.env.DATABASE_URL = databaseUrl;
+if (!externalDbUrl) await applySchema();
 
 const { pool } = await import("../src/config/db.js");
 const { mastersService } = await import("../src/services/mastersService.js");
@@ -179,7 +184,7 @@ const c2Trip = await tripsService.save(null, {
 // Vite :5199 proxies /api here; browsers send Origin. Pin CORS to the FE origin
 // so SameSite session cookies work through the proxy without CORS crashes.
 const app = await startApp(
-  { DATABASE_URL: testDb.url, CORS_ORIGIN: "http://127.0.0.1:5199" },
+  { DATABASE_URL: databaseUrl, CORS_ORIGIN: "http://127.0.0.1:5199" },
   4100,
 );
 
@@ -204,7 +209,7 @@ async function stop() {
   stopping = true;
   await app.close();
   await pool.end();
-  await testDb.close();
+  if (testDb) await testDb.close();
   process.exit(0);
 }
 process.on("SIGINT", () => void stop());

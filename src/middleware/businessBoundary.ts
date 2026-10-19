@@ -160,6 +160,15 @@ export const operationsSensitiveBoundary: RequestHandler = (req, res, next) => {
   ) {
     financeOnly(res, "approval");
   }
+  // Collection Entry uses a consolidated PATCH status endpoint. Protect it
+  // here as well as the legacy POST approve/reject routes; hiding the action
+  // in the UI is never treated as authorization.
+  if (method === "PATCH" && /^\/collection-entry\/[^/]+\/status$/.test(req.path)) {
+    financeOnly(res, "collection approval");
+  }
+  if (method === "DELETE" && /^\/collection-entry\/(?:pending\/)?[^/]+$/.test(req.path)) {
+    financeOnly(res, "collection deletion");
+  }
   next();
 };
 

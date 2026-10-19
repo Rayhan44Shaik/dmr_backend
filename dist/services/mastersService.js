@@ -504,16 +504,15 @@ export const mastersService = {
                 await assertUnique("shopNumber", body.shopNumber, shopId);
             return withTransaction(async (client) => {
                 const result = await client.query(`UPDATE shops SET
-          shop_no=COALESCE($2,shop_no), shop_number='SHOP-' || LPAD(COALESCE($2,shop_no)::text,6,'0'), shop_name=$4, owner_name=$5, phone_number=$6,
-          secondary_phone_number=$7, whatsapp_number=$8, email=$9,
-          city=$10, village=$10, address=$11, latitude=$12, longitude=$13,
-          paper_rate=$14, association_type=$15, status=$16, opening_balance=$17,
-          current_balance = $17 + COALESCE(
+          shop_no=COALESCE($2,shop_no), shop_number='SHOP-' || LPAD(COALESCE($2,shop_no)::text,6,'0'), shop_name=$3, owner_name=$4, phone_number=$5,
+          secondary_phone_number=$6, whatsapp_number=$7, email=$8,
+          city=$9, village=$9, address=$10, latitude=$11, longitude=$12,
+          paper_rate=$13, association_type=$14, status=$15, opening_balance=$16,
+          current_balance = $16 + COALESCE(
             (SELECT SUM(debit) - SUM(credit) FROM shop_ledger WHERE shop_id = $1), 0)
          WHERE id=$1 RETURNING *`, [
                     shopId,
                     body.shopNo,
-                    body.shopNumber ?? "",
                     body.shopName,
                     body.ownerName ?? "",
                     body.phoneNumber ?? "",
