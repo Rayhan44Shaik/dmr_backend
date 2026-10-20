@@ -556,6 +556,22 @@ export const collectionEntryService = {
         const newDate = data.collectionDate !== undefined ? dateOnly(data.collectionDate) : existing.collectionDate;
         if (!newDate) throw new AppError(400, "Invalid collection date");
         const shopId = existing.shopId;
+        const targetShopId = data.shopId ?? shopId;
+        const shopChanged = targetShopId !== shopId;
+        let targetShopName = existing.shopName;
+
+        if (shopChanged) {
+          if (existing.isFinancial) {
+            throw new AppError(409, "An approved collection cannot be moved to another shop");
+          }
+          if (targetShopId == null) throw new AppError(422, "A valid shop is required");
+          const targetShop = await lockShop(client, targetShopId);
+          if (!targetShop) throw new AppError(422, "Shop not found", { shopId: targetShopId });
+          if (targetShop.status !== "Active") {
+            throw new AppError(422, "Shop is inactive and cannot receive a collection", { shopId: targetShopId });
+          }
+          targetShopName = targetShop.shopName;
+        }
 
         if (existing.isFinancial && data.amount !== undefined && newAmount !== existing.amount) {
           if (shopId == null) throw new AppError(422, "Collection has no linked shop");
@@ -588,6 +604,8 @@ export const collectionEntryService = {
              payment_mode    = COALESCE($5, payment_mode),
              reference_no    = COALESCE($6, reference_no),
              remarks         = COALESCE($7, remarks),
+             shop_id         = $8,
+             shop_name       = $9,
              updated_at      = NOW()
            WHERE id = $1`,
           [
@@ -598,6 +616,8 @@ export const collectionEntryService = {
             data.paymentMode ?? null,
             data.referenceNo ?? null,
             data.remarks ?? null,
+            targetShopId,
+            targetShopName,
           ]
         );
 

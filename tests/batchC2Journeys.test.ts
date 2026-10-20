@@ -395,27 +395,28 @@ describe("Step 5 vehicle-maintenance synchronization", () => {
   });
 });
 
-describe("C3 duplicate pickup-file identity", () => {
+describe("C3 pickup-file identity", () => {
   const fp = (hash: string, name = "boxes.xlsx") => ({
     algorithm: "SHA-256", version: 1, contentHash: hash, originalFilename: name, byteLength: 123,
   });
 
-  it("rejects the same bytes for an unchanged load, but permits them after complete erase", async () => {
+  it("accepts an idempotent retry of the same bytes and permits them after complete erase", async () => {
     const m = await masters();
     const trip = await pickupTrip(m, []);
     const boxes = [{ boxNo: 1, birds: 20, weight: 40 }];
     const hash = "a".repeat(64);
     await tripsService.save(trip.id, { boxDetails: boxes, importFingerprint: fp(hash) } as Record<string, unknown>);
-    await assert.rejects(
-      () => tripsService.save(trip.id, { boxDetails: boxes, importFingerprint: fp(hash, "renamed.xlsx") } as Record<string, unknown>),
-      (error: unknown) => error instanceof AppError && error.status === 409,
-    );
+    await tripsService.save(trip.id, {
+      boxDetails: boxes,
+      importFingerprint: fp(hash, "renamed.xlsx"),
+    } as Record<string, unknown>);
+    assert.deepEqual(await dbBoxes(trip.id), boxes);
     await tripsService.save(trip.id, { boxDetails: [], clearBoxDetails: true } as Record<string, unknown>);
     await tripsService.save(trip.id, { boxDetails: boxes, importFingerprint: fp(hash) } as Record<string, unknown>);
     assert.equal((await dbBoxes(trip.id)).length, 1);
   });
 
-  it.todo("real PostgreSQL concurrent duplicate submissions: one commit and one 409 (PGlite gateway cannot run simultaneous transactions reliably)");
+  it.todo("real PostgreSQL concurrent repeated submissions remain idempotent (PGlite gateway cannot run simultaneous transactions reliably)");
 
   it("does not retain a fingerprint when the box transaction rolls back", async () => {
     const m = await masters();

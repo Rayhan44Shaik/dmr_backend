@@ -387,10 +387,15 @@ describe("C3 pickup import fingerprint validation and isolation", () => {
       1,
     );
 
-    // Identical bytes with a different filename is still a duplicate file.
-    await assert.rejects(
-      () => tripsService.save(tripB.id, { boxDetails: boxes, importFingerprint: fp("d".repeat(64), "renamed.xlsx") } as Record<string, unknown>),
-      (error: unknown) => error instanceof AppError && error.status === 409,
+    // Identical bytes are accepted as an idempotent retry. The fingerprint
+    // remains a single row and the submitted complete box list is re-saved.
+    await tripsService.save(tripB.id, {
+      boxDetails: boxes,
+      importFingerprint: fp("d".repeat(64), "renamed.xlsx"),
+    } as Record<string, unknown>);
+    assert.equal(
+      Number((await pool.query(`SELECT COUNT(*)::int AS c FROM trip_pickup_import_fingerprints WHERE trip_id = $1`, [tripB.id])).rows[0].c),
+      1,
     );
 
     // A different trip may import the identical bytes independently.
@@ -421,10 +426,10 @@ describe("C3 pickup import fingerprint validation and isolation", () => {
     const trip = await pickupTrip(m, []);
     const hash = "e".repeat(64);
     await tripsService.save(trip.id, { boxDetails: boxes, importFingerprint: fp(hash, "same.xlsx") } as Record<string, unknown>);
-    await assert.rejects(
-      () => tripsService.save(trip.id, { boxDetails: boxes, importFingerprint: fp(hash, "same.xlsx") } as Record<string, unknown>),
-      (error: unknown) => error instanceof AppError && error.status === 409,
-    );
+    await tripsService.save(trip.id, {
+      boxDetails: boxes,
+      importFingerprint: fp(hash, "same.xlsx"),
+    } as Record<string, unknown>);
     await tripsService.save(trip.id, { boxDetails: [], clearBoxDetails: true } as Record<string, unknown>);
     const afterErase = await pool.query(
       `SELECT COUNT(*)::int AS count FROM trip_pickup_import_fingerprints WHERE trip_id = $1`,

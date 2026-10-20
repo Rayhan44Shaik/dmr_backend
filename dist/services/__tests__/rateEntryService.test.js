@@ -121,7 +121,7 @@ describe("rateEntryService", () => {
             assert.equal(row.ratesEntered, 1);
             assert.equal(row.rateLocked, false);
             assert.equal(row.totalAmount, 16000);
-            assert.deepEqual(row.loadAmounts, [{ load: 1, amount: 16000 }]);
+            assert.deepEqual(row.loadAmounts, [{ load: 1, shops: 1, birds: 100, weight: 200, amount: 16000 }]);
         }
         finally {
             await cleanup(f);

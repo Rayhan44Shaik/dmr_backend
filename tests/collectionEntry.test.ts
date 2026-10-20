@@ -351,6 +351,30 @@ describe("Shop Sales debit and correction synchronization", () => {
 // 12–15. Edit difference, approval idempotency, delete idempotency
 // ---------------------------------------------------------------------------
 describe("Collection edit/approve/delete idempotency", () => {
+  it("moves a pending collection to another active shop without losing its amount", async () => {
+    const source = await seedShop(1000);
+    const target = await seedShop(2000);
+    const collection = await collectionEntryService.create({
+      collectionDate: "2026-08-16",
+      shopId: source.id,
+      amount: 750,
+      remarks: "MOVE WITH PAYMENT",
+    });
+
+    const updated = await collectionEntryService.update(collection.id, {
+      shopId: target.id,
+      shopName: "UNTRUSTED CLIENT NAME",
+      amount: 750,
+    });
+
+    assert.equal(updated.shopId, target.id);
+    assert.equal(updated.shopName, target.name, "shop name must come from the selected master");
+    assert.equal(updated.amount, 750);
+    assert.equal(updated.remarks, "MOVE WITH PAYMENT");
+    assert.equal(await currentOutstanding(source.id), 1000, "pending source balance stays unchanged");
+    assert.equal(await currentOutstanding(target.id), 2000, "pending target balance stays unchanged");
+  });
+
   it("12. Editing an approved collection applies the DIFFERENCE only", async () => {
     const { shop } = await seedShopWithDebit(10000, 5000, "2026-08-06");
     const c = await collectionEntryService.create({ collectionDate: "2026-08-16", shopId: shop.id, amount: 2000 });

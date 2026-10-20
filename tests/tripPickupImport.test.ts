@@ -255,4 +255,47 @@ describe("Trip pickup committed import / erase / reimport", () => {
     );
     assert.equal(stored.reduce((s, b) => s + b.birds, 0), 10);
   });
+
+  it("replaces removed pickup photos instead of restoring them on the next save", async () => {
+    const m = await seed();
+    const trip = await draftTrip(m, [{ boxNo: 1, birds: 10, weight: 20 }]);
+    const oldPhoto = {
+      key: `old-photo-${trip.id}`,
+      mime: "image/jpeg",
+      data: "data:image/jpeg;base64,T0xE",
+    };
+    const newPhoto = {
+      key: `new-photo-${trip.id}`,
+      mime: "image/jpeg",
+      data: "data:image/jpeg;base64,TkVX",
+    };
+
+    await tripsService.submitStep(trip.id, "pickup", {
+      mode: "save",
+      legIndex: 1,
+      boxDetails: [{ boxNo: 1, birds: 10, weight: 20 }],
+      dcPhotoKey: oldPhoto.key,
+      dcPhotoMime: oldPhoto.mime,
+      dcPhotoData: oldPhoto.data,
+      pickupPhotos: [oldPhoto],
+      syncPickupPhotos: true,
+    } as Record<string, unknown>);
+
+    await tripsService.submitStep(trip.id, "pickup", {
+      mode: "save",
+      legIndex: 1,
+      boxDetails: [{ boxNo: 1, birds: 10, weight: 20 }],
+      dcPhotoKey: newPhoto.key,
+      dcPhotoMime: newPhoto.mime,
+      dcPhotoData: newPhoto.data,
+      pickupPhotos: [newPhoto],
+      syncPickupPhotos: true,
+    } as Record<string, unknown>);
+
+    const stored = await pool.query<{ media_key: string }>(
+      `SELECT media_key FROM trip_media WHERE trip_id = $1 AND media_type = 'image' ORDER BY media_key`,
+      [trip.id],
+    );
+    assert.deepEqual(stored.rows.map((row) => row.media_key), [newPhoto.key]);
+  });
 });

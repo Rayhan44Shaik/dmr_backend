@@ -62,6 +62,9 @@ function mapDeliverySale(row) {
         rate,
         amount,
         mortality: num(row.mortality),
+        mortalityWeight: num(row.mort_kg),
+        deliveryMode: str(row.delivery_mode) === "weight" ? "weight" : "box",
+        selectedBoxCount: num(row.selected_box_count),
         remarks: str(row.remarks),
         status: tripToOpsStatus(tripStatus, tripDeleted),
         deleted: saleDeleted,
@@ -85,6 +88,7 @@ const SALE_SELECT = `
          t.trip_no, t.trip_date, t.status AS trip_status, t.deleted AS trip_deleted,
          t.deleted_reason, t.approved_by, t.approved_at, t.vehicle_no, t.is_rented_vehicle, t.source_farm,
          t.rate_completed, t.rate_locked_at, t.rate_locked_by,
+         (SELECT COUNT(*)::int FROM trip_delivery_boxes tdb WHERE tdb.delivery_id = d.id) AS selected_box_count,
          re.rate AS re_rate
   FROM trip_deliveries d
   INNER JOIN trips t ON t.id = d.trip_id

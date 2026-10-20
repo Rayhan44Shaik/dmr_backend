@@ -110,12 +110,9 @@ if (!url) {
         Array.from({ length: 8 }, () => tripsService.save(trip.id, { ...payload })),
       );
       const fulfilled = results.filter((r) => r.status === "fulfilled");
-      const rejected = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
-      assert.equal(fulfilled.length, 1, "exactly one commit");
-      assert.equal(rejected.length, 7, "every loser rejects");
-      for (const failure of rejected) {
-        assert.equal((failure.reason as { status?: number }).status, 409, String(failure.reason));
-      }
+      const rejected = results.filter((r) => r.status === "rejected");
+      assert.equal(fulfilled.length, 8, "every repeated submission is idempotent");
+      assert.equal(rejected.length, 0, "no repeated submission conflicts");
 
       const fingerprints = await pool.query(
         `SELECT COUNT(*)::int AS count FROM trip_pickup_import_fingerprints WHERE trip_id = $1`,

@@ -197,6 +197,9 @@ function mapTrip(row, deliveries) {
         const ratedRows = rows.filter((delivery) => delivery.rate != null && Number(delivery.rate) > 0);
         return {
             load,
+            shops: rows.length,
+            birds: rows.reduce((sum, delivery) => sum + delivery.birds, 0),
+            weight: Number(rows.reduce((sum, delivery) => sum + delivery.weight, 0).toFixed(2)),
             amount: Number(ratedRows.reduce((sum, delivery) => sum + delivery.amount, 0).toFixed(2)),
         };
     });

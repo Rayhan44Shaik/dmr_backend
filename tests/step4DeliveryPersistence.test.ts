@@ -562,6 +562,97 @@ describe("Step 4 per-shop persistence (saveDeliveries)", () => {
     );
   });
 
+  it("keeps trip aggregate capacity step-dependent: shop save succeeds, final Step 4 submit rejects", async () => {
+    const m = await seedMasters();
+    const trip = await makePickupTrip(m, {
+      tripDate: "2026-07-06",
+      boxes: [
+        { boxNo: 1, birds: 100, weight: 200 },
+        { boxNo: 2, birds: 50, weight: 100 },
+      ],
+    });
+    await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          clientKey: "ck-existing-a",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          birds: 100,
+          weight: 190,
+          selectedBoxIds: [1],
+        }),
+        delivery({
+          clientKey: "ck-existing-b",
+          shopId: m.shopB.id,
+          shopName: m.shopB.shopName,
+          birds: 50,
+          weight: 100,
+          selectedBoxIds: [2],
+        }),
+      ],
+    });
+
+    // Simulate Step 3 being corrected below the combined delivery total.
+    // Each individual shop still remains within its own selected boxes.
+    await pool.query(
+      `UPDATE trip_legs SET farm_load_weight = 0, dc_weight = 289.40 WHERE trip_id = $1`,
+      [trip.id],
+    );
+
+    // Updating Shop A from 190 to 195 kg makes the trip total 295 kg, but an
+    // individual Update Delivery must still succeed because 195 <= its box's
+    // 200 kg. Aggregate reconciliation is a Step 4 submit concern.
+    await tripsService.saveDeliveries(trip.id, {
+      deliveries: [
+        delivery({
+          clientKey: "ck-existing-a",
+          shopId: m.shopA.id,
+          shopName: m.shopA.shopName,
+          birds: 100,
+          birdTypeId: m.birdType.id,
+          birdType: m.birdType.birdType,
+          weight: 195,
+          selectedBoxIds: [1],
+        }),
+      ],
+    });
+    const rows = await pool.query(
+      `SELECT weight FROM trip_deliveries WHERE trip_id = $1 AND client_key = 'ck-existing-a'`,
+      [trip.id],
+    );
+    assert.equal(Number(rows.rows[0].weight), 195);
+
+    await assert.rejects(
+      () =>
+        tripsService.submitStep(trip.id, "deliveries", {
+          deliveries: [
+            delivery({
+              clientKey: "ck-existing-a",
+              shopId: m.shopA.id,
+              shopName: m.shopA.shopName,
+              birdTypeId: m.birdType.id,
+              birdType: m.birdType.birdType,
+              birds: 100,
+              weight: 195,
+              selectedBoxIds: [1],
+            }),
+            delivery({
+              clientKey: "ck-existing-b",
+              shopId: m.shopB.id,
+              shopName: m.shopB.shopName,
+              birdTypeId: m.birdType.id,
+              birdType: m.birdType.birdType,
+              birds: 50,
+              weight: 100,
+              selectedBoxIds: [2],
+            }),
+          ],
+          deliveryStepSubmitted: true,
+        } as Record<string, unknown>),
+      /trip available weight/i,
+    );
+  });
+
   it("a box may hold MORE weight than the delivery; delivery may not exceed it", async () => {
     const m = await seedMasters();
     const trip = await makePickupTrip(m, {

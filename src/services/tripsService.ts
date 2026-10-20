@@ -133,13 +133,49 @@ const START_STEP_FIELDS = new Set([
   "updatedAt",
 ]);
 
+// A pickup correction must never replay the hydrated Step 4 rows. Besides
+// making an old client capable of overwriting newer per-shop saves, doing so
+// validates every delivery against the just-corrected pickup total and blocks
+// Step 3 with a Step 4 capacity error. Full delivery reconciliation belongs to
+// the Step 4 submit endpoint; the per-shop endpoint validates only rows that
+// the operator explicitly saves.
+const PICKUP_STEP_FIELDS = new Set([
+  "dcWeight",
+  "totalBirds",
+  "boxes",
+  "avgWeight",
+  "pickupLoadTime",
+  "dcPhotoKey",
+  "dcPhotoMime",
+  "dcPhotoData",
+  "dcPhotoKey2",
+  "dcPhotoMime2",
+  "dcPhotoData2",
+  "pickupPhotos",
+  "syncPickupPhotos",
+  "boxDetails",
+  "clearBoxDetails",
+  "pickupBoxWrite",
+  "importFingerprint",
+  "pickupStepSubmitted",
+  "legIndex",
+  "mode",
+  "expectedUpdatedAt",
+  "updatedAt",
+]);
+
 export function scopeTripStepBody(
   step: TripWizardStep,
   body: Partial<Trip> & Record<string, unknown>
 ): Partial<Trip> & Record<string, unknown> {
-  if (step !== "start") return { ...body };
+  const fields = step === "start"
+    ? START_STEP_FIELDS
+    : step === "pickup"
+      ? PICKUP_STEP_FIELDS
+      : null;
+  if (!fields) return { ...body };
   return Object.fromEntries(
-    Object.entries(body).filter(([key]) => START_STEP_FIELDS.has(key))
+    Object.entries(body).filter(([key]) => fields.has(key))
   ) as Partial<Trip> & Record<string, unknown>;
 }
 
@@ -1229,6 +1265,83 @@ async function assertDeliveriesWithinCapacity(
   }
   const capacityBirds = farmBirdCount > 0 ? farmBirdCount : totalBirdsCap;
   const capacityWeight = farmLoadWeight > 0 ? farmLoadWeight : dcWeightCap;
+
+  // Final submit must validate the physical box assignments too, not only
+  // the aggregate load total. Step 3 can be corrected after deliveries were
+  // captured, leaving one or more shop rows with stale weights/box numbers.
+  // Report every affected shop in one response so the operator can repair
+  // only those rows instead of editing unrelated deliveries one by one.
+  const pickupBoxes = await client.query<{ box_no: number; birds: number; weight: string }>(
+    legId != null && legId > 0
+      ? `SELECT box_no, birds, weight FROM trip_boxes WHERE trip_id = $1 AND leg_id = $2 ORDER BY box_no`
+      : `SELECT box_no, birds, weight FROM trip_boxes WHERE trip_id = $1 ORDER BY box_no`,
+    legId != null && legId > 0 ? [tripId, legId] : [tripId]
+  );
+  const boxesByNo = new Map<number, { birds: number; weight: number }>();
+  for (const box of pickupBoxes.rows) {
+    boxesByNo.set(num(box.box_no), { birds: num(box.birds), weight: num(box.weight) });
+  }
+  const boxOwner = new Map<number, string>();
+  const assignmentIssues: string[] = [];
+  const WEIGHT_TOLERANCE_KG = 0.05;
+  for (const d of deliveries) {
+    const remarks = String(d.remarks ?? "");
+    const isUncapturedOrderPlan =
+      remarks.startsWith("[ORDER]") &&
+      !(
+        d.autoCaptureTime ||
+        (d as { deliveredAt?: string }).deliveredAt ||
+        (d as { deliveryTime?: string }).deliveryTime
+      );
+    if (isUncapturedOrderPlan) continue;
+
+    const shop = String(d.shopName ?? "").trim() || `Shop ${d.shopId ?? "unknown"}`;
+    const selected = [...new Set((d.selectedBoxIds ?? []).map(Number))]
+      .filter((boxNo) => Number.isSafeInteger(boxNo) && boxNo > 0)
+      .sort((a, b) => a - b);
+    const boxLabel = selected.length ? selected.join(", ") : "none";
+    const missing = selected.filter((boxNo) => !boxesByNo.has(boxNo));
+    if (missing.length) {
+      assignmentIssues.push(`${shop}: boxes ${missing.join(", ")} no longer exist in Step 3 pickup.`);
+      continue;
+    }
+    const duplicated = selected.filter((boxNo) => {
+      const owner = boxOwner.get(boxNo);
+      if (!owner) {
+        boxOwner.set(boxNo, shop);
+        return false;
+      }
+      return owner !== shop;
+    });
+    if (duplicated.length) {
+      assignmentIssues.push(`${shop}: boxes ${duplicated.join(", ")} are also assigned to another shop.`);
+      continue;
+    }
+    // Legacy/API fixtures may predate physical box assignment. Their
+    // aggregate capacity is still validated below; only rows that actually
+    // carry selectedBoxIds can be diagnosed against specific boxes here.
+    if (!selected.length) continue;
+    const availableBirds = selected.reduce((sum, boxNo) => sum + (boxesByNo.get(boxNo)?.birds ?? 0), 0);
+    const availableWeight = selected.reduce((sum, boxNo) => sum + (boxesByNo.get(boxNo)?.weight ?? 0), 0);
+    const requestedBirds = Number(d.birds ?? 0) + Number(d.mortality ?? 0);
+    const requestedWeight = Number(d.weight ?? 0) + Number(d.mortKg ?? 0);
+    if (requestedBirds > availableBirds) {
+      assignmentIssues.push(
+        `${shop} (boxes ${boxLabel}): birds ${requestedBirds} exceed current box birds ${availableBirds}.`
+      );
+    }
+    if (requestedWeight > availableWeight + WEIGHT_TOLERANCE_KG) {
+      assignmentIssues.push(
+        `${shop} (boxes ${boxLabel}): weight ${requestedWeight.toFixed(2)} kg exceeds current box weight ${availableWeight.toFixed(2)} kg.`
+      );
+    }
+  }
+  if (assignmentIssues.length) {
+    throw new AppError(
+      422,
+      `Step 3 pickup changed. Correct only these Step 4 deliveries: ${assignmentIssues.join(" ")}`
+    );
+  }
 
   let totalBirds = 0;
   let totalWeight = 0;
@@ -2843,7 +2956,7 @@ export const tripsService = {
             await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
               `pickup_import_${tripId}_${activeLeg.id}`,
             ]);
-            const inserted = await client.query(
+            await client.query(
               `INSERT INTO trip_pickup_import_fingerprints
                  (trip_id, leg_id, hash_algorithm, hash_version, content_hash, original_filename, byte_length)
                VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -2851,9 +2964,6 @@ export const tripsService = {
                RETURNING id`,
               [tripId, activeLeg.id, algorithm, version, hash, filename.slice(0, 255), byteLength]
             );
-            if (!inserted.rowCount) {
-              throw new AppError(409, "This file has already been imported for the current load.");
-            }
           }
           if ((body.boxDetails as BoxDetail[]).length === 0 && body.clearBoxDetails === true) {
             await client.query(
@@ -3198,33 +3308,6 @@ export const tripsService = {
       const usedBoxes = new Set<number>();
       for (const r of otherBoxes.rows) usedBoxes.add(num(r.box_no));
 
-      // Cross-shop totals from live persisted rows on THIS load, minus rows we replace.
-      let totalBirds = 0;
-      let totalWeight = 0;
-      for (const r of existingRows) {
-        totalBirds += r.birds + r.mortality;
-        totalWeight += r.weight + r.mortKg;
-      }
-      // Assignment-plan rows carry proportional birds/weight for reporting,
-      // but are not physical deliveries. sumActiveDeliveries sees every live
-      // row, so remove uncaptured Orders plans before applying real-capture
-      // capacity checks below.
-      // (existingRows is already scoped to this load's leg_id.)
-      for (const r of existingRows) {
-        const isUncapturedOrderPlan =
-          r.remarks.startsWith("[ORDER]") && !r.autoCaptureTime;
-        if (!isUncapturedOrderPlan) continue;
-        totalBirds -= r.birds + r.mortality;
-        totalWeight -= r.weight + r.mortKg;
-      }
-      for (const id of excludedIds) {
-        const r = existingRows.find((x) => x.id === id);
-        if (!r) continue;
-        if (r.remarks.startsWith("[ORDER]") && !r.autoCaptureTime) continue;
-        totalBirds -= r.birds + r.mortality;
-        totalWeight -= r.weight + r.mortKg;
-      }
-
       const tripNo = tripRow.trip_no ? str(tripRow.trip_no) : `TR-${tripId}`;
       let maxSerial = 0;
       for (const r of existingRows) {
@@ -3339,13 +3422,6 @@ export const tripsService = {
           }
         }
 
-        // Cross-shop totals — only real captures count against pickup capacity.
-        if (enforceBoxCapacity) {
-          totalBirds += birds + mortality;
-          totalWeight = Number((totalWeight + weight + mortKg).toFixed(2));
-          assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
-          assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
-        }
         // Ignore client-calculated totals; this prevents tampering and keeps
         // retries/edits consistent with the persisted weight and rate.
         const amount = computeDeliveryAmount(weight, d.rate);
@@ -3458,6 +3534,12 @@ export const tripsService = {
           );
         }
       }
+
+      // Deliberately do not enforce the whole-load aggregate here. This is a
+      // per-shop persistence endpoint: the edited delivery is checked against
+      // its selected pickup boxes above, while other shops remain independent.
+      // The final Step 4 submit performs the authoritative whole-load birds and
+      // weight reconciliation and blocks submission until the trip balances.
 
       // The database, rather than a possibly stale browser, owns this sequence.
       // This also repairs legacy duplicate/gapped numbers on the next save.

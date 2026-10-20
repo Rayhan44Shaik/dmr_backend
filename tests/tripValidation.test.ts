@@ -35,6 +35,46 @@ describe("Trip step boundary validation", () => {
     assert.doesNotThrow(() => validateStepSubmit("start", scoped));
   });
 
+  it("isolates a Step 3 pickup correction from existing Step 4 deliveries", () => {
+    const scoped = scopeTripStepBody("pickup", {
+      mode: "submit",
+      legIndex: 1,
+      pickupStepSubmitted: true,
+      boxDetails: [{ boxNo: 1, birds: 10, weight: 19.8 }],
+      dcPhotoKey: "pickup-photo-1",
+      pickupPhotos: [{
+        key: "pickup-photo-1",
+        mime: "image/jpeg",
+        data: "data:image/jpeg;base64,AA==",
+      }],
+      syncPickupPhotos: true,
+      // A hydrated/older client may still include all saved deliveries. They
+      // must remain untouched and must not be capacity-validated until Step 4.
+      deliveries: [{
+        id: 99,
+        shopId: 7,
+        birdTypeId: 3,
+        birds: 10,
+        weight: 20,
+        selectedBoxIds: [1],
+      } as never],
+      deliveryStepSubmitted: true,
+    });
+
+    assert.equal(scoped.mode, "submit");
+    assert.equal(scoped.legIndex, 1);
+    assert.deepEqual(scoped.boxDetails, [{ boxNo: 1, birds: 10, weight: 19.8 }]);
+    assert.equal(scoped.syncPickupPhotos, true);
+    assert.deepEqual(scoped.pickupPhotos, [{
+      key: "pickup-photo-1",
+      mime: "image/jpeg",
+      data: "data:image/jpeg;base64,AA==",
+    }]);
+    assert.equal("deliveries" in scoped, false);
+    assert.equal("deliveryStepSubmitted" in scoped, false);
+    assert.doesNotThrow(() => validateStepSubmit("pickup", scoped));
+  });
+
   it("rejects invalid dates, non-positive IDs, missing crew and duplicate crew", () => {
     assert.throws(() => validateStepSubmit("start", { ...validStart, tripDate: "10/09/2026" }));
     assert.throws(() => validateStepSubmit("start", { ...validStart, tripDate: "2026-02-30" }));

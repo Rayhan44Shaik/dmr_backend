@@ -61,6 +61,9 @@ export interface ShopSale {
     rate: number;
     amount: number;
     mortality: number;
+    mortalityWeight: number;
+    deliveryMode: "box" | "weight";
+    selectedBoxCount: number;
     remarks: string;
     status: OpsRecordStatus;
     deleted: boolean;
@@ -243,9 +246,12 @@ export interface RateEntryTrip {
     ratesEntered: number;
     deliveriesCount: number;
     totalAmount: number;
-    /** Per-load saved amounts for compact multi-load display in the queue. */
+    /** Per-load metrics for compact multi-load display in the queue. */
     loadAmounts: Array<{
         load: number;
+        shops: number;
+        birds: number;
+        weight: number;
         amount: number;
     }>;
     deliveries: RateEntryDelivery[];
