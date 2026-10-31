@@ -63,6 +63,9 @@ export async function writeLedger(
   debit: number,
   credit: number
 ): Promise<void> {
+  const nextDebit = Math.max(0, Number(Number(debit).toFixed(2)));
+  const nextCredit = Math.max(0, Number(Number(credit).toFixed(2)));
+  if (nextDebit + nextCredit <= 0) return;
   await client.query(
     `INSERT INTO shop_ledger(
        shop_id, entry_date, entry_type, reference_type, reference_id, debit, credit, note
@@ -73,11 +76,32 @@ export async function writeLedger(
       ref.entryType,
       ref.referenceType,
       ref.referenceId,
-      debit,
-      credit,
+      nextDebit,
+      nextCredit,
       ref.note ?? "",
     ]
   );
+  await recalcShopBalance(client, shopId);
+}
+
+/** Set a ledger row's net (debit − credit). A zero net removes the row so
+ *  shop_ledger's (debit + credit > 0) check never 422s a valid save. */
+export async function setLedgerNet(
+  client: Client,
+  ledgerId: number,
+  shopId: number,
+  next: number,
+  note: string
+): Promise<void> {
+  const net = Number(Number(next).toFixed(2));
+  if (net === 0) {
+    await client.query(`DELETE FROM shop_ledger WHERE id = $1`, [ledgerId]);
+  } else {
+    await client.query(
+      `UPDATE shop_ledger SET debit = $2, credit = $3, note = $4 WHERE id = $1`,
+      [ledgerId, Math.max(0, net), Math.max(0, -net), note]
+    );
+  }
   await recalcShopBalance(client, shopId);
 }
 

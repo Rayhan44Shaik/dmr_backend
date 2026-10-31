@@ -43,7 +43,7 @@ export const roleBoundary: RequestHandler = (req, res, next) => {
     throw new AppError(403, "Collection role cannot access this module");
   }
   if (role === "OFFICE") {
-    if (starts(path, ["/trips", "/operations/trips", "/operations/fuel-expenses", "/fleet/maintenance", "/fleet/permits", "/fleet/emis", "/staff/leaves", "/staff/duty"])) return next();
+    if (starts(path, ["/trips", "/operations/trips", "/operations/trip-list", "/operations/expenses", "/operations/fuel-expenses", "/fleet/maintenance", "/fleet/permits", "/fleet/emis", "/staff/leaves", "/staff/duty"])) return next();
     throw new AppError(403, "Office role cannot access this module");
   }
   throw new AppError(403, "Access denied");

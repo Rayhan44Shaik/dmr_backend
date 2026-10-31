@@ -1990,7 +1990,7 @@ const recentLoadSummarySelect = `,
         'weight', totals.weight,
         'mortality', totals.mortality,
         'mortalityWeight', totals.mortality_weight,
-        'weightLoss', GREATEST(0, totals.dc_weight - totals.weight - totals.mortality_weight),
+        'weightLoss', totals.weight_loss,
         'shops', totals.shops
       ) ORDER BY totals.leg_index
     )
@@ -2000,7 +2000,13 @@ const recentLoadSummarySelect = `,
              COALESCE(SUM(delivery.birds), 0) AS birds,
              COALESCE(SUM(delivery.weight), 0) AS weight,
              COALESCE(SUM(delivery.mortality), 0) AS mortality,
-             COALESCE(SUM(delivery.mort_kg), 0) AS mortality_weight,
+             COALESCE(SUM(delivery.mort_kg) FILTER (WHERE delivery.delivery_mode = 'box'), 0) AS mortality_weight,
+             COALESCE(SUM(
+               CASE WHEN delivery.delivery_mode = 'weight'
+                 THEN GREATEST(0, COALESCE(delivery.farm_weight, 0) - COALESCE(delivery.weight, 0) - COALESCE(delivery.mort_kg, 0))
+                 ELSE 0
+               END
+             ), 0) AS weight_loss,
              COUNT(DISTINCT delivery.shop_id) AS shops
         FROM trip_legs leg
         LEFT JOIN trip_deliveries delivery

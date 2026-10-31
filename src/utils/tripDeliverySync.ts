@@ -135,8 +135,7 @@ export async function recalcTripDeliveryTotals(client: Client, tripId: number): 
        -- fallback computeTripKpis() (tripCalculations.ts) already uses —
        -- Step 2 farm-load fields take precedence when genuinely populated,
        -- otherwise fall back to the mandatory Step 3 Pickup values.
-       weight_loss = (CASE WHEN t.farm_load_weight > 0 THEN t.farm_load_weight ELSE t.dc_weight END)
-                     - sub.wt - sub.mort_wt,
+       weight_loss = sub.weight_loss,
        survival_rate = CASE WHEN COALESCE(NULLIF(t.farm_bird_count, 0), t.total_birds) > 0
                          THEN ROUND(sub.birds::numeric / COALESCE(NULLIF(t.farm_bird_count, 0), t.total_birds), 4)
                          ELSE 0 END,
@@ -147,7 +146,13 @@ export async function recalcTripDeliveryTotals(client: Client, tripId: number): 
               COALESCE(SUM(weight), 0) AS wt,
               COALESCE(SUM(birds), 0)::int AS birds,
               COALESCE(SUM(mortality), 0)::int AS mort_cnt,
-              COALESCE(SUM(mort_kg), 0) AS mort_wt,
+              COALESCE(SUM(mort_kg) FILTER (WHERE delivery_mode = 'box'), 0) AS mort_wt,
+              GREATEST(0,
+                COALESCE((SELECT SUM(COALESCE(l.dc_weight, 0)) FROM trip_legs l WHERE l.trip_id = $1),
+                         (SELECT COALESCE(t.dc_weight, 0) FROM trips t WHERE t.id = $1), 0)
+                - COALESCE(SUM(weight), 0)
+                - COALESCE(SUM(mort_kg), 0)
+              ) AS weight_loss,
               (SELECT d2.shop_name FROM trip_deliveries d2
                 WHERE d2.trip_id = $1 AND d2.deleted = FALSE
                 ORDER BY d2.id DESC LIMIT 1) AS last_shop
@@ -178,7 +183,7 @@ export async function sumActiveDeliveries(
   }>(
     `SELECT COALESCE(SUM(birds), 0)::text AS birds,
             COALESCE(SUM(weight), 0)::text AS weight,
-            COALESCE(SUM(mortality), 0)::text AS mortality_count,
+            COALESCE(SUM(mortality) FILTER (WHERE delivery_mode = 'box'), 0)::text AS mortality_count,
             COALESCE(SUM(mort_kg), 0)::text AS mortality_weight
        FROM trip_deliveries
       WHERE trip_id = $1

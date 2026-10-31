@@ -1,7 +1,7 @@
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import type { FuelExpense, FuelSourceType, OpsRecordStatus } from "../types/operations.js";
-import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
+import { dateOnly, num, numOrNull, parseCoordPair, str } from "../utils/coerce.js";
 import {
   assertEmployeeExists,
   assertTripExists,
@@ -36,6 +36,14 @@ function toLegacyApproval(opsStatus: OpsRecordStatus): "Pending" | "Approved" {
 
 function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
   const opsStatus = (str(row.ops_status) || "Pending Approval") as OpsRecordStatus;
+  const parsedGps =
+    parseCoordPair(row.bunk_address) ?? parseCoordPair(row.diesel_bunk_gps);
+  const gpsLat =
+    numOrNull(row.resolved_gps_lat) ?? numOrNull(row.gps_lat) ?? parsedGps?.lat ?? null;
+  const gpsLon =
+    numOrNull(row.resolved_gps_lon) ?? numOrNull(row.gps_lon) ?? parsedGps?.lon ?? null;
+  const bunkAddressRaw = row.bunk_address == null ? null : str(row.bunk_address);
+  const bunkAddress = bunkAddressRaw && parseCoordPair(bunkAddressRaw) ? null : bunkAddressRaw;
   return {
     id: str(row.id),
     billNo: str(row.bill_no),
@@ -55,11 +63,18 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
     liters: num(row.litres),
     amount: num(row.amount),
     pumpName: str(row.pump_name || row.petrol_bunk),
-    bunkAddress: row.bunk_address == null ? null : str(row.bunk_address),
-    gpsLat: row.gps_lat == null ? null : num(row.gps_lat),
-    gpsLon: row.gps_lon == null ? null : num(row.gps_lon),
-    gpsAccuracy: row.gps_accuracy == null ? null : num(row.gps_accuracy),
-    gpsCapturedAt: row.gps_captured_at == null ? null : str(row.gps_captured_at),
+    bunkAddress,
+    gpsLat,
+    gpsLon,
+    gpsAccuracy:
+      numOrNull(row.resolved_gps_accuracy) ??
+      (row.gps_accuracy == null ? null : num(row.gps_accuracy)),
+    gpsCapturedAt:
+      row.resolved_gps_captured_at == null
+        ? row.gps_captured_at == null
+          ? null
+          : str(row.gps_captured_at)
+        : str(row.resolved_gps_captured_at),
     remarks: row.remarks == null ? null : str(row.remarks),
     status: opsStatus,
     imageData: row.image_data == null ? null : str(row.image_data),
@@ -79,9 +94,18 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
 }
 
 const FUEL_SELECT = `
-  SELECT fe.*, t.trip_no
+  SELECT fe.*, t.trip_no,
+    COALESCE(fe.gps_lat, de.gps_lat) AS resolved_gps_lat,
+    COALESCE(fe.gps_lon, de.gps_lon) AS resolved_gps_lon,
+    COALESCE(fe.gps_accuracy, de.gps_accuracy) AS resolved_gps_accuracy,
+    COALESCE(fe.gps_captured_at, de.gps_captured_at) AS resolved_gps_captured_at,
+    de.bunk_gps AS diesel_bunk_gps
   FROM fuel_expenses fe
   LEFT JOIN trips t ON t.id = fe.trip_id
+  LEFT JOIN trip_diesel_entries de
+    ON de.trip_id = fe.trip_id
+   AND fe.trip_fuel_entry_index IS NOT NULL
+   AND de.row_index = fe.trip_fuel_entry_index
 `;
 
 function buildFuelWhere(filters: {
@@ -94,6 +118,7 @@ function buildFuelWhere(filters: {
   fuelType?: string;
   search?: string;
   includeDeleted?: boolean;
+  includeMasterBunks?: boolean;
 }) {
   const clauses: string[] = [];
   const params: unknown[] = [];
@@ -136,8 +161,15 @@ function buildFuelWhere(filters: {
     params.push(`%${filters.search}%`);
     const p = params.length;
     clauses.push(
-      `(fe.bill_no ILIKE $${p} OR fe.vehicle_no ILIKE $${p} OR fe.driver_name ILIKE $${p} OR t.trip_no ILIKE $${p})`
+      `(fe.bill_no ILIKE $${p} OR fe.vehicle_no ILIKE $${p} OR fe.driver_name ILIKE $${p} OR fe.supervisor_name ILIKE $${p} OR t.trip_no ILIKE $${p})`
     );
+  }
+  if (filters.includeMasterBunks === false) {
+    clauses.push(`NOT EXISTS (
+      SELECT 1 FROM bird_types bt
+      WHERE bt.category = 'Fuel Bunk'
+        AND LOWER(BTRIM(bt.bird_type)) = LOWER(BTRIM(COALESCE(fe.pump_name, fe.petrol_bunk, '')))
+    )`);
   }
 
   return {
@@ -157,6 +189,7 @@ export const fuelExpensesService = {
       sourceType?: string;
       search?: string;
       includeDeleted?: boolean;
+      includeMasterBunks?: boolean;
       pagination?: PaginationParams | null;
     } = {}
   ): Promise<FuelExpense[] | PaginatedResult<FuelExpense>> {

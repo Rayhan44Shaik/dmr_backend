@@ -23,6 +23,10 @@ export interface MortalityAnalysisRow {
   deliveredWeight: number;
   mortalityCount: number;
   mortalityWeight: number;
+  boxMortalityCount: number;
+  boxMortalityWeight: number;
+  weightModeMortalityCount: number;
+  weightModeMortalityWeight: number;
   weightLoss: number;
   driverName: string;
   loaders: string[];
@@ -84,10 +88,14 @@ function mapRow(row: Record<string, unknown>): MortalityAnalysisRow {
     deliveredWeight: num(row.total_delivered_weight),
     mortalityCount,
     mortalityWeight: num(row.total_mortality_weight),
+    boxMortalityCount: num(row.box_mortality_count),
+    boxMortalityWeight: num(row.box_mortality_weight),
+    weightModeMortalityCount: num(row.weight_mode_mortality_count),
+    weightModeMortalityWeight: num(row.weight_mode_mortality_weight),
     weightLoss,
     driverName: String(row.driver_name ?? ""),
-    loaders: [],
-    helpers: [],
+    loaders: Array.isArray(row.loaders) ? row.loaders.map(String) : [],
+    helpers: Array.isArray(row.helpers) ? row.helpers.map(String) : [],
     status: "Completed",
     deliveryShops: num(row.delivery_shops),
     mortalityPercentage: farmBirds > 0 ? Number(((mortalityCount / farmBirds) * 100).toFixed(2)) : 0,
@@ -183,6 +191,12 @@ export const mortalityAnalysisService = {
         COALESCE(NULLIF(t.farm_load_weight, 0), t.dc_weight) AS farm_weight,
         t.total_birds_delivered, t.total_delivered_weight,
         t.total_mortality_count, t.total_mortality_weight, ${WEIGHT_LOSS_SQL} AS weight_loss,
+        (SELECT COALESCE(SUM(d.mortality), 0) FROM trip_deliveries d WHERE d.trip_id=t.id AND COALESCE(d.deleted,FALSE)=FALSE AND COALESCE(d.delivery_mode,'box') <> 'weight') AS box_mortality_count,
+        (SELECT COALESCE(SUM(d.mort_kg), 0) FROM trip_deliveries d WHERE d.trip_id=t.id AND COALESCE(d.deleted,FALSE)=FALSE AND COALESCE(d.delivery_mode,'box') <> 'weight') AS box_mortality_weight,
+        (SELECT COALESCE(SUM(d.mortality), 0) FROM trip_deliveries d WHERE d.trip_id=t.id AND COALESCE(d.deleted,FALSE)=FALSE AND d.delivery_mode = 'weight') AS weight_mode_mortality_count,
+        (SELECT COALESCE(SUM(d.mort_kg), 0) FROM trip_deliveries d WHERE d.trip_id=t.id AND COALESCE(d.deleted,FALSE)=FALSE AND d.delivery_mode = 'weight') AS weight_mode_mortality_weight,
+        (SELECT COALESCE(ARRAY_AGG(tc.employee_name ORDER BY tc.id) FILTER (WHERE tc.role='loader'), ARRAY[]::text[]) FROM trip_crew tc WHERE tc.trip_id=t.id) AS loaders,
+        (SELECT COALESCE(ARRAY_AGG(tc.employee_name ORDER BY tc.id) FILTER (WHERE tc.role='helper'), ARRAY[]::text[]) FROM trip_crew tc WHERE tc.trip_id=t.id) AS helpers,
         (SELECT COUNT(DISTINCT d.shop_id) FROM trip_deliveries d WHERE d.trip_id=t.id AND COALESCE(d.deleted,FALSE)=FALSE) AS delivery_shops,
         CASE WHEN COALESCE(NULLIF(t.farm_bird_count,0),t.total_birds,0)>0 THEN (t.total_mortality_count*100.0/COALESCE(NULLIF(t.farm_bird_count,0),t.total_birds)) ELSE 0 END AS mortality_percentage,
         CASE WHEN ${FARM_WEIGHT_SQL}>0 THEN (${WEIGHT_LOSS_SQL}*100.0/${FARM_WEIGHT_SQL}) ELSE 0 END AS weight_loss_percentage

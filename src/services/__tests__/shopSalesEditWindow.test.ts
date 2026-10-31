@@ -6,12 +6,10 @@ import { rateEntryService } from "../rateEntryService.js";
 import { shopSalesService } from "../shopSalesService.js";
 
 /**
- * 10-day edit/delete window audit. The existing rule (tripDeliverySync.ts:
- * editWindowExpiresAt/isTripEditable/assertTripEditable) anchors on
- * trips.approved_at (falling back to trip_date), and is INCLUSIVE at the
- * 10-day boundary: `now <= anchor + 10 days`. These tests exercise that
- * exact rule directly against the backend (never via frontend button
- * visibility) across the full boundary matrix, for both UPDATE and DELETE.
+ * Shop Sales edit window: two weeks from trip_deliveries.created_at (insert),
+ * not the trip date. Boundary is exclusive at 14 days:
+ * `now < created_at + 14 days`. Soft-delete stays permanently blocked once
+ * Rate Entry is locked.
  */
 
 let uniqSeq = 0;
@@ -40,16 +38,15 @@ async function makeShop(f: Fixture): Promise<number> {
   return r.rows[0].id;
 }
 
-/** Creates a Completed, rate-locked trip+delivery whose approved_at is set
- * to `now - ageOffsetMs` (or `now + ageOffsetMs` when negative), letting
- * each test place the trip at an exact age relative to the 10-day window. */
+/** Creates a Completed, rate-locked trip+delivery whose insert timestamp
+ * (`trip_deliveries.created_at`) is `now - ageOffsetMs`. */
 async function makeAgedTrip(f: Fixture, ageOffsetMs: number): Promise<{ tripId: number; deliveryId: number }> {
   const shopId = await makeShop(f);
   const t = await pool.query<{ id: number }>(
     `INSERT INTO trips (trip_no, trip_date, status, deleted, approved_at, total_birds, dc_weight)
-     VALUES ($1, CURRENT_DATE, 'Completed', FALSE, NOW() - ($2 || ' milliseconds')::interval, 1000, 2000)
+     VALUES ($1, CURRENT_DATE, 'Completed', FALSE, NOW(), 1000, 2000)
      RETURNING id`,
-    [`T-WIN-${uniqueInt()}`, String(ageOffsetMs)]
+    [`T-WIN-${uniqueInt()}`]
   );
   const tripId = t.rows[0].id;
   f.tripIds.push(tripId);
@@ -62,6 +59,10 @@ async function makeAgedTrip(f: Fixture, ageOffsetMs: number): Promise<{ tripId: 
   const deliveryId = d.rows[0].id;
   await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 40 }] });
   await rateEntryService.lock(tripId, { lockedBy: "window-tester" });
+  await pool.query(
+    `UPDATE trip_deliveries SET created_at = NOW() - ($2 || ' milliseconds')::interval WHERE id = $1`,
+    [deliveryId, String(ageOffsetMs)]
+  );
   return { tripId, deliveryId };
 }
 
@@ -75,7 +76,7 @@ async function assertStatus(promise: Promise<unknown>, status: number): Promise<
   });
 }
 
-describe("10-day EDIT window (direct API/service calls, not frontend visibility)", () => {
+describe("2-week-from-insert EDIT window (direct API/service calls, not frontend visibility)", () => {
   test("1. Same-day edit: PASS", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
@@ -108,21 +109,18 @@ describe("10-day EDIT window (direct API/service calls, not frontend visibility)
     assert.equal(updated.birds, 51);
   });
 
-  test("5. Exactly 10 days old: boundary is INCLUSIVE (existing rule: now <= anchor+10d) -> PASS", async (t) => {
+  test("5. 13 days old: still inside 2 weeks -> PASS", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
-    // Slightly under 10 days (by a few seconds) to absorb the small amount
-    // of real wall-clock time that elapses between fixture creation and the
-    // assertion below, while still exercising the true boundary.
-    const { deliveryId } = await makeAgedTrip(f, 10 * DAY - 5000);
+    const { deliveryId } = await makeAgedTrip(f, 13 * DAY);
     const updated = await shopSalesService.update(deliveryId, { birds: 51 });
     assert.equal(updated.birds, 51);
   });
 
-  test("6. 10 days + 1 day old: FAIL", async (t) => {
+  test("6. Exactly 14 days old: window closed (now >= created_at+14d) -> FAIL", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
-    const { deliveryId } = await makeAgedTrip(f, 11 * DAY);
+    const { deliveryId } = await makeAgedTrip(f, 14 * DAY);
     await assertStatus(shopSalesService.update(deliveryId, { birds: 51 }), 409);
   });
 
@@ -148,7 +146,20 @@ describe("10-day EDIT window (direct API/service calls, not frontend visibility)
     assert.equal(updated.birds, 51, "current rule does not reject a future-dated trip — documenting existing behavior as-is");
   });
 
-  test("10. Direct API-level call (service function, bypassing any notion of a frontend) after the window closes: FAIL", async (t) => {
+  test("10. Trip date / rate lock older than 10 days does not lock a row inserted within 2 weeks", async (t) => {
+    const f = newFixture();
+    t.after(() => cleanup(f));
+    const { tripId, deliveryId } = await makeAgedTrip(f, 0);
+    const thirteenDaysAgo = new Date(Date.now() - 13 * DAY).toISOString();
+    await pool.query(
+      `UPDATE trips SET trip_date = (CURRENT_DATE - INTERVAL '13 days'), approved_at = $2, rate_locked_at = $2 WHERE id = $1`,
+      [tripId, thirteenDaysAgo]
+    );
+    const updated = await shopSalesService.update(deliveryId, { birds: 51 });
+    assert.equal(updated.birds, 51, "Shop Sales must use insert date, not trip date or rate_locked_at");
+  });
+
+  test("11. Direct API-level call (service function, bypassing any notion of a frontend) after the window closes: FAIL", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 20 * DAY);
@@ -158,77 +169,22 @@ describe("10-day EDIT window (direct API/service calls, not frontend visibility)
   });
 });
 
-describe("10-day DELETE window (direct API/service calls)", () => {
-  test("1. Same-day delete: PASS", async (t) => {
+describe("Shop Sales DELETE stays blocked once Rate Entry is locked", () => {
+  test("1. Same-day delete: FAIL", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 0);
-    const removed = await shopSalesService.softDelete(deliveryId, "test");
-    assert.equal(removed.deleted, true);
+    await assertStatus(shopSalesService.softDelete(deliveryId, "test"), 409);
   });
 
-  test("2. 1 day old: PASS", async (t) => {
-    const f = newFixture();
-    t.after(() => cleanup(f));
-    const { deliveryId } = await makeAgedTrip(f, 1 * DAY);
-    const removed = await shopSalesService.softDelete(deliveryId, "test");
-    assert.equal(removed.deleted, true);
-  });
-
-  test("3. 5 days old: PASS", async (t) => {
+  test("2. Inside the 2-week edit window: FAIL", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 5 * DAY);
-    const removed = await shopSalesService.softDelete(deliveryId, "test");
-    assert.equal(removed.deleted, true);
-  });
-
-  test("4. 9 days old: PASS", async (t) => {
-    const f = newFixture();
-    t.after(() => cleanup(f));
-    const { deliveryId } = await makeAgedTrip(f, 9 * DAY);
-    const removed = await shopSalesService.softDelete(deliveryId, "test");
-    assert.equal(removed.deleted, true);
-  });
-
-  test("5. Exactly 10 days old: boundary is INCLUSIVE -> PASS", async (t) => {
-    const f = newFixture();
-    t.after(() => cleanup(f));
-    const { deliveryId } = await makeAgedTrip(f, 10 * DAY - 5000);
-    const removed = await shopSalesService.softDelete(deliveryId, "test");
-    assert.equal(removed.deleted, true);
-  });
-
-  test("6. 10 days + 1 day old: FAIL", async (t) => {
-    const f = newFixture();
-    t.after(() => cleanup(f));
-    const { deliveryId } = await makeAgedTrip(f, 11 * DAY);
     await assertStatus(shopSalesService.softDelete(deliveryId, "test"), 409);
   });
 
-  test("7. 15 days old: FAIL", async (t) => {
-    const f = newFixture();
-    t.after(() => cleanup(f));
-    const { deliveryId } = await makeAgedTrip(f, 15 * DAY);
-    await assertStatus(shopSalesService.softDelete(deliveryId, "test"), 409);
-  });
-
-  test("8. 30 days old: FAIL", async (t) => {
-    const f = newFixture();
-    t.after(() => cleanup(f));
-    const { deliveryId } = await makeAgedTrip(f, 30 * DAY);
-    await assertStatus(shopSalesService.softDelete(deliveryId, "test"), 409);
-  });
-
-  test("9. Future-dated trip: still deletable under the existing rule", async (t) => {
-    const f = newFixture();
-    t.after(() => cleanup(f));
-    const { deliveryId } = await makeAgedTrip(f, -5 * DAY);
-    const removed = await shopSalesService.softDelete(deliveryId, "test");
-    assert.equal(removed.deleted, true);
-  });
-
-  test("10. Direct API-level delete after the window closes: FAIL, and the row is NOT soft-deleted", async (t) => {
+  test("3. After the 2-week window: FAIL, and the row is NOT soft-deleted", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 20 * DAY);

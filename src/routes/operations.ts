@@ -38,6 +38,17 @@ function opsListPagination(req: { query: Record<string, unknown> }) {
   return enabled ? params : null;
 }
 
+function optionalPositiveInt(value: unknown): number | undefined {
+  if (value == null || value === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return undefined;
+  return parsed;
+}
+
+function optionalIsoDate(value: unknown): string | undefined {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
+}
+
 // ── Dashboard ────────────────────────────────────────────────────
 operationsRouter.get(
   "/dashboard",
@@ -85,15 +96,29 @@ operationsRouter.get(
 operationsRouter.get(
   "/expenses",
   asyncHandler(async (req, res) => {
+    const fromDate = optionalIsoDate(req.query.fromDate);
+    const toDate = optionalIsoDate(req.query.toDate);
+    const vehicleId = optionalPositiveInt(req.query.vehicleId);
+    const supervisorId = optionalPositiveInt(req.query.supervisorId);
+    const isExport = req.query.export === "true";
+    if (isExport && !fromDate && !toDate && !vehicleId && !supervisorId) {
+      throw new AppError(400, "Choose a date, vehicle or supervisor to export");
+    }
+    const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 80) : undefined;
     res.json(await tripExpensesService.list({
-      fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-      toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
-      vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
-      supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
-      search: typeof req.query.search === "string" ? req.query.search : undefined,
+      fromDate,
+      toDate,
+      vehicleId,
+      supervisorId,
+      search: search || undefined,
       sortBy: typeof req.query.sortBy === "string" ? req.query.sortBy : undefined,
       sortDir: req.query.sortDir === "asc" ? "asc" : "desc",
-      pagination: opsListPagination(req),
+      includeMasterBunks:
+        req.query.includeMasterBunks !== "false" &&
+        req.query.includeMasterBunks !== "0" &&
+        req.query.includeShiva !== "false" &&
+        req.query.includeShiva !== "0",
+      pagination: isExport ? null : opsListPagination(req) ?? { page: 1, limit: 50, offset: 0 },
     }));
   })
 );
@@ -334,6 +359,20 @@ operationsRouter.post(
 );
 
 operationsRouter.put(
+  "/shop-sales/trip/:tripId/deliveries",
+  asyncHandler(async (req, res) => {
+    res.json(await shopSalesService.updateTrip(Number(req.params.tripId), req.body));
+  })
+);
+
+operationsRouter.put(
+  "/shop-sales/trip/:tripId/load/:load",
+  asyncHandler(async (req, res) => {
+    res.json(await shopSalesService.updateLoad(Number(req.params.tripId), Number(req.params.load), req.body));
+  })
+);
+
+operationsRouter.put(
   "/shop-sales/:id",
   asyncHandler(async (req, res) => {
     res.json(await shopSalesService.update(Number(req.params.id), req.body));
@@ -463,8 +502,8 @@ operationsRouter.get(
     res.json(
       await shopLedgerService.list({
         shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
-        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        fromDate: optionalIsoDate(req.query.fromDate),
+        toDate: optionalIsoDate(req.query.toDate),
         pagination: opsListPagination(req),
       })
     );
@@ -504,8 +543,8 @@ operationsRouter.get(
   "/shop-ledger/cumulative-quantities",
   asyncHandler(async (req, res) => {
     res.json(await shopLedgerService.cumulativeQuantities({
-      fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-      toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+      fromDate: optionalIsoDate(req.query.fromDate),
+      toDate: optionalIsoDate(req.query.toDate),
     }));
   })
 );
@@ -562,7 +601,12 @@ operationsRouter.get(
 operationsRouter.get(
   "/collection-entry/pending-summary",
   asyncHandler(async (req, res) => {
-    res.json(await collectionEntryService.pendingSummary(typeof req.query.date === "string" ? req.query.date : undefined));
+    const fromDate = typeof req.query.fromDate === "string" ? req.query.fromDate : undefined;
+    const toDate = typeof req.query.toDate === "string" ? req.query.toDate : undefined;
+    res.json(await collectionEntryService.pendingSummary(
+      typeof req.query.date === "string" ? req.query.date : undefined,
+      fromDate && toDate ? { fromDate, toDate } : undefined,
+    ));
   })
 );
 
@@ -590,6 +634,21 @@ operationsRouter.post(
   "/collection-entry",
   asyncHandler(async (req, res) => {
     res.status(201).json(await collectionEntryService.create(req.body));
+  })
+);
+
+operationsRouter.post(
+  "/collection-entry/import",
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await collectionEntryService.importMany(req.body, authUser(res).displayName));
+  })
+);
+
+operationsRouter.post(
+  "/collection-entry/bulk-approve",
+  asyncHandler(async (req, res) => {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number) : [];
+    res.json(await collectionEntryService.approveMany(ids, { approvedBy: authUser(res).displayName }));
   })
 );
 
@@ -636,6 +695,8 @@ operationsRouter.get(
         sourceType: typeof req.query.sourceType === "string" ? req.query.sourceType : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
         includeDeleted: req.query.includeDeleted === "true",
+        includeMasterBunks:
+          req.query.includeMasterBunks !== "false" && req.query.includeMasterBunks !== "0",
         pagination: opsListPagination(req),
       })
     );

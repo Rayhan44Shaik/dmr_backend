@@ -9,7 +9,7 @@ import {
   type PaginatedResult,
   type PaginationParams,
 } from "../utils/pagination.js";
-import { rethrowIfAppError } from "../utils/pgErrors.js";
+import { isPgError, rethrowIfAppError } from "../utils/pgErrors.js";
 import {
   applyCorrection,
   applyCredit,
@@ -19,6 +19,7 @@ import {
 import { parseBody } from "../validation/operations.js";
 import { collectionEntryUpdateSchema } from "../validation/collectionEntry.js";
 import { parseCollectionEntryBody } from "../validation/collectionEntry.js";
+import { collectionEntryImportSchema } from "../validation/collectionEntry.js";
 
 type Client = pg.PoolClient;
 
@@ -141,6 +142,19 @@ async function assertPrerequisite(
   return tripId;
 }
 
+async function isImportedCollection(client: Client, id: number): Promise<boolean> {
+  try {
+    const result = await client.query<{ import_batch_id: string | null }>(
+      `SELECT import_batch_id FROM collections WHERE id = $1`,
+      [id]
+    );
+    return result.rows[0]?.import_batch_id != null;
+  } catch (err) {
+    if (isPgError(err) && err.code === "42703") return false;
+    throw err;
+  }
+}
+
 async function loadOne(client: Client, id: number): Promise<CollectionEntry> {
   const result = await client.query(`${SEL} WHERE id = $1`, [id]);
   if (!result.rowCount) throw new AppError(404, "Collection not found");
@@ -149,6 +163,99 @@ async function loadOne(client: Client, id: number): Promise<CollectionEntry> {
 
 export { deletePendingCollection, deletePendingCollectionForRouter } from "./collectionEntryService.pendingDelete.js";
 export const collectionEntryService = {
+  /**
+   * Import only rows already accepted by the spreadsheet review. The entire
+   * batch is one transaction, master names are matched case-insensitively and
+   * rewritten to their canonical spelling, and batchId makes a retry safe.
+   */
+  async importMany(body: unknown, actor = ""): Promise<{ imported: number; entries: CollectionEntry[]; replayed: boolean }> {
+    const data = parseBody(collectionEntryImportSchema, body);
+    return withTransaction(async (client) => {
+      const prior = await client.query<{ row_count: number }>(
+        `SELECT row_count FROM collection_import_batches WHERE batch_id = $1 FOR UPDATE`,
+        [data.batchId]
+      );
+      if (prior.rowCount) {
+        const existing = await client.query(
+          `${SEL} WHERE import_batch_id = $1 ORDER BY import_source_row`,
+          [data.batchId]
+        );
+        if (existing.rowCount !== prior.rows[0].row_count) {
+          throw new AppError(409, "Import batch is incomplete; contact support before retrying");
+        }
+        return { imported: existing.rowCount, entries: existing.rows.map(mapEntry), replayed: true };
+      }
+
+      const [shopsResult, collectorsResult, banksResult] = await Promise.all([
+        client.query<{ id: number; shop_name: string }>(
+          `SELECT id, shop_name FROM shops`
+        ),
+        client.query<{ employee_name: string }>(
+          `SELECT employee_name FROM employees
+            WHERE status = 'Active' AND LOWER(BTRIM(department)) = 'collection'`
+        ),
+        client.query<{ bank_name: string }>(
+          `SELECT bank_name FROM banks WHERE status = 'Active'`
+        ),
+      ]);
+      const key = (value: string) => value.trim().toLocaleLowerCase("en-IN");
+      const shops = new Map(shopsResult.rows.map((row) => [key(row.shop_name), row]));
+      const collectors = new Map(collectorsResult.rows.map((row) => [key(row.employee_name), row.employee_name]));
+      const modes = new Map<string, string>([["cash", "Cash"]]);
+      banksResult.rows.forEach((row) => modes.set(key(row.bank_name), row.bank_name));
+      const existingReferencesResult = await client.query<{ reference_no: string }>(
+        `SELECT reference_no FROM collections WHERE BTRIM(COALESCE(reference_no, '')) <> ''`
+      );
+      const existingReferences = new Set(existingReferencesResult.rows.map((row) => key(row.reference_no)));
+      const batchReferenceCounts = new Map<string, number>();
+      data.rows.forEach((row) => {
+        const reference = key(row.referenceNo ?? "");
+        if (reference) batchReferenceCounts.set(reference, (batchReferenceCounts.get(reference) ?? 0) + 1);
+      });
+
+      const issues: Array<{ sourceRow: number; fields: string[] }> = [];
+      for (const row of data.rows) {
+        const fields: string[] = [];
+        if (!shops.has(key(row.shopName))) fields.push("shopName");
+        if (!collectors.has(key(row.collector))) fields.push("collector");
+        if (!modes.has(key(row.paymentMode))) fields.push("paymentMode");
+        const reference = key(row.referenceNo ?? "");
+        if (reference && (existingReferences.has(reference) || (batchReferenceCounts.get(reference) ?? 0) > 1)) fields.push("referenceNo");
+        const parsedDate = new Date(`${row.collectionDate}T00:00:00Z`);
+        if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== row.collectionDate) fields.push("collectionDate");
+        if (fields.length) issues.push({ sourceRow: row.sourceRow, fields });
+      }
+      if (issues.length) throw new AppError(422, "Import rows no longer match active master data", { issues });
+
+      await client.query(
+        `INSERT INTO collection_import_batches(batch_id, row_count, created_by) VALUES ($1,$2,$3)`,
+        [data.batchId, data.rows.length, actor]
+      );
+      const entries: CollectionEntry[] = [];
+      for (const row of data.rows) {
+        const shop = shops.get(key(row.shopName))!;
+        const canonicalCollector = collectors.get(key(row.collector))!;
+        const canonicalMode = modes.get(key(row.paymentMode))!;
+        const numberResult = await client.query<{ collection_no_for_date: string }>(
+          `SELECT collection_no_for_date($1)`, [row.collectionDate]
+        );
+        const inserted = await client.query<{ id: number }>(
+          `INSERT INTO collections (
+             collection_no, collection_date, shop_id, shop_name, amount_due,
+             amount_collected, amount, collector, payment_mode, reference_no,
+             remarks, status, created_by, import_batch_id, import_source_row
+           ) VALUES ($1,$2,$3,$4,$5,$5,$5,$6,$7,$8,$9,'Pending Approval',$10,$11,$12)
+           RETURNING id`,
+          [numberResult.rows[0].collection_no_for_date, row.collectionDate, shop.id,
+           shop.shop_name, row.amount, canonicalCollector, canonicalMode,
+           row.referenceNo, row.remarks, actor, data.batchId, row.sourceRow]
+        );
+        entries.push(await loadOne(client, num(inserted.rows[0].id)));
+      }
+      return { imported: entries.length, entries, replayed: false };
+    });
+  },
+
   async recent(filters: { shopId: number; limit?: number; includeDeleted?: boolean }) {
     if (!Number.isInteger(filters.shopId) || filters.shopId <= 0) {
       throw new AppError(400, "A valid shopId is required");
@@ -350,8 +457,16 @@ export const collectionEntryService = {
     return collectionWeekBounds(date, previousCompleted ? -1 : 0);
   },
 
-  async pendingSummary(date?: string) {
-    const bounds = collectionWeekBounds(date);
+  async pendingSummary(date?: string, range?: { fromDate?: string; toDate?: string }) {
+    const today = new Date().toISOString().slice(0, 10);
+    const bounds =
+      range?.fromDate && range?.toDate
+        ? {
+            weekStart: range.fromDate,
+            weekEnd: range.toDate,
+            asOfDate: range.toDate < today ? range.toDate : today,
+          }
+        : collectionWeekBounds(date);
     const result = await query(
       `SELECT s.id AS shop_id, s.shop_name, COALESCE(s.current_balance, 0) AS balance,
               COALESCE(ws.amount, 0) AS weekly_sales,
@@ -367,13 +482,15 @@ export const collectionEntryService = {
               AND t.trip_date BETWEEN $1::date AND $2::date
          ) ws ON TRUE
          LEFT JOIN LATERAL (
-           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount
+           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount,
+                  COUNT(*)::int AS row_count
              FROM collections c WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
               AND COALESCE(c.is_financial, FALSE) = TRUE
               AND c.collection_date BETWEEN $1::date AND $2::date
          ) ac ON TRUE
          LEFT JOIN LATERAL (
-           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount
+           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount,
+                  COUNT(*)::int AS row_count
              FROM collections c WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
               AND COALESCE(c.is_financial, FALSE) = FALSE AND c.status = 'Pending Approval'
               AND c.collection_date BETWEEN $1::date AND $2::date
@@ -384,6 +501,9 @@ export const collectionEntryService = {
               AND COALESCE(c.is_financial, FALSE) = TRUE
          ) lc ON TRUE
         WHERE s.status = 'Active'
+           OR COALESCE(s.opening_balance, 0) <> 0
+           OR COALESCE(s.current_balance, 0) <> 0
+           OR COALESCE(pc.row_count, 0) > 0
         ORDER BY s.shop_name`,
       [bounds.weekStart, bounds.weekEnd]
     );
@@ -439,7 +559,7 @@ export const collectionEntryService = {
     }
     if (filters.status) {
       params.push(filters.status);
-      clauses.push(`collections.status = $${params.length}`);
+      clauses.push(`collections.status::text = $${params.length}`);
     }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
@@ -544,12 +664,13 @@ export const collectionEntryService = {
 
     return withTransaction(async (client) => {
       try {
-        const lockRow = await client.query<{ id: number }>(
+        const lockRow = await client.query(
           `${SEL} WHERE id = $1 FOR UPDATE`,
           [id]
         );
         if (!lockRow.rowCount) throw new AppError(404, "Collection not found");
         const existing = mapEntry(lockRow.rows[0]);
+        const imported = await isImportedCollection(client, id);
         if (existing.deleted) throw new AppError(409, "Cannot edit a deleted collection");
 
         const newAmount = data.amount !== undefined ? data.amount : existing.amount;
@@ -567,7 +688,7 @@ export const collectionEntryService = {
           if (targetShopId == null) throw new AppError(422, "A valid shop is required");
           const targetShop = await lockShop(client, targetShopId);
           if (!targetShop) throw new AppError(422, "Shop not found", { shopId: targetShopId });
-          if (targetShop.status !== "Active") {
+          if (targetShop.status !== "Active" && !imported) {
             throw new AppError(422, "Shop is inactive and cannot receive a collection", { shopId: targetShopId });
           }
           targetShopName = targetShop.shopName;
@@ -644,12 +765,13 @@ export const collectionEntryService = {
   async approve(id: number, body: { approvedBy?: string } = {}): Promise<CollectionEntry> {
     return withTransaction(async (client) => {
       try {
-        const lockRow = await client.query<{ id: number }>(
+        const lockRow = await client.query(
           `${SEL} WHERE id = $1 FOR UPDATE`,
           [id]
         );
         if (!lockRow.rowCount) throw new AppError(404, "Collection not found");
         const existing = mapEntry(lockRow.rows[0]);
+        const imported = await isImportedCollection(client, id);
 
         if (existing.deleted) throw new AppError(409, "Cannot approve a deleted collection");
         if (existing.isFinancial) return existing; // idempotent
@@ -658,7 +780,7 @@ export const collectionEntryService = {
         if (shopId == null) throw new AppError(422, "Collection has no linked shop");
         const shop = await lockShop(client, shopId);
         if (!shop) throw new AppError(422, "Shop not found", { shopId });
-        if (shop.status !== "Active") {
+        if (shop.status !== "Active" && !imported) {
           throw new AppError(422, "Shop is inactive and cannot receive a collection", { shopId });
         }
 
@@ -693,6 +815,15 @@ export const collectionEntryService = {
         throw err;
       }
     });
+  },
+
+  /** Approve a selected set in order; each approval remains idempotent and
+   * uses the same shop-ledger transaction and authorization rules as one row. */
+  async approveMany(ids: number[], body: { approvedBy?: string } = {}): Promise<CollectionEntry[]> {
+    const uniqueIds = [...new Set(ids.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+    const approved: CollectionEntry[] = [];
+    for (const id of uniqueIds) approved.push(await this.approve(id, body));
+    return approved;
   },
 
   /** Reject = no financial effect. If it was previously credit-applied, the

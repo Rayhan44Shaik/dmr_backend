@@ -54,7 +54,7 @@ function mapPendingDeleteResult(row: Record<string, unknown>): CollectionEntry {
  * from the client payload.
  */
 operationsPendingDeleteRouter.delete(
-  "/collection-entry/pending/:id",
+  "/pending/:id",
   asyncHandler(async (req, res) => {
     const rawId = req.params.id;
     const id = Number(rawId);

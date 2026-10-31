@@ -64,6 +64,7 @@ export interface ShopSale {
   birdType: string;
   tripId: number | null;
   tripNo: string;
+  load?: number;
   vehicleNo: string | null;
   isRentedVehicle: boolean;
   farmName: string | null;
@@ -75,6 +76,8 @@ export interface ShopSale {
   mortalityWeight: number;
   deliveryMode: "box" | "weight";
   selectedBoxCount: number;
+  dcBirds?: number;
+  dcWeight?: number;
   remarks: string;
   status: OpsRecordStatus;
   deleted: boolean;
@@ -235,6 +238,8 @@ export interface RateEntryDelivery {
   birdType: string;
   birds: number;
   weight: number;
+  farmWeight: number | null;
+  dcWeight: number;
   mortality: number;
   mortKg: number | null;
   rate: number | null;
@@ -272,6 +277,12 @@ export interface RateEntryTrip {
       birds: number;
       weight: number;
       amount: number;
+      dcWeight: number;
+      boxMortality: number;
+      boxMortalityWeight: number;
+      weightMortality: number;
+      weightMortalityWeight: number;
+      weightLoss: number;
     }>;
   deliveries: RateEntryDelivery[];
 }

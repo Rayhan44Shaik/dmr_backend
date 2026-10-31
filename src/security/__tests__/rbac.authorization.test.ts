@@ -12,6 +12,16 @@ describe("authoritative six-role RBAC",()=>{
   it("contains exactly the production roles",()=>assert.deepEqual([...APP_ROLES],["OWNER","FULL_ACCESS","AUDIT","OFFICE","COLLECTION","SUPERVISOR"]));
   it("Supervisor is trip-entry only",()=>{assert.equal(hasPermission("SUPERVISOR","trip.create"),true);assert.equal(hasPermission("SUPERVISOR","trip.submit"),true);assert.equal(hasPermission("SUPERVISOR","trip.delete"),false)});
   it("Office completes trips but cannot approve maintenance",()=>{assert.equal(hasPermission("OFFICE","trip.complete"),true);assert.equal(hasPermission("OFFICE","maintenance.approve"),false)});
+  it("Office can read the complete Trip List and its trip details",async()=>{
+    assert.equal(await allowed("OFFICE","GET","/operations/trip-list"),200);
+    assert.equal(await allowed("OFFICE","GET","/operations/trip-list/123"),200);
+  });
+  it("Office can read Operation Expenses; field roles cannot",async()=>{
+    assert.equal(await allowed("OFFICE","GET","/operations/expenses"),200);
+    assert.equal(await allowed("AUDIT","GET","/operations/expenses"),200);
+    assert.equal(await allowed("SUPERVISOR","GET","/operations/expenses"),403);
+    assert.equal(await allowed("COLLECTION","GET","/operations/expenses"),403);
+  });
   it("Collection creates but cannot approve collections",()=>{assert.equal(hasPermission("COLLECTION","collection.create"),true);assert.equal(hasPermission("COLLECTION","collection.approve"),false)});
   it("Audit is read only at the API boundary",async()=>{assert.equal(await allowed("AUDIT","GET","/operations/collections"),200);for(const method of ["POST","PUT","PATCH","DELETE"])assert.equal(await allowed("AUDIT",method,"/operations/collections"),403)});
   it("Full Access reaches the dedicated owner guard (coarse boundary does not impersonate owner)",async()=>assert.equal(await allowed("FULL_ACCESS","POST","/access-management/grant"),200));

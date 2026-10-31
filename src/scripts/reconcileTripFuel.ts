@@ -12,7 +12,7 @@
  */
 import { pool, withTransaction } from "../config/db.js";
 import { syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
-import { dateOnly, str, num } from "../utils/coerce.js";
+import { dateOnly, str, num, numOrNull } from "../utils/coerce.js";
 import type { DieselEntry } from "../types/models.js";
 
 async function main() {
@@ -58,7 +58,8 @@ async function main() {
 
     for (const t of trips.rows) {
       const dieselRows = await client.query(
-        `SELECT row_index, litres, rate, amount, meter, bunk_name, bunk_gps, image_data, image_name
+        `SELECT row_index, litres, rate, amount, meter, bunk_name, bunk_gps, image_data, image_name,
+                gps_lat, gps_lon, gps_accuracy, gps_captured_at
          FROM trip_diesel_entries WHERE trip_id = $1 ORDER BY row_index`,
         [t.id]
       );
@@ -72,6 +73,10 @@ async function main() {
         bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
         imageData: r.image_data == null ? null : str(r.image_data),
         imageName: r.image_name == null ? null : str(r.image_name),
+        gpsLat: numOrNull(r.gps_lat),
+        gpsLon: numOrNull(r.gps_lon),
+        gpsAccuracy: numOrNull(r.gps_accuracy),
+        gpsCapturedAt: r.gps_captured_at == null ? null : str(r.gps_captured_at),
       }));
 
       const before = await client.query(

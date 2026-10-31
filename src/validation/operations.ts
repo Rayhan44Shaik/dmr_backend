@@ -65,6 +65,7 @@ export const shopSaleBodySchema = z.object({
   birdTypeId: z.number().int().positive().nullable().optional(),
   birdType: z.string().optional(),
   tripId: z.number().int().positive().nullable().optional(),
+  load: z.number().int().min(1).max(3).optional(),
   birds: z.number().int().nonnegative().optional(),
   weight: z.number().nonnegative().optional(),
   rate: z.number().nonnegative().optional(),
@@ -73,9 +74,40 @@ export const shopSaleBodySchema = z.object({
   // it doesn't fail validation; the value itself is always ignored.
   amount: z.number().nonnegative().optional(),
   mortality: z.number().int().nonnegative().optional(),
+  mortalityWeight: z.number().nonnegative().optional(),
+  deliveryMode: z.enum(["box", "weight"]).optional(),
   remarks: z.string().optional(),
   status: opsStatusSchema.optional(),
   createdBy: z.string().optional(),
+});
+
+export const shopSalesLoadSaveSchema = z.object({
+  deliveries: z.array(z.object({
+    id: z.number().int().positive().optional(),
+    shopId: z.number().int().positive(),
+    birds: z.number().int().nonnegative(),
+    weight: z.number().nonnegative(),
+    mortality: z.number().int().nonnegative(),
+    mortalityWeight: z.number().nonnegative(),
+    deliveryMode: z.enum(["box", "weight"]),
+    rate: z.number().min(MIN_SHOP_SALE_RATE).max(MAX_SHOP_SALE_RATE),
+    remarks: z.string().optional(),
+  }).refine((row) => row.birds + row.mortality + row.weight + row.mortalityWeight > 0, "A shop delivery must allocate birds or weight.")).min(1),
+});
+
+export const shopSalesTripSaveSchema = z.object({
+  deliveries: z.array(z.object({
+    id: z.number().int().positive().optional(),
+    load: z.number().int().min(1).max(3),
+    shopId: z.number().int().positive(),
+    birds: z.number().int().nonnegative(),
+    weight: z.number().nonnegative(),
+    mortality: z.number().int().nonnegative(),
+    mortalityWeight: z.number().nonnegative(),
+    deliveryMode: z.enum(["box", "weight"]),
+    rate: z.number().min(MIN_SHOP_SALE_RATE).max(MAX_SHOP_SALE_RATE),
+    remarks: z.string().optional(),
+  }).refine((row) => row.birds + row.mortality + row.weight + row.mortalityWeight > 0, "A shop delivery must allocate birds or weight.")).min(1),
 });
 
 /** One shop-wise rate line, applied to an existing trip_deliveries row. */

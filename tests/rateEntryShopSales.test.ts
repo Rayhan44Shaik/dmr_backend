@@ -21,7 +21,7 @@
  *   - Rate/birds/weight are all editable post-lock within the window,
  *     each independently validated; amount is always server-computed
  *   - Duplicate Shop Sale creation is rejected
- *   - The 10-day edit window boundary (inclusive) blocks edits afterwards
+ *   - The 2-week-from-insert edit window blocks edits afterwards
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
@@ -508,11 +508,11 @@ describe("Duplicate Shop Sale prevention", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. 10-day edit window boundary
+// 5. 2-week-from-insert edit window boundary
 // ---------------------------------------------------------------------------
 
-describe("10-day Shop Sales edit window", () => {
-  it("day 10 (inclusive) still allows edits; day 11 rejects everything, including delete", async () => {
+describe("2-week-from-insert Shop Sales edit window", () => {
+  it("day 13 still allows edits; day 14 rejects, including delete", async () => {
     const m = await seedMasters();
     const trip = await makeCompletedTrip(m, {
       tripNo: "RS-WINDOW",
@@ -526,40 +526,29 @@ describe("10-day Shop Sales edit window", () => {
     });
     await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
 
-    // The window anchor is rate_locked_at (when Shop Sales actually became
-    // available â€” see tripDeliverySync.ts editWindowAnchor), not approved_at.
-    // Backdate rate_locked_at to just under 10 full days before "now" (a
-    // small safety margin below the exact boundary avoids test flakiness
-    // from the few milliseconds of request latency between computing "now"
-    // here and the server evaluating its own `new Date() <= expiresAt`
-    // check) â€” still inside the window per isTripEditable()'s inclusive
-    // `<=` comparison. approved_at is also backdated so the fallback path
-    // is exercised identically for any legacy trip locked before
-    // rate_locked_at existed.
-    const justUnderTenDays = new Date(
-      Date.now() - (10 * 24 * 60 * 60 * 1000 - 60_000)
+    const justUnderFourteenDays = new Date(
+      Date.now() - (14 * 24 * 60 * 60 * 1000 - 60_000)
     ).toISOString();
-    await pool.query(
-      `UPDATE trips SET approved_at = $2, rate_locked_at = $2 WHERE id = $1`,
-      [trip.id, justUnderTenDays]
-    );
-    const atDay10 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 120 });
-    assert.equal(atDay10.status, 200, "day 10 must still be editable (inclusive boundary)");
+    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [
+      dA,
+      justUnderFourteenDays,
+    ]);
+    const atDay13 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 120 });
+    assert.equal(atDay13.status, 200, "day 13 must still be editable (inside 2 weeks from insert)");
 
-    // Backdate to 11 days ago â€” now past the window.
-    const elevenDaysAgo = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(
-      `UPDATE trips SET approved_at = $2, rate_locked_at = $2 WHERE id = $1`,
-      [trip.id, elevenDaysAgo]
-    );
-    const atDay11 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 150 });
-    assert.equal(atDay11.status, 409, "day 11 must be rejected");
+    const fifteenDaysAgo = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [
+      dA,
+      fifteenDaysAgo,
+    ]);
+    const atDay15 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 150 });
+    assert.equal(atDay15.status, 409, "day 15 must be rejected");
 
     const del = await fetch(`${baseUrl}/api/operations/shop-sales/${dA}`, { method: "DELETE", headers: app.authHeaders });
     assert.equal(del.status, 409, "delete must also be rejected past the window");
 
     const row = await pool.query(`SELECT rate FROM trip_deliveries WHERE id = $1`, [dA]);
-    assert.equal(Number(row.rows[0].rate), 120, "value must remain at its last valid (day-10) edit");
+    assert.equal(Number(row.rows[0].rate), 120, "value must remain at its last valid in-window edit");
   });
 });
 

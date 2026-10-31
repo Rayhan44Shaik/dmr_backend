@@ -48,6 +48,8 @@ interface DeliveryRow extends Record<string, unknown> {
   bird_type: string;
   birds: number;
   weight: number;
+  farm_weight: number | null;
+  dc_weight: number | null;
   mortality: number;
   mort_kg: number | null;
   rate: number | null;
@@ -207,9 +209,9 @@ async function loadDeliveries(
 ): Promise<RateEntryDelivery[]> {
   const result = await client.query<DeliveryRow>(
     `SELECT d.id, d.serial_no, d.box_no, d.shop_id, d.shop_name, d.sub_shop_name,
-            d.bird_type_id, d.bird_type, d.birds, d.weight, d.mortality, d.mort_kg,
+            d.bird_type_id, d.bird_type, d.birds, d.weight, d.farm_weight, d.mortality, d.mort_kg,
             d.rate, d.amount, d.remarks, d.delivery_mode, d.auto_capture_time,
-            COALESCE(l.leg_index, 1) AS load_no
+            COALESCE(l.leg_index, 1) AS load_no, COALESCE(l.dc_weight, 0) AS dc_weight
        FROM trip_deliveries d
        LEFT JOIN trip_legs l ON l.id = d.leg_id AND l.trip_id = d.trip_id
       WHERE d.trip_id = $1
@@ -247,6 +249,8 @@ async function loadDeliveries(
       birdType: str(r.bird_type),
       birds: num(r.birds),
       weight,
+      farmWeight: numOrNull(r.farm_weight),
+      dcWeight: num(r.dc_weight),
       mortality: num(r.mortality),
       mortKg: numOrNull(r.mort_kg),
       rate,
@@ -289,6 +293,12 @@ function mapTrip(
         birds: rows.reduce((sum, delivery) => sum + delivery.birds, 0),
         weight: Number(rows.reduce((sum, delivery) => sum + delivery.weight, 0).toFixed(2)),
         amount: Number(ratedRows.reduce((sum, delivery) => sum + delivery.amount, 0).toFixed(2)),
+        dcWeight: Number(Math.max(0, ...rows.map((delivery) => delivery.dcWeight)).toFixed(2)),
+        boxMortality: rows.filter((delivery) => delivery.deliveryMode !== "weight").reduce((sum, delivery) => sum + delivery.mortality, 0),
+        boxMortalityWeight: Number(rows.filter((delivery) => delivery.deliveryMode !== "weight").reduce((sum, delivery) => sum + Number(delivery.mortKg ?? 0), 0).toFixed(2)),
+        weightMortality: rows.filter((delivery) => delivery.deliveryMode === "weight").reduce((sum, delivery) => sum + delivery.mortality, 0),
+        weightMortalityWeight: Number(rows.filter((delivery) => delivery.deliveryMode === "weight").reduce((sum, delivery) => sum + Number(delivery.mortKg ?? 0), 0).toFixed(2)),
+        weightLoss: Number(rows.filter((delivery) => delivery.deliveryMode === "weight").reduce((sum, delivery) => sum + Math.max(0, Number(delivery.farmWeight ?? 0) - delivery.weight - Number(delivery.mortKg ?? 0)), 0).toFixed(2)),
       };
     });
 

@@ -46,11 +46,26 @@ export function mapPgError(err: unknown): AppError | null {
         constraint: err.constraint,
         detail: err.detail,
       });
-    case "23514":
-      return new AppError(422, "Constraint check failed", {
+    case "23514": {
+      const raw = `${err.message ?? ""} ${err.detail ?? ""}`;
+      if (/rate-locked|permanently locked|correction window|2-week insert window|2 weeks from the Shop Sale insert/i.test(raw)) {
+        return new AppError(
+          409,
+          "Shop sale is locked — birds, weight, rate and amount can be changed for 2 weeks from the insert date.",
+          { constraint: err.constraint, detail: err.detail }
+        );
+      }
+      if (err.constraint === "shop_ledger_check") {
+        return new AppError(422, "Shop ledger amount cannot be zero.", {
+          constraint: err.constraint,
+          detail: err.detail,
+        });
+      }
+      return new AppError(422, err.detail?.trim() || "Constraint check failed", {
         constraint: err.constraint,
         detail: err.detail,
       });
+    }
     case "22P02":
       return new AppError(400, "Invalid value for column type", {
         detail: err.detail ?? err.message,

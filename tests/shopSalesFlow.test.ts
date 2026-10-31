@@ -3,8 +3,8 @@
  *
  *   Trip Entry → Completed → Rate Entry Save & Lock (rate_completed=TRUE,
  *   rate_locked_at=NOW()) → ONLY THEN Shop Sales becomes visible.
- *   Days 0–9  : birds / weight / rate editable, amount server-calculated.
- *   Day 10+   : birds / weight / rate / amount permanently locked.
+ *   Days 0–13 : birds / weight / rate editable (2 weeks from insert), amount server-calculated.
+ *   Day 14+   : birds / weight / rate / amount permanently locked.
  *   Aggregate birds / weight may never exceed the Pickup totals
  *   (trips.total_birds / trips.dc_weight) — validated trip-wide after the
  *   proposed edit, not per-row.
@@ -293,6 +293,58 @@ describe("Shop Sales visibility requires Rate Entry lock", () => {
 // 6, 7, 8. Pickup (aggregate) birds/weight limits
 // ---------------------------------------------------------------------------
 describe("Shop Sales pickup aggregate limits", () => {
+  it("trip editor can add a boxless destination and sync it to Trip List", async () => {
+    const m = await seedMasters();
+    const trip = await makeCompletedTrip(m, {
+      tripNo: "SF-BOXLESS-ADD",
+      tripDate: "2026-08-03",
+      totalBirds: 1000,
+      dcWeight: 1800,
+    });
+    const deliveryA = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 300, 500);
+    const deliveryB = await addDelivery(trip.id, m.shopB.id, m.shopB.shopName, 700, 1300);
+    await recalcTripDeliveryTotals(pool as never, trip.id);
+    const lockedRates = await putJson(baseUrl, `/api/operations/rate-entry/${trip.id}`, {
+      rates: [{ deliveryId: deliveryA, rate: 100 }, { deliveryId: deliveryB, rate: 100 }],
+    });
+    assert.equal(lockedRates.status, 200, JSON.stringify(lockedRates.body));
+    const locked = await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, { lockedBy: "boxless-flow-test" });
+    assert.equal(locked.status, 200, JSON.stringify(locked.body));
+    const destination = await mastersService.upsertShop({
+      shopName: `SF Shop Added ${seq}`,
+      ownerName: "Owner Added",
+      phoneNumber: `99300000${String(seq).padStart(2, "0")}`,
+      village: "Village Added",
+      address: "Addr Added",
+      status: "Active",
+    });
+
+    const saved = await putJson(baseUrl, `/api/operations/shop-sales/trip/${trip.id}/deliveries`, {
+      deliveries: [
+        { id: deliveryA, load: 1, shopId: m.shopA.id, birds: 300, weight: 500, mortality: 0, mortalityWeight: 0, deliveryMode: "box", rate: 100 },
+        { id: deliveryB, load: 1, shopId: m.shopB.id, birds: 690, weight: 1280, mortality: 0, mortalityWeight: 0, deliveryMode: "box", rate: 100 },
+        { load: 1, shopId: destination.id, birds: 10, weight: 20, mortality: 0, mortalityWeight: 0, deliveryMode: "box", rate: 100 },
+      ],
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    const added = await pool.query<{ sale_no: string; birds: number; weight: string; boxes: number }>(
+      `SELECT d.sale_no,d.birds,d.weight,
+              (SELECT COUNT(*)::int FROM trip_delivery_boxes b WHERE b.delivery_id=d.id) AS boxes
+         FROM trip_deliveries d WHERE d.trip_id=$1 AND d.shop_id=$2 AND d.deleted=FALSE`,
+      [trip.id, destination.id],
+    );
+    assert.equal(added.rowCount, 1);
+    assert.match(added.rows[0].sale_no, /-S\d+$/);
+    assert.equal(Number(added.rows[0].birds), 10);
+    assert.equal(Number(added.rows[0].weight), 20);
+    assert.equal(added.rows[0].boxes, 0, "boxless direct allocation must be saved without a box assignment");
+
+    const tripListRow = await getJson(baseUrl, `/api/trips/${trip.id}`);
+    assert.equal(tripListRow.status, 200, JSON.stringify(tripListRow.body));
+    const tripDeliveries = tripListRow.body.deliveries ?? tripListRow.body.legs?.flatMap((leg: { deliveries?: unknown[] }) => leg.deliveries ?? []);
+    assert.ok(tripDeliveries.some((row: { shopId?: number; shopName?: string; birds?: number }) => row.shopId === destination.id && row.birds === 10));
+  });
+
   it("6. Pickup birds 10000; aggregate 10001 -> rejected (422)", async () => {
     // shopA = 3000, shopB = 4000 (total 7000). Editing shopB to 8000 -> 11000 > 10000.
     const { trip, deliveryB } = await makeLockedTrip({
@@ -454,12 +506,12 @@ describe("Shop Sales corrections reflect in Trip List", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 13, 14, 15. 10-day correction window
+// 13, 14, 15. 2-week-from-insert correction window
 // ---------------------------------------------------------------------------
-describe("10-day correction window", () => {
-  it("13. Day 9: birds/weight/rate editable", async () => {
+describe("2-week-from-insert correction window", () => {
+  it("13. Day 13: birds/weight/rate editable", async () => {
     const { deliveryA } = await makeLockedTrip({
-      tripNo: "SF-DAY9",
+      tripNo: "SF-DAY13",
       totalBirds: 1000,
       dcWeight: 1800,
       birdsA: 300,
@@ -467,18 +519,17 @@ describe("10-day correction window", () => {
       birdsB: 250,
       weightB: 450,
     });
-    // Backdate rate_locked_at to ~9 days ago.
-    const nineDays = new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`, [deliveryA, nineDays]);
+    const thirteenDays = new Date(Date.now() - 13 * 24 * 60 * 60 * 1000).toISOString();
+    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [deliveryA, thirteenDays]);
     for (const body of [{ birds: 310 }, { weight: 510 }, { rate: 120 }]) {
       const res = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryA}`, body);
-      assert.equal(res.status, 200, `day-9 edit ${JSON.stringify(body)} must be allowed, got ${res.status}`);
+      assert.equal(res.status, 200, `day-13 edit ${JSON.stringify(body)} must be allowed, got ${res.status}`);
     }
   });
 
-  it("14. Day 10 exactly: birds/weight/rate/amount rejected", async () => {
+  it("14. Day 14 exactly: birds/weight/rate/amount rejected", async () => {
     const { deliveryA } = await makeLockedTrip({
-      tripNo: "SF-DAY10",
+      tripNo: "SF-DAY14",
       totalBirds: 1000,
       dcWeight: 1800,
       birdsA: 300,
@@ -486,17 +537,17 @@ describe("10-day correction window", () => {
       birdsB: 250,
       weightB: 450,
     });
-    const tenDays = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`, [deliveryA, tenDays]);
-    for (const body of [{ birds: 310 }, { weight: 510 }, { rate: 120 }, { amount: 99999 }]) {
+    const fourteenDays = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [deliveryA, fourteenDays]);
+    for (const body of [{ birds: 310 }, { weight: 510 }, { rate: 120 }]) {
       const res = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryA}`, body);
-      assert.equal(res.status, 409, `day-10 edit ${JSON.stringify(body)} must be rejected, got ${res.status}`);
+      assert.equal(res.status, 409, `day-14 edit ${JSON.stringify(body)} must be rejected, got ${res.status}`);
     }
   });
 
-  it("15. Day 11: same rejection", async () => {
+  it("15. Day 15: same rejection", async () => {
     const { deliveryA } = await makeLockedTrip({
-      tripNo: "SF-DAY11",
+      tripNo: "SF-DAY15",
       totalBirds: 1000,
       dcWeight: 1800,
       birdsA: 300,
@@ -504,10 +555,10 @@ describe("10-day correction window", () => {
       birdsB: 250,
       weightB: 450,
     });
-    const elevenDays = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = (SELECT trip_id FROM trip_deliveries WHERE id = $1)`, [deliveryA, elevenDays]);
+    const fifteenDays = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [deliveryA, fifteenDays]);
     const res = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryA}`, { rate: 130 });
-    assert.equal(res.status, 409, `day-11 edit must be rejected, got ${res.status}`);
+    assert.equal(res.status, 409, `day-15 edit must be rejected, got ${res.status}`);
   });
 });
 
@@ -558,7 +609,7 @@ describe("Collections never creates or reopens the Rate Entry lock", () => {
 // 17 & 18. DB-level guards after lock
 // ---------------------------------------------------------------------------
 describe("Database-level lock guards", () => {
-  it("17. Direct DB update after 10 days rejected (DB trigger)", async () => {
+  it("17. Direct DB update after 14 days rejected (DB trigger)", async () => {
     const { trip, deliveryA } = await makeLockedTrip({
       tripNo: "SF-DBTRIG",
       totalBirds: 1000,
@@ -568,12 +619,13 @@ describe("Database-level lock guards", () => {
       birdsB: 250,
       weightB: 450,
     });
-    const elevenDays = new Date(Date.now() - 11 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [trip.id, elevenDays]);
+    const fifteenDays = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [deliveryA, fifteenDays]);
     await assert.rejects(
       pool.query(`UPDATE trip_deliveries SET rate = 1, amount = 1 WHERE id = $1`, [deliveryA]),
-      /permanently locked|10-day|correction window/
+      /2-week insert window|2 weeks from the Shop Sale insert|locked/
     );
+    void trip;
   });
 
   it("18. Delete after Rate Entry lock rejected", async () => {

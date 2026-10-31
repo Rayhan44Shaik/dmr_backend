@@ -39,6 +39,24 @@ export const collectionEntryStatusSchema = z.object({
   deletedBy: z.string().optional(),
 });
 
+/** Atomic spreadsheet import. Master values are resolved and canonicalised by
+ * the service; clients cannot smuggle new shops, collectors, or banks in. */
+export const collectionEntryImportSchema = z.object({
+  batchId: z.string().uuid(),
+  rows: z.array(z.object({
+    sourceRow: z.number().int().min(2).max(1_000_002),
+    collectionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    shopName: z.string().trim().min(1).max(200),
+    collector: z.string().trim().min(1).max(200),
+    paymentMode: z.string().trim().min(1).max(200),
+    amount: z.number().finite().positive().max(999_999_999_999.99),
+    remarks: z.string().trim().max(2_000).default(""),
+    referenceNo: z.string().trim().max(200).default(""),
+  })).min(1).max(1_000),
+});
+
+export type CollectionEntryImport = z.infer<typeof collectionEntryImportSchema>;
+
 export function parseCollectionEntryBody(body: unknown): CollectionEntryBody {
   return parseBody(collectionEntryBodySchema, body);
 }

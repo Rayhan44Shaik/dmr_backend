@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { dateOnly, num, numOrNull, str } from "./coerce.js";
+import { dateOnly, num, numOrNull, parseCoordPair, str } from "./coerce.js";
 import { AppError } from "../middleware/errorHandler.js";
 import type { DieselEntry } from "../types/models.js";
 
@@ -83,6 +83,9 @@ export async function syncDieselToFuelExpenses(
 
     activeIndices.push(entry.rowIndex);
     const amount = Number(entry.amount ?? Number((litres * rate).toFixed(2)));
+    const parsedGps = parseCoordPair(entry.bunkGps);
+    const gpsLat = entry.gpsLat ?? parsedGps?.lat ?? null;
+    const gpsLon = entry.gpsLon ?? parsedGps?.lon ?? null;
 
     // Only allocate a new bill_no when inserting. Re-generating on every upsert
     // races under multi-bill trips and can fail UNIQUE(bill_no).
@@ -107,11 +110,13 @@ export async function syncDieselToFuelExpenses(
          bill_no, expense_date, vehicle_id, vehicle_no, driver_id, driver_name,
          supervisor_id, supervisor_name, trip_id, trip_fuel_entry_index, source_type,
          meter_reading, amount, rate, litres, petrol_bunk, pump_name, bunk_address,
-         remarks, status, ops_status, image_data, image_name, created_by
+         remarks, status, ops_status, image_data, image_name, created_by,
+         gps_lat, gps_lon, gps_accuracy, gps_captured_at
        ) VALUES (
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'TRIP',
          $11,$12,$13,$14,$15,$15,$16,
-         $17,'Pending'::approval_status,'Pending Approval'::ops_record_status,$18,$19,$20
+         $17,'Pending'::approval_status,'Pending Approval'::ops_record_status,$18,$19,$20,
+         $21,$22,$23,$24
        )
        ON CONFLICT (trip_id, trip_fuel_entry_index) WHERE source_type = 'TRIP' AND deleted = FALSE
        DO UPDATE SET
@@ -131,6 +136,10 @@ export async function syncDieselToFuelExpenses(
          bunk_address = COALESCE(EXCLUDED.bunk_address, fuel_expenses.bunk_address),
          image_data = COALESCE(EXCLUDED.image_data, fuel_expenses.image_data),
          image_name = COALESCE(EXCLUDED.image_name, fuel_expenses.image_name),
+         gps_lat = COALESCE(EXCLUDED.gps_lat, fuel_expenses.gps_lat),
+         gps_lon = COALESCE(EXCLUDED.gps_lon, fuel_expenses.gps_lon),
+         gps_accuracy = COALESCE(EXCLUDED.gps_accuracy, fuel_expenses.gps_accuracy),
+         gps_captured_at = COALESCE(EXCLUDED.gps_captured_at, fuel_expenses.gps_captured_at),
          updated_at = NOW()
        WHERE fuel_expenses.status = 'Pending'`,
       [
@@ -154,8 +163,28 @@ export async function syncDieselToFuelExpenses(
         entry.imageData ?? null,
         entry.imageName ?? null,
         context.createdBy ?? "trip-sync",
+        gpsLat,
+        gpsLon,
+        entry.gpsAccuracy ?? null,
+        entry.gpsCapturedAt ?? null,
       ]
     );
+
+    if (gpsLat != null && gpsLon != null) {
+      await client.query(
+        `UPDATE fuel_expenses
+            SET gps_lat = COALESCE(gps_lat, $3),
+                gps_lon = COALESCE(gps_lon, $4),
+                gps_accuracy = COALESCE(gps_accuracy, $5),
+                gps_captured_at = COALESCE(gps_captured_at, $6)
+          WHERE trip_id = $1
+            AND trip_fuel_entry_index = $2
+            AND source_type = 'TRIP'
+            AND COALESCE(deleted, FALSE) = FALSE
+            AND (gps_lat IS NULL OR gps_lon IS NULL)`,
+        [tripId, entry.rowIndex, gpsLat, gpsLon, entry.gpsAccuracy ?? null, entry.gpsCapturedAt ?? null]
+      );
+    }
   }
 
   if (activeIndices.length === 0) {
@@ -194,7 +223,8 @@ export async function syncTripFuelFromDb(
   const trip = tripRes.rows[0] as Record<string, unknown>;
 
   const dieselRows = await client.query(
-    `SELECT row_index, litres, rate, amount, meter, bunk_name, bunk_gps, image_data, image_name
+    `SELECT row_index, litres, rate, amount, meter, bunk_name, bunk_gps, image_data, image_name,
+            gps_lat, gps_lon, gps_accuracy, gps_captured_at
      FROM trip_diesel_entries WHERE trip_id = $1 ORDER BY row_index`,
     [tripId]
   );
@@ -208,6 +238,10 @@ export async function syncTripFuelFromDb(
     bunkGps: r.bunk_gps == null ? null : str(r.bunk_gps),
     imageData: r.image_data == null ? null : str(r.image_data),
     imageName: r.image_name == null ? null : str(r.image_name),
+    gpsLat: numOrNull(r.gps_lat),
+    gpsLon: numOrNull(r.gps_lon),
+    gpsAccuracy: numOrNull(r.gps_accuracy),
+    gpsCapturedAt: r.gps_captured_at == null ? null : str(r.gps_captured_at),
   }));
 
   await syncDieselToFuelExpenses(client, tripId, dateOnly(trip.trip_date) ?? "", entries, {
