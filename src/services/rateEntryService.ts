@@ -21,6 +21,12 @@ import {
 
 type Client = pg.PoolClient;
 
+function isoOrNull(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
 const ELIGIBLE_WHERE = `
   WHERE t.status = 'Completed'
     AND COALESCE(t.deleted, FALSE) = FALSE
@@ -257,10 +263,7 @@ async function loadDeliveries(
       amount,
       remarks: str(r.remarks),
       deliveryMode: (str(r.delivery_mode) as "box" | "weight") || "box",
-      autoCaptureTime:
-        r.auto_capture_time == null
-          ? null
-          : new Date(r.auto_capture_time as string | Date).toISOString(),
+      autoCaptureTime: isoOrNull(r.auto_capture_time),
       marketRate: market.get(key) ?? null,
     };
   });
@@ -318,7 +321,7 @@ function mapTrip(
     // still include pending `[ORDER]` plan stubs).
     totalShops: deliveries.length > 0 ? deliveries.length : num(row.total_shops),
     rateLocked: Boolean(row.rate_completed),
-    rateLockedAt: row.rate_locked_at == null ? null : new Date(str(row.rate_locked_at)).toISOString(),
+    rateLockedAt: isoOrNull(row.rate_locked_at),
     rateLockedBy: row.rate_locked_by == null ? null : str(row.rate_locked_by),
     ratesEntered: deliveries.filter((d) => d.rate != null).length,
     deliveriesCount: deliveries.length,
@@ -401,12 +404,7 @@ export const rateEntryService = {
           pagedParams
         );
 
-        const items: RateEntryTrip[] = [];
-        for (const row of result.rows) {
-          const deliveries = await loadDeliveries(client, num(row.id));
-          items.push(mapTrip(row, deliveries));
-        }
-        return paginatedResult(items, total, filters.pagination);
+        return paginatedResult(result.rows.map((row) => mapTrip(row, [])), total, filters.pagination);
       }
 
       const result = await client.query(
@@ -414,12 +412,7 @@ export const rateEntryService = {
          ORDER BY t.trip_date DESC, t.id DESC`,
         params
       );
-      const items: RateEntryTrip[] = [];
-      for (const row of result.rows) {
-        const deliveries = await loadDeliveries(client, num(row.id));
-        items.push(mapTrip(row, deliveries));
-      }
-      return items;
+      return result.rows.map((row) => mapTrip(row, []));
     });
   },
 
@@ -552,6 +545,40 @@ export const rateEntryService = {
           );
         }
 
+        // The UI's Save & Lock action sends the edited rates with the lock.
+        // Persist them inside this transaction before validating completeness;
+        // previously the schema stripped this array and zero-valued delivery
+        // rows were locked unchanged.
+        if (data.rates?.length) {
+          const deliveryIds = data.rates.map((row) => row.deliveryId);
+          const existing = await client.query<{ id: number; weight: number }>(
+            `SELECT id, weight
+               FROM trip_deliveries
+              WHERE trip_id = $1
+                AND id = ANY($2::int[])
+                AND COALESCE(deleted, FALSE) = FALSE`,
+            [tripId, deliveryIds],
+          );
+          const found = new Set(existing.rows.map((row) => num(row.id)));
+          const missingIds = deliveryIds.filter((id) => !found.has(id));
+          if (missingIds.length) {
+            throw new AppError(422, "Some deliveries do not belong to this trip", {
+              tripId,
+              missingDeliveryIds: missingIds,
+            });
+          }
+          const weightById = new Map(existing.rows.map((row) => [num(row.id), num(row.weight)]));
+          for (const row of data.rates) {
+            const amount = Number(((weightById.get(row.deliveryId) ?? 0) * row.rate).toFixed(2));
+            await client.query(
+              `UPDATE trip_deliveries
+                  SET rate = $2, amount = $3, updated_at = NOW()
+                WHERE id = $1 AND trip_id = $4`,
+              [row.deliveryId, row.rate, amount, tripId],
+            );
+          }
+        }
+
         const rateable = await client.query<{ id: number; shop_name: string; rate: number | null }>(
           `SELECT id, shop_name, rate FROM trip_deliveries
            WHERE ${RATEABLE_DELIVERY_WHERE}
@@ -564,7 +591,7 @@ export const rateEntryService = {
             missingDeliveries: [],
           });
         }
-        const missing = rateable.rows.filter((r) => r.rate == null);
+        const missing = rateable.rows.filter((r) => r.rate == null || num(r.rate) <= 0);
         if (missing.length) {
           throw new AppError(422, "Every shop delivery must have a rate before locking", {
             tripId,

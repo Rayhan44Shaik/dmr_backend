@@ -444,6 +444,36 @@ describe("Shop Sales amount recalculation", () => {
 // 11 & 12. Trip List synchronization
 // ---------------------------------------------------------------------------
 describe("Shop Sales corrections reflect in Trip List", () => {
+  it("removes a zeroed Shop Sale from Trip List detail and recalculates its totals", async () => {
+    const { m, trip, deliveryA, deliveryB } = await makeLockedTrip({
+      tripNo: "SF-TRIPLIST-ZERO",
+      totalBirds: 1000,
+      dcWeight: 1800,
+      birdsA: 300,
+      weightA: 500,
+      birdsB: 700,
+      weightB: 1300,
+      rateA: 100,
+      rateB: 110,
+    });
+
+    const edit = await putJson(baseUrl, `/api/operations/shop-sales/trip/${trip.id}/deliveries`, {
+      deliveries: [
+        { id: deliveryA, load: 1, shopId: m.shopA.id, birds: 0, weight: 0, mortality: 0, mortalityWeight: 0, deliveryMode: "box", rate: 100 },
+        { id: deliveryB, load: 1, shopId: m.shopB.id, birds: 1000, weight: 1800, mortality: 0, mortalityWeight: 0, deliveryMode: "box", rate: 110 },
+      ],
+    });
+    assert.equal(edit.status, 200, JSON.stringify(edit.body));
+
+    const detail = await getJson(baseUrl, `/api/operations/trip-list/${trip.id}`);
+    assert.equal(detail.status, 200, JSON.stringify(detail.body));
+    assert.equal(detail.body.deliveries?.some((row: { id: number }) => row.id === deliveryA), false);
+    assert.equal(detail.body.deliveries?.some((row: { id: number }) => row.id === deliveryB), true);
+    assert.equal(Number(detail.body.totalShops), 1);
+    assert.equal(Number(detail.body.totalBirdsDelivered), 1000);
+    assert.equal(Number(detail.body.totalDeliveredWeight), 1800);
+  });
+
   it("11. Trip List delivery row reflects new birds/weight/rate/amount after Shop Sales edit", async () => {
     const { trip, deliveryA } = await makeLockedTrip({
       tripNo: "SF-TRIPLIST-ROW",

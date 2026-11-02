@@ -19,7 +19,8 @@ import {
 import { parseBody } from "../validation/operations.js";
 import { collectionEntryUpdateSchema } from "../validation/collectionEntry.js";
 import { parseCollectionEntryBody } from "../validation/collectionEntry.js";
-import { collectionEntryImportSchema } from "../validation/collectionEntry.js";
+import { collectionEntryImportSchema, type CollectionEntryImport } from "../validation/collectionEntry.js";
+import { isCollectionApprovedDeleteWindowOpen, assertCollectionApprovedDeleteWindowOpen } from "../utils/collectionDeleteWindow.js";
 
 type Client = pg.PoolClient;
 
@@ -62,6 +63,20 @@ function mapEntry(row: Record<string, unknown>): CollectionEntry {
     createdAt: row.created_at == null ? null : str(row.created_at),
     updatedAt: row.updated_at == null ? null : str(row.updated_at),
   };
+}
+
+/** Inclusive last-14-days window used by Pending Collections when no dates
+ *  are applied, so "Recent Sales / Recent Collections" follow the same two
+ *  weeks as the post-approval delete window rather than the current Mon–Sun. */
+export function pendingRecentBounds(input?: string) {
+  const iso = (value: Date) => value.toISOString().slice(0, 10);
+  const today = iso(new Date());
+  const asOfDate = input && /^\d{4}-\d{2}-\d{2}$/.test(input) ? input : today;
+  const end = new Date(`${asOfDate}T00:00:00Z`);
+  if (Number.isNaN(end.getTime())) throw new AppError(400, "Invalid date");
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - 13);
+  return { asOfDate, weekStart: iso(start), weekEnd: asOfDate };
 }
 
 export function collectionWeekBounds(input?: string, weekOffset = 0) {
@@ -161,8 +176,66 @@ async function loadOne(client: Client, id: number): Promise<CollectionEntry> {
   return mapEntry(result.rows[0]);
 }
 
+async function loadCollectionImportMasters(client: Client) {
+  const [shopsResult, collectorsResult, banksResult, referencesResult] = await Promise.all([
+    client.query<{ shop_name: string }>(`SELECT shop_name FROM shops ORDER BY shop_name`),
+    client.query<{ employee_name: string }>(
+      `SELECT employee_name FROM employees
+        WHERE status = 'Active' AND LOWER(BTRIM(department)) = 'collection'
+        ORDER BY employee_name`
+    ),
+    client.query<{ bank_name: string }>(`SELECT bank_name FROM banks WHERE status = 'Active' ORDER BY bank_name`),
+    client.query<{ reference_no: string }>(
+      `SELECT reference_no FROM collections WHERE BTRIM(COALESCE(reference_no, '')) <> ''`
+    ),
+  ]);
+  return {
+    shops: shopsResult.rows.map((row) => row.shop_name),
+    collectors: collectorsResult.rows.map((row) => row.employee_name),
+    modes: ["Cash", ...banksResult.rows.map((row) => row.bank_name)],
+    existingReferences: referencesResult.rows.map((row) => row.reference_no),
+  };
+}
+
+async function validateCollectionImportRows(
+  client: Client,
+  rows: Array<Omit<CollectionEntryImport["rows"][number], "remarks" | "referenceNo"> & { remarks?: string; referenceNo?: string }>
+) {
+  const masters = await loadCollectionImportMasters(client);
+  const key = (value: string) => value.trim().toLocaleLowerCase("en-IN");
+  const shops = new Set(masters.shops.map(key));
+  const collectors = new Set(masters.collectors.map(key));
+  const modes = new Set(masters.modes.map(key));
+  const existingReferences = new Set(masters.existingReferences.map(key));
+  const batchReferenceCounts = new Map<string, number>();
+  rows.forEach((row) => {
+    const reference = key(row.referenceNo ?? "");
+    if (reference) batchReferenceCounts.set(reference, (batchReferenceCounts.get(reference) ?? 0) + 1);
+  });
+  const issues: Array<{ sourceRow: number; fields: string[] }> = [];
+  for (const row of rows) {
+    const fields: string[] = [];
+    if (!shops.has(key(row.shopName))) fields.push("shopName");
+    if (!collectors.has(key(row.collector))) fields.push("collector");
+    if (!modes.has(key(row.paymentMode))) fields.push("paymentMode");
+    const reference = key(row.referenceNo ?? "");
+    if (reference && (existingReferences.has(reference) || (batchReferenceCounts.get(reference) ?? 0) > 1)) fields.push("referenceNo");
+    const parsedDate = new Date(`${row.collectionDate}T00:00:00Z`);
+    if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== row.collectionDate) fields.push("collectionDate");
+    if (fields.length) issues.push({ sourceRow: row.sourceRow, fields });
+  }
+  return issues;
+}
+
 export { deletePendingCollection, deletePendingCollectionForRouter } from "./collectionEntryService.pendingDelete.js";
 export const collectionEntryService = {
+  async importMasters() {
+    return withTransaction((client) => loadCollectionImportMasters(client));
+  },
+  async validateImport(body: unknown) {
+    const data = parseBody(collectionEntryImportSchema, body);
+    return withTransaction(async (client) => ({ issues: await validateCollectionImportRows(client, data.rows) }));
+  },
   /**
    * Import only rows already accepted by the spreadsheet review. The entire
    * batch is one transaction, master names are matched case-insensitively and
@@ -187,16 +260,9 @@ export const collectionEntryService = {
       }
 
       const [shopsResult, collectorsResult, banksResult] = await Promise.all([
-        client.query<{ id: number; shop_name: string }>(
-          `SELECT id, shop_name FROM shops`
-        ),
-        client.query<{ employee_name: string }>(
-          `SELECT employee_name FROM employees
-            WHERE status = 'Active' AND LOWER(BTRIM(department)) = 'collection'`
-        ),
-        client.query<{ bank_name: string }>(
-          `SELECT bank_name FROM banks WHERE status = 'Active'`
-        ),
+        client.query<{ id: number; shop_name: string }>(`SELECT id, shop_name FROM shops`),
+        client.query<{ employee_name: string }>(`SELECT employee_name FROM employees WHERE status = 'Active' AND LOWER(BTRIM(department)) = 'collection'`),
+        client.query<{ bank_name: string }>(`SELECT bank_name FROM banks WHERE status = 'Active'`),
       ]);
       const key = (value: string) => value.trim().toLocaleLowerCase("en-IN");
       const shops = new Map(shopsResult.rows.map((row) => [key(row.shop_name), row]));
@@ -225,7 +291,7 @@ export const collectionEntryService = {
         if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== row.collectionDate) fields.push("collectionDate");
         if (fields.length) issues.push({ sourceRow: row.sourceRow, fields });
       }
-      if (issues.length) throw new AppError(422, "Import rows no longer match active master data", { issues });
+      if (issues.length) throw new AppError(422, "Some collection import rows need review", { issues });
 
       await client.query(
         `INSERT INTO collection_import_batches(batch_id, row_count, created_by) VALUES ($1,$2,$3)`,
@@ -270,10 +336,16 @@ export const collectionEntryService = {
        LIMIT $3`,
       [filters.shopId, Boolean(filters.includeDeleted), limit]
     );
-    return result.rows.map((row) => ({
-      ...mapEntry(row),
-      canDelete: !Boolean(row.deleted),
-    }));
+    return result.rows.map((row) => {
+      const entry = mapEntry(row);
+      const pending = String(entry.status ?? "").toLowerCase().startsWith("pending");
+      const canDelete = !entry.deleted && (
+        pending
+          ? true
+          : isCollectionApprovedDeleteWindowOpen(entry.approvedAt ?? entry.createdAt)
+      );
+      return { ...entry, canDelete };
+    });
   },
 
   async weeklySummary(shopId: number, date?: string) {
@@ -466,12 +538,13 @@ export const collectionEntryService = {
             weekEnd: range.toDate,
             asOfDate: range.toDate < today ? range.toDate : today,
           }
-        : collectionWeekBounds(date);
+        : pendingRecentBounds(date);
     const result = await query(
       `SELECT s.id AS shop_id, s.shop_name, COALESCE(s.current_balance, 0) AS balance,
               COALESCE(ws.amount, 0) AS weekly_sales,
               COALESCE(ac.amount, 0) AS approved_collections,
               COALESCE(pc.amount, 0) AS pending_collections,
+              COALESCE(lca.amount, 0) AS last_collection_amount,
               lc.last_collection_date
          FROM shops s
          LEFT JOIN LATERAL (
@@ -485,7 +558,7 @@ export const collectionEntryService = {
            SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount,
                   COUNT(*)::int AS row_count
              FROM collections c WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
-              AND COALESCE(c.is_financial, FALSE) = TRUE
+              AND (COALESCE(c.is_financial, FALSE) = TRUE OR c.status = 'Approved')
               AND c.collection_date BETWEEN $1::date AND $2::date
          ) ac ON TRUE
          LEFT JOIN LATERAL (
@@ -498,8 +571,15 @@ export const collectionEntryService = {
          LEFT JOIN LATERAL (
            SELECT MAX(c.collection_date) AS last_collection_date
              FROM collections c WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
-              AND COALESCE(c.is_financial, FALSE) = TRUE
+              AND (COALESCE(c.is_financial, FALSE) = TRUE OR c.status = 'Approved')
          ) lc ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount
+             FROM collections c WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
+              AND (COALESCE(c.is_financial, FALSE) = TRUE OR c.status = 'Approved')
+              AND lc.last_collection_date IS NOT NULL
+              AND c.collection_date = lc.last_collection_date
+         ) lca ON TRUE
         WHERE s.status = 'Active'
            OR COALESCE(s.opening_balance, 0) <> 0
            OR COALESCE(s.current_balance, 0) <> 0
@@ -509,7 +589,12 @@ export const collectionEntryService = {
     );
     const shops = result.rows.map((row) => {
       const weeklySales = num(row.weekly_sales);
-      const approved = num(row.approved_collections);
+      const windowApproved = num(row.approved_collections);
+      const lastDayApproved = num(row.last_collection_amount);
+      // Recent Collections must match the shop view's latest approved day.
+      // A week with no collections used to print ₹0 while Last Collection
+      // still showed 19/10 with money in the view.
+      const approved = windowApproved > 0 ? windowApproved : lastDayApproved;
       const lastDate = dateOnly(row.last_collection_date);
       const overdueDays = lastDate ? Math.max(0, Math.floor((new Date(`${bounds.asOfDate}T00:00:00Z`).getTime() - new Date(`${lastDate}T00:00:00Z`).getTime()) / 86_400_000)) : null;
       return {
@@ -563,6 +648,27 @@ export const collectionEntryService = {
     }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
+    const mapRows = (rows: Record<string, unknown>[]) =>
+      rows.flatMap((row) => {
+        try {
+          return [mapEntry(row)];
+        } catch {
+          return [];
+        }
+      });
+
+    const readRows = async (sql: string, values: unknown[]) => {
+      try {
+        return await query(sql, values);
+      } catch (err) {
+        if (!isPgError(err) || err.code !== "42703") throw err;
+        return await query(
+          sql.replace(SEL, "SELECT * FROM collections"),
+          values,
+        );
+      }
+    };
+
     if (filters.pagination) {
       const countResult = await query<{ c: string }>(
         `SELECT COUNT(*)::text AS c FROM collections ${where}`,
@@ -570,20 +676,20 @@ export const collectionEntryService = {
       );
       const total = Number(countResult.rows[0]?.c ?? 0);
       const pagedParams = [...params, filters.pagination.limit, filters.pagination.offset];
-      const result = await query(
+      const result = await readRows(
         `${SEL} ${where}
          ORDER BY collections.collection_date DESC, collections.id DESC
          LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
         pagedParams
       );
-      return paginatedResult(result.rows.map(mapEntry), total, filters.pagination);
+      return paginatedResult(mapRows(result.rows), total, filters.pagination);
     }
 
-    const result = await query(
+    const result = await readRows(
       `${SEL} ${where} ORDER BY collections.collection_date DESC, collections.id DESC`,
       params
     );
-    return result.rows.map(mapEntry);
+    return mapRows(result.rows);
   },
 
   async getById(id: number): Promise<CollectionEntry> {
@@ -886,6 +992,14 @@ export const collectionEntryService = {
 
         if (existing.deleted && !existing.isFinancial) {
           return existing; // idempotent — already soft-deleted, nothing to reverse
+        }
+
+        const approved = existing.status === "Approved" || existing.isFinancial;
+        if (approved) {
+          assertCollectionApprovedDeleteWindowOpen(
+            existing.approvedAt ?? existing.createdAt,
+            existing.collectionNo
+          );
         }
 
         if (existing.isFinancial && existing.shopId != null) {

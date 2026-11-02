@@ -24,10 +24,10 @@ const listSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(500).default(25),
   search: text,
   status: z.enum(["Active", "Inactive", "Suspended", ""]).optional(),
-  sort: z.enum(["name", "number", "status"]).default("number"),
+  sort: z.enum(["name", "number", "status", "type"]).default("number"),
   direction: z.enum(["asc", "desc"]).default("asc"),
   department: text, role: text, city: text, village: text, branch: text, category: text,
-  vehicle_type: text, association_type: text,
+  vehicle_type: text, association_type: text, vehicleClass: text,
   export: z.enum(["true"]).optional(),
 }).strict();
 
@@ -42,6 +42,12 @@ export async function listMaster(entity: MasterEntity, input: unknown) {
     conditions.push(`(${[...config.search, config.no, "status"].map(c => `${c}::text ILIKE ${term}`).join(" OR ")})`);
   }
   if (q.status) conditions.push(`status::text = ${bind(q.status)}`);
+  if (entity === "vehicles" && q.vehicleClass) {
+    if (q.vehicleClass === "Rental") conditions.push(`COALESCE(is_rented,FALSE)=TRUE`);
+    else if (q.vehicleClass === "Personal") conditions.push(`COALESCE(is_personal,FALSE)=TRUE`);
+    else if (q.vehicleClass === "Office") conditions.push(`COALESCE(is_rented,FALSE)=FALSE AND COALESCE(is_personal,FALSE)=FALSE`);
+    else conditions.push(`COALESCE(is_rented,FALSE)=FALSE AND COALESCE(is_personal,FALSE)=FALSE AND LOWER(vehicle_type)=LOWER(${bind(q.vehicleClass)})`);
+  }
   for (const field of ["department", "role", "city", "village", "branch", "category", "vehicle_type", "association_type"] as const) {
     if (!q[field]) continue;
     if (!(config.filters as readonly string[]).includes(field)) {
@@ -50,7 +56,7 @@ export async function listMaster(entity: MasterEntity, input: unknown) {
     conditions.push(`LOWER(${field}) = LOWER(${bind(q[field])})`);
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const sort = q.sort === "name" ? config.name : q.sort === "status" ? "status" : config.no;
+  const sort = q.sort === "name" ? config.name : q.sort === "status" ? "status" : q.sort === "type" && entity === "vehicles" ? "is_rented, is_personal, vehicle_type" : config.no;
   // Shop Master's name view is operationally grouped: active outlets first,
   // then inactive outlets, with each group alphabetized independently.
   const order = entity === "shops" && q.sort === "name"

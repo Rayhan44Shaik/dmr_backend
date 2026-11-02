@@ -240,7 +240,7 @@ async function resolveDieselBunk(
     gpsLat,
     gpsLon,
     gpsAccuracy: numOrNull(body.gpsAccuracy),
-    gpsCapturedAt: body.gpsCapturedAt != null ? str(body.gpsCapturedAt) : null,
+    gpsCapturedAt: isoOrNull(body.gpsCapturedAt),
   };
 }
 
@@ -685,8 +685,8 @@ async function loadTripExtras(client: Client, tripId: number, legId?: number | n
   );
   const delSql =
     legId != null && legId > 0
-      ? `SELECT * FROM trip_deliveries WHERE trip_id = $1 AND leg_id = $2 ORDER BY serial_no NULLS LAST, id`
-      : `SELECT * FROM trip_deliveries WHERE trip_id = $1 ORDER BY serial_no NULLS LAST, id`;
+      ? `SELECT * FROM trip_deliveries WHERE trip_id = $1 AND leg_id = $2 AND COALESCE(deleted, FALSE) = FALSE ORDER BY serial_no NULLS LAST, id`
+      : `SELECT * FROM trip_deliveries WHERE trip_id = $1 AND COALESCE(deleted, FALSE) = FALSE ORDER BY serial_no NULLS LAST, id`;
   const deliveries = await client.query(
     delSql,
     legId != null && legId > 0 ? [tripId, legId] : [tripId]
@@ -699,20 +699,20 @@ async function loadTripExtras(client: Client, tripId: number, legId?: number | n
     legId != null && legId > 0
       ? `SELECT db.* FROM trip_delivery_boxes db
          JOIN trip_deliveries d ON d.id = db.delivery_id
-         WHERE d.trip_id = $1 AND d.leg_id = $2`
+         WHERE d.trip_id = $1 AND d.leg_id = $2 AND COALESCE(d.deleted, FALSE) = FALSE`
       : `SELECT db.* FROM trip_delivery_boxes db
          JOIN trip_deliveries d ON d.id = db.delivery_id
-         WHERE d.trip_id = $1`,
+         WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE`,
     legId != null && legId > 0 ? [tripId, legId] : [tripId]
   );
   const perBox = await client.query(
     legId != null && legId > 0
       ? `SELECT pb.* FROM trip_delivery_per_box pb
          JOIN trip_deliveries d ON d.id = pb.delivery_id
-         WHERE d.trip_id = $1 AND d.leg_id = $2`
+         WHERE d.trip_id = $1 AND d.leg_id = $2 AND COALESCE(d.deleted, FALSE) = FALSE`
       : `SELECT pb.* FROM trip_delivery_per_box pb
          JOIN trip_deliveries d ON d.id = pb.delivery_id
-         WHERE d.trip_id = $1`,
+         WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE`,
     legId != null && legId > 0 ? [tripId, legId] : [tripId]
   );
 
@@ -1594,8 +1594,8 @@ async function replaceDiesel(
         e.gpsLat ?? null,
         e.gpsLon ?? null,
         e.gpsAccuracy ?? null,
-        e.gpsCapturedAt ?? null,
-        e.submittedAt ?? null,
+        isoOrNull(e.gpsCapturedAt),
+        isoOrNull(e.submittedAt),
       ]
     );
   }
@@ -1721,9 +1721,7 @@ function extractDieselFromBody(body: Record<string, unknown>): DieselEntry[] {
       gpsLat: numOrNull(body[`dieselGpsLat${rowIndex}`]),
       gpsLon: numOrNull(body[`dieselGpsLon${rowIndex}`]),
       gpsAccuracy: numOrNull(body[`dieselGpsAccuracy${rowIndex}`]),
-      gpsCapturedAt: body[`dieselGpsCapturedAt${rowIndex}`]
-        ? str(body[`dieselGpsCapturedAt${rowIndex}`])
-        : null,
+      gpsCapturedAt: isoOrNull(body[`dieselGpsCapturedAt${rowIndex}`]),
     }));
 }
 
@@ -2082,7 +2080,7 @@ export const tripsService = {
       const result = await query(
         `SELECT trips.*,
                 (SELECT COUNT(*) FROM trip_boxes b WHERE b.trip_id = trips.id) AS box_count,
-                (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id) AS delivery_count,
+                (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id AND COALESCE(d.deleted, FALSE) = FALSE) AS delivery_count,
                 (SELECT COUNT(*) FROM trip_diesel_entries e WHERE e.trip_id = trips.id) AS diesel_count
                 ${recentLoadSummarySelect}
          FROM trips ${where}
@@ -2097,7 +2095,7 @@ export const tripsService = {
     const result = await query(
       `SELECT trips.*,
               (SELECT COUNT(*) FROM trip_boxes b WHERE b.trip_id = trips.id) AS box_count,
-              (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id) AS delivery_count,
+              (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id AND COALESCE(d.deleted, FALSE) = FALSE) AS delivery_count,
               (SELECT COUNT(*) FROM trip_diesel_entries e WHERE e.trip_id = trips.id) AS diesel_count
               ${recentLoadSummarySelect}
        FROM trips ${where} ORDER BY trip_date DESC, id DESC`,
@@ -4109,7 +4107,7 @@ export const tripsService = {
     const vehicles = await query(
       `SELECT id, vehicle_number, no_of_boxes, is_rented
          FROM vehicles
-        WHERE status = 'Active' AND id NOT IN (
+        WHERE status = 'Active' AND COALESCE(is_personal, FALSE) = FALSE AND id NOT IN (
           SELECT vehicle_id FROM trips
           ${occupied} AND vehicle_id IS NOT NULL
         )
@@ -4382,7 +4380,7 @@ export const tripsService = {
           gpsLat,
           gpsLon,
           gpsAccuracy,
-          gpsCapturedAt,
+          isoOrNull(gpsCapturedAt),
         ]
       );
 
@@ -4542,7 +4540,7 @@ export const tripsService = {
           gpsLat,
           gpsLon,
           gpsAccuracy,
-          gpsCapturedAt,
+          isoOrNull(gpsCapturedAt),
         ]
       );
 

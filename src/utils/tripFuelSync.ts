@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { dateOnly, num, numOrNull, parseCoordPair, str } from "./coerce.js";
+import { dateOnly, isoOrNull, num, numOrNull, parseCoordPair, str } from "./coerce.js";
 import { AppError } from "../middleware/errorHandler.js";
 import type { DieselEntry } from "../types/models.js";
 
@@ -86,6 +86,7 @@ export async function syncDieselToFuelExpenses(
     const parsedGps = parseCoordPair(entry.bunkGps);
     const gpsLat = entry.gpsLat ?? parsedGps?.lat ?? null;
     const gpsLon = entry.gpsLon ?? parsedGps?.lon ?? null;
+    const gpsCapturedAt = isoOrNull(entry.gpsCapturedAt);
 
     // Only allocate a new bill_no when inserting. Re-generating on every upsert
     // races under multi-bill trips and can fail UNIQUE(bill_no).
@@ -166,7 +167,7 @@ export async function syncDieselToFuelExpenses(
         gpsLat,
         gpsLon,
         entry.gpsAccuracy ?? null,
-        entry.gpsCapturedAt ?? null,
+        gpsCapturedAt,
       ]
     );
 
@@ -182,7 +183,7 @@ export async function syncDieselToFuelExpenses(
             AND source_type = 'TRIP'
             AND COALESCE(deleted, FALSE) = FALSE
             AND (gps_lat IS NULL OR gps_lon IS NULL)`,
-        [tripId, entry.rowIndex, gpsLat, gpsLon, entry.gpsAccuracy ?? null, entry.gpsCapturedAt ?? null]
+        [tripId, entry.rowIndex, gpsLat, gpsLon, entry.gpsAccuracy ?? null, gpsCapturedAt]
       );
     }
   }
@@ -241,7 +242,7 @@ export async function syncTripFuelFromDb(
     gpsLat: numOrNull(r.gps_lat),
     gpsLon: numOrNull(r.gps_lon),
     gpsAccuracy: numOrNull(r.gps_accuracy),
-    gpsCapturedAt: r.gps_captured_at == null ? null : str(r.gps_captured_at),
+    gpsCapturedAt: isoOrNull(r.gps_captured_at),
   }));
 
   await syncDieselToFuelExpenses(client, tripId, dateOnly(trip.trip_date) ?? "", entries, {

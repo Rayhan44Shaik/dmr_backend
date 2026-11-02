@@ -12,7 +12,7 @@
  */
 import { pool, withTransaction } from "../config/db.js";
 import { syncDieselToFuelExpenses } from "../utils/tripFuelSync.js";
-import { dateOnly, str, num, numOrNull } from "../utils/coerce.js";
+import { dateOnly, isoOrNull, str, num, numOrNull } from "../utils/coerce.js";
 import type { DieselEntry } from "../types/models.js";
 
 async function main() {
@@ -76,7 +76,7 @@ async function main() {
         gpsLat: numOrNull(r.gps_lat),
         gpsLon: numOrNull(r.gps_lon),
         gpsAccuracy: numOrNull(r.gps_accuracy),
-        gpsCapturedAt: r.gps_captured_at == null ? null : str(r.gps_captured_at),
+        gpsCapturedAt: isoOrNull(r.gps_captured_at),
       }));
 
       const before = await client.query(

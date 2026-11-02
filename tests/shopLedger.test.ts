@@ -338,6 +338,13 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     assert.equal(ledger.data[0].weight, 190);
     assert.equal(ledger.data[0].mortalityWeight, 4);
     assert.equal(ledger.data[0].weightLoss, 6);
+    let cumulative = (await shopLedgerService.cumulativeQuantities({
+      fromDate: "2026-08-08",
+      toDate: "2026-08-08",
+    })).find((row) => row.shopId === shop.id);
+    assert.deepEqual(cumulative?.mortalityByLoad, [
+      { load: 1, boxBirds: 5, boxWeight: 4, weightModeBirds: 0 },
+    ]);
 
     await pool.query(
       `UPDATE trip_deliveries SET delivery_mode = 'weight', mort_kg = 99
@@ -352,6 +359,44 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     assert.equal(ledger.data[0].mortalityBirds, 5, "weight mode still captures mortality birds");
     assert.equal(ledger.data[0].mortalityWeight, 0, "weight mode never reports mortality weight");
     assert.equal(ledger.data[0].weightLoss, 10, "farm weight = delivered weight + weight loss");
+    cumulative = (await shopLedgerService.cumulativeQuantities({
+      fromDate: "2026-08-08",
+      toDate: "2026-08-08",
+    })).find((row) => row.shopId === shop.id);
+    assert.deepEqual(cumulative?.mortalityByLoad, [
+      { load: 1, boxBirds: 0, boxWeight: 0, weightModeBirds: 5 },
+    ]);
+  });
+
+  it("2e. cumulative quantities return one main-shop row across sub-shops", async () => {
+    const { shop, tripId } = await seedShopWithDebit(0, 5000, "2026-08-08");
+    await pool.query(
+      `UPDATE trip_deliveries
+          SET sub_shop_name = 'COUNTER A', birds = 40, weight = 80
+        WHERE trip_id = $1 AND shop_id = $2`,
+      [tripId, shop.id]
+    );
+    await pool.query(
+      `INSERT INTO trip_deliveries
+         (trip_id, sale_no, shop_id, shop_name, sub_shop_name, birds, weight,
+          mortality, mort_kg, delivery_mode, rate, amount)
+       VALUES ($1, $2, $3, $4, 'COUNTER B', 60, 120, 0, 0, 'box', 50, 6000)`,
+      [tripId, `LG-CUM-SUB-${seq}`, shop.id, shop.name]
+    );
+    await pool.query(
+      `UPDATE trips SET total_birds = 100, dc_weight = 200 WHERE id = $1`,
+      [tripId]
+    );
+
+    const rows = (await shopLedgerService.cumulativeQuantities({
+      fromDate: "2026-08-08",
+      toDate: "2026-08-08",
+    })).filter((row) => row.shopId === shop.id);
+
+    assert.equal(rows.length, 1, "sub-shops must not split the cumulative main-shop row");
+    assert.equal(rows[0].shopName, shop.name);
+    assert.equal(rows[0].birds, 100);
+    assert.equal(rows[0].weight, 200);
   });
 
   it("3. Custom date range is complete — a late range returns only its matching tail", async () => {

@@ -81,9 +81,9 @@ export const shopSaleBodySchema = z.object({
   createdBy: z.string().optional(),
 });
 
-export const shopSalesLoadSaveSchema = z.object({
-  deliveries: z.array(z.object({
+const shopSalesTripDeliveryBaseSchema = z.object({
     id: z.number().int().positive().optional(),
+    load: z.number().int().min(1).max(3).optional(),
     shopId: z.number().int().positive(),
     birds: z.number().int().nonnegative(),
     weight: z.number().nonnegative(),
@@ -92,22 +92,33 @@ export const shopSalesLoadSaveSchema = z.object({
     deliveryMode: z.enum(["box", "weight"]),
     rate: z.number().min(MIN_SHOP_SALE_RATE).max(MAX_SHOP_SALE_RATE),
     remarks: z.string().optional(),
-  }).refine((row) => row.birds + row.mortality + row.weight + row.mortalityWeight > 0, "A shop delivery must allocate birds or weight.")).min(1),
+  });
+
+function validateShopSalesTripDelivery(row: z.infer<typeof shopSalesTripDeliveryBaseSchema>, ctx: z.RefinementCtx): void {
+    const isZeroDelivery = row.birds === 0 && row.weight === 0 && row.mortality === 0 && row.mortalityWeight === 0;
+    // In the trip editor, zeroing an existing row explicitly means "not
+    // delivered" and removes it atomically. A brand-new empty row is invalid.
+    if (isZeroDelivery && row.id != null) return;
+    if (row.birds + row.mortality <= 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["birds"], message: "A shop delivery must allocate at least one delivered or mortality bird." });
+    }
+    if (row.birds > 0 && row.weight <= 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["weight"], message: "Delivered weight must be greater than 0 when delivered birds are entered." });
+    }
+    if (row.weight > 0 && row.birds <= 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["birds"], message: "Delivered birds must be greater than 0 when delivered weight is entered." });
+    }
+    if (row.mortality > 0 && row.deliveryMode === "box" && row.mortalityWeight <= 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["mortalityWeight"], message: "Box-mode mortality weight must be greater than 0 when mortality birds are entered." });
+    }
+  }
+
+export const shopSalesLoadSaveSchema = z.object({
+  deliveries: z.array(shopSalesTripDeliveryBaseSchema.omit({ load: true }).superRefine(validateShopSalesTripDelivery)).min(1),
 });
 
 export const shopSalesTripSaveSchema = z.object({
-  deliveries: z.array(z.object({
-    id: z.number().int().positive().optional(),
-    load: z.number().int().min(1).max(3),
-    shopId: z.number().int().positive(),
-    birds: z.number().int().nonnegative(),
-    weight: z.number().nonnegative(),
-    mortality: z.number().int().nonnegative(),
-    mortalityWeight: z.number().nonnegative(),
-    deliveryMode: z.enum(["box", "weight"]),
-    rate: z.number().min(MIN_SHOP_SALE_RATE).max(MAX_SHOP_SALE_RATE),
-    remarks: z.string().optional(),
-  }).refine((row) => row.birds + row.mortality + row.weight + row.mortalityWeight > 0, "A shop delivery must allocate birds or weight.")).min(1),
+  deliveries: z.array(shopSalesTripDeliveryBaseSchema.required({ load: true }).superRefine(validateShopSalesTripDelivery)).min(1),
 });
 
 /** One shop-wise rate line, applied to an existing trip_deliveries row. */
@@ -155,10 +166,6 @@ export const rateEntryUpdateSchema = z.object({
   deliveries: z.array(rateEntryDeliverySchema).optional(),
 });
 
-export const rateEntryLockSchema = z.object({
-  lockedBy: z.string().optional(),
-});
-
 /**
  * Rate Entry payload.
  *
@@ -171,6 +178,13 @@ export const rateEntryItemSchema = z.object({
     .number()
     .min(MIN_SHOP_SALE_RATE, `Rate must be between ₹${MIN_SHOP_SALE_RATE} and ₹${MAX_SHOP_SALE_RATE}`)
     .max(MAX_SHOP_SALE_RATE, `Rate must be between ₹${MIN_SHOP_SALE_RATE} and ₹${MAX_SHOP_SALE_RATE}`),
+});
+
+export const rateEntryLockSchema = z.object({
+  lockedBy: z.string().optional(),
+  /** Save & Lock sends the current grid in this same request so rates and the
+   * lock commit atomically; never strip this field during validation. */
+  rates: z.array(rateEntryItemSchema).min(1).optional(),
 });
 
 export const rateEntrySaveSchema = z.object({

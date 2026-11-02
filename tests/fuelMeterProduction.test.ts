@@ -93,6 +93,7 @@ async function addDiesel(tripId: number, rowIndex: number, meter: number, litres
     gpsLat: 12.98,
     gpsLon: 77.6,
     gpsAccuracy: 5,
+    gpsCapturedAt: new Date().toString(),
     imageData: `${BILL_IMG}-r${rowIndex}`,
     rowIndex,
     clientKey: randomUUID(),

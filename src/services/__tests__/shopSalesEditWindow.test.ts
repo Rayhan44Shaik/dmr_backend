@@ -6,9 +6,8 @@ import { rateEntryService } from "../rateEntryService.js";
 import { shopSalesService } from "../shopSalesService.js";
 
 /**
- * Shop Sales edit window: two weeks from trip_deliveries.created_at (insert),
- * not the trip date. Boundary is exclusive at 14 days:
- * `now < created_at + 14 days`. Soft-delete stays permanently blocked once
+ * Shop Sales edit window: two weeks from trips.rate_locked_at, when the trip
+ * enters Shop Sales. Boundary is exclusive at 14 days. Soft-delete stays permanently blocked once
  * Rate Entry is locked.
  */
 
@@ -31,15 +30,15 @@ async function cleanup(f: Fixture): Promise<void> {
 }
 async function makeShop(f: Fixture): Promise<number> {
   const r = await pool.query<{ id: number }>(
-    `INSERT INTO shops (shop_no, shop_name) VALUES ($1, $2) RETURNING id`,
-    [uniqueInt(), `window-shop-${uniqueInt()}`]
+    `INSERT INTO shops (shop_no, shop_name, phone_number) VALUES ($1, $2, $3) RETURNING id`,
+    [uniqueInt(), `window-shop-${uniqueInt()}`, `9${String(uniqueInt()).slice(-9).padStart(9, "0")}`]
   );
   f.shopIds.push(r.rows[0].id);
   return r.rows[0].id;
 }
 
-/** Creates a Completed, rate-locked trip+delivery whose insert timestamp
- * (`trip_deliveries.created_at`) is `now - ageOffsetMs`. */
+/** Creates a Completed trip whose Shop Sales entry timestamp
+ * (`trips.rate_locked_at`) is `now - ageOffsetMs`. */
 async function makeAgedTrip(f: Fixture, ageOffsetMs: number): Promise<{ tripId: number; deliveryId: number }> {
   const shopId = await makeShop(f);
   const t = await pool.query<{ id: number }>(
@@ -57,11 +56,11 @@ async function makeAgedTrip(f: Fixture, ageOffsetMs: number): Promise<{ tripId: 
     [tripId, `SALE-${uniqueInt()}`, shopId, "window-shop", 50, 100]
   );
   const deliveryId = d.rows[0].id;
-  await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 40 }] });
+  await rateEntryService.save(tripId, { rates: [{ deliveryId, rate: 90 }] });
   await rateEntryService.lock(tripId, { lockedBy: "window-tester" });
   await pool.query(
-    `UPDATE trip_deliveries SET created_at = NOW() - ($2 || ' milliseconds')::interval WHERE id = $1`,
-    [deliveryId, String(ageOffsetMs)]
+    `UPDATE trips SET rate_locked_at = NOW() - ($2 || ' milliseconds')::interval WHERE id = $1`,
+    [tripId, String(ageOffsetMs)]
   );
   return { tripId, deliveryId };
 }
@@ -76,7 +75,7 @@ async function assertStatus(promise: Promise<unknown>, status: number): Promise<
   });
 }
 
-describe("2-week-from-insert EDIT window (direct API/service calls, not frontend visibility)", () => {
+describe("2-week Shop Sales entry window (direct API/service calls, not frontend visibility)", () => {
   test("1. Same-day edit: PASS", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
@@ -117,7 +116,7 @@ describe("2-week-from-insert EDIT window (direct API/service calls, not frontend
     assert.equal(updated.birds, 51);
   });
 
-  test("6. Exactly 14 days old: window closed (now >= created_at+14d) -> FAIL", async (t) => {
+  test("6. Exactly 14 days after entering Shop Sales: window closed -> FAIL", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, 14 * DAY);
@@ -138,7 +137,7 @@ describe("2-week-from-insert EDIT window (direct API/service calls, not frontend
     await assertStatus(shopSalesService.update(deliveryId, { birds: 51 }), 409);
   });
 
-  test("9. Future-dated trip (approved_at in the future): existing rule computes an even-later expiry -> still editable", async (t) => {
+  test("9. Future Shop Sales entry timestamp computes a later expiry -> still editable", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeAgedTrip(f, -5 * DAY); // approved 5 days in the future
@@ -146,17 +145,16 @@ describe("2-week-from-insert EDIT window (direct API/service calls, not frontend
     assert.equal(updated.birds, 51, "current rule does not reject a future-dated trip — documenting existing behavior as-is");
   });
 
-  test("10. Trip date / rate lock older than 10 days does not lock a row inserted within 2 weeks", async (t) => {
+  test("10. Old delivery creation does not shorten a fresh Shop Sales window", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { tripId, deliveryId } = await makeAgedTrip(f, 0);
-    const thirteenDaysAgo = new Date(Date.now() - 13 * DAY).toISOString();
     await pool.query(
-      `UPDATE trips SET trip_date = (CURRENT_DATE - INTERVAL '13 days'), approved_at = $2, rate_locked_at = $2 WHERE id = $1`,
-      [tripId, thirteenDaysAgo]
+      `UPDATE trip_deliveries SET created_at = NOW() - INTERVAL '30 days' WHERE id = $1`,
+      [deliveryId]
     );
     const updated = await shopSalesService.update(deliveryId, { birds: 51 });
-    assert.equal(updated.birds, 51, "Shop Sales must use insert date, not trip date or rate_locked_at");
+    assert.equal(updated.birds, 51, "Shop Sales must use rate_locked_at, not the earlier delivery insert");
   });
 
   test("11. Direct API-level call (service function, bypassing any notion of a frontend) after the window closes: FAIL", async (t) => {

@@ -50,7 +50,14 @@ export function dateOnly(value: unknown): string | null {
   return s.slice(0, 10);
 }
 
+/**
+ * Convert a Date / ISO / epoch value to an ISO-8601 timestamptz string.
+ * Always use this (never Date.toString() / String(date)) when writing to
+ * PostgreSQL — locale forms like "GMT+0530" make PG throw 22023 and surface
+ * as an opaque 500.
+ */
 export function isoOrNull(value: unknown): string | null {
-  if (!value) return null;
-  return new Date(String(value)).toISOString();
+  if (value == null || value === "") return null;
+  const d = value instanceof Date ? value : new Date(value as string | number);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }

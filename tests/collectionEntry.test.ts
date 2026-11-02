@@ -248,6 +248,41 @@ describe("Collection numbering — permanent, unique, no reuse", () => {
     assert.deepEqual(nos, ["COL-20260817-001", "COL-20260817-002", "COL-20260817-003", "COL-20260817-004"]);
   });
 
+  it("continues at 193 after 192 collection rows are restored with a stale sequence", async () => {
+    const shop = await seedShop(100000);
+    const restoredDate = "2026-08-26";
+    // The allocator only needs the restored high-water row to prove that the
+    // permanent namespace already contains 001..192. Keeping the fixture
+    // compact also avoids making this sequencing test depend on bulk limits.
+    await pool.query(
+      `INSERT INTO collections
+         (collection_no, collection_date, shop_id, status, amount_collected,
+          amount, is_financial, reference_no)
+       VALUES ('COL-20260826-192', $1, $2, 'Approved', 10, 10, TRUE, '')`,
+      [restoredDate, shop.id],
+    );
+    await pool.query(
+      `INSERT INTO collection_sequences(seq_date, last_value)
+       VALUES ($1, 7)
+       ON CONFLICT (seq_date) DO UPDATE SET last_value = 7`,
+      [restoredDate],
+    );
+
+    const next = await collectionEntryService.create({
+      collectionDate: restoredDate,
+      shopId: shop.id,
+      amount: 500,
+      collector: "After restore",
+    });
+
+    assert.equal(next.collectionNo, "COL-20260826-193");
+    const sequence = await pool.query<{ last_value: number }>(
+      `SELECT last_value FROM collection_sequences WHERE seq_date = $1`,
+      [restoredDate],
+    );
+    assert.equal(Number(sequence.rows[0].last_value), 193);
+  });
+
   it("DB UNIQUE enforces uniqueness of collection_no", async () => {
     await assert.rejects(
       pool.query(`INSERT INTO collections (collection_no, collection_date, shop_id, status, amount_collected, amount)

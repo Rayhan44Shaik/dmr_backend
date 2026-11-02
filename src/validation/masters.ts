@@ -38,6 +38,7 @@ export const vehicleSchema = z.object({
   vehicleNumber: trimmed(50).min(1),
   vehicleType: optionalText(100),
   isRented: z.boolean().optional().default(false),
+  isPersonal: z.boolean().optional().default(false),
   noOfBoxes: z.coerce.number().int().positive().max(100_000),
   birdCapacity: z.coerce.number().int().positive().max(10_000_000),
   capacityKg: z.coerce.number().positive().max(100_000_000),
@@ -56,6 +57,9 @@ export const vehicleSchema = z.object({
   rcDate: nullableDate,
   status: activeStatus.optional().default("Active"),
 }).strict().superRefine((value, ctx) => {
+  if (value.isRented && value.isPersonal) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["isPersonal"], message: "Personal and rental cannot both be selected" });
+  }
   if (value.isRented) return;
   if (!value.vehicleType) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["vehicleType"], message: "Vehicle Type is required" });
   if (!value.engineNumber) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["engineNumber"], message: "Engine Number is required" });

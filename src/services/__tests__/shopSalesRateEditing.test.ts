@@ -9,10 +9,10 @@ import { tripsService } from "../tripsService.js";
 /**
  * BUSINESS RULE CORRECTION: Rate Entry LOCKED does not make the Shop Sale's
  * rate immutable — it only moves the trip from Rate Entry into Shop Sales.
- * Within the 2-week Shop Sales edit window (from insert), birds/weight/rate
+ * Within the 2-week Shop Sales edit window (from rate lock), birds/weight/rate
  * may all be corrected, rate subject to the same ₹50–₹300 range Rate Entry's
  * own UI has always used. After the window closes, everything (including
- * rate) is rejected by the insert-date gate.
+ * rate) is rejected by the Shop Sales entry gate.
  */
 
 let uniqSeq = 0;
@@ -43,7 +43,7 @@ async function makeShop(f: Fixture): Promise<number> {
 
 const DAY = 24 * 60 * 60 * 1000;
 
-/** Locked, Completed trip + one delivery inserted `ageOffsetMs` ago
+/** Locked, Completed trip that entered Shop Sales `ageOffsetMs` ago
  * (default: today). Initial rate ₹90, generous capacity so birds/weight
  * edits in the rate-focused tests never accidentally hit the capacity gate. */
 async function makeRateEditableTrip(
@@ -77,8 +77,8 @@ async function makeRateEditableTrip(
   await rateEntryService.lock(tripId, { lockedBy: "rate-edit-tester" });
   if ((opts.ageOffsetMs ?? 0) !== 0) {
     await pool.query(
-      `UPDATE trip_deliveries SET created_at = NOW() - ($2 || ' milliseconds')::interval WHERE id = $1`,
-      [deliveryId, String(opts.ageOffsetMs)]
+      `UPDATE trips SET rate_locked_at = NOW() - ($2 || ' milliseconds')::interval WHERE id = $1`,
+      [tripId, String(opts.ageOffsetMs)]
     );
   }
   return { tripId, shopId, deliveryId };
@@ -92,7 +92,7 @@ async function assertStatus(promise: Promise<unknown>, status: number): Promise<
   });
 }
 
-describe("Shop Sales rate editing (corrected rule): locked + within 2 weeks of insert + ₹50-300 => allowed", () => {
+describe("Shop Sales rate editing: within 2 weeks of entering Shop Sales + ₹50-300 => allowed", () => {
   test("1. ₹90 -> ₹100 within window: PASS", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
@@ -155,7 +155,7 @@ describe("Shop Sales rate editing (corrected rule): locked + within 2 weeks of i
     await assertStatus(shopSalesService.update(deliveryId, { rate: -10 } as never), 400);
   });
 
-  test("9. Rate change after the 2-week insert window: FAIL (409, same gate as birds/weight)", async (t) => {
+  test("9. Rate change after the 2-week Shop Sales window: FAIL (409, same gate as birds/weight)", async (t) => {
     const f = newFixture();
     t.after(() => cleanup(f));
     const { deliveryId } = await makeRateEditableTrip(f, { ageOffsetMs: 15 * DAY });
@@ -289,7 +289,7 @@ describe("Shop Sales rate editing (corrected rule): locked + within 2 weeks of i
   });
 });
 
-describe("Combined field edits within the 2-week insert window", () => {
+describe("Combined field edits within the 2-week Shop Sales window", () => {
   async function fixture(f: Fixture) {
     return makeRateEditableTrip(f, { birds: 25, weight: 48, initialRate: 90 });
   }

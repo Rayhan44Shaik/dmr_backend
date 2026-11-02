@@ -51,6 +51,7 @@ export function mapVehicle(row: Record<string, unknown>): Vehicle {
     birdCapacity: num(row.bird_capacity),
     capacityKg: num(row.capacity_kg),
     isRented: Boolean(row.is_rented),
+    isPersonal: Boolean(row.is_personal),
     trackingId: str(row.tracking_id),
     fastagBank: str(row.fastag_bank),
     engineNumber: str(row.engine_number),
@@ -438,6 +439,8 @@ export const mastersService = {
   async upsertVehicle(body: Partial<Vehicle> & { vehicleNumber: string }) {
     assertValid(validateVehicleFields(body));
     const isRented = Boolean(body.isRented);
+    const isPersonal = Boolean(body.isPersonal);
+    if (isRented && isPersonal) throw new AppError(400, "A personal vehicle cannot also be a rental vehicle");
     if (isRented) {
       Object.assign(body, {
         vehicleType: "", trackingId: "", fastagBank: "", engineNumber: "", chassisNumber: "",
@@ -457,7 +460,7 @@ export const mastersService = {
           engine_number=$10, chassis_number=$11, insurance_expiry=$12,
           permit_expiry=$13, fitness_expiry=$14, purchase_date=$15,
           purchase_amount=$16, emi_start_date=$17, rc_date=$18, status=$19,
-          emi_day=$20, total_emis=$21, is_rented=$22
+          emi_day=$20, total_emis=$21, is_rented=$22, is_personal=$23
          WHERE id=$1 RETURNING *`,
         [
           body.id,
@@ -482,6 +485,7 @@ export const mastersService = {
           body.emiDay ?? null,
           body.totalEMIs ?? null,
           isRented,
+          isPersonal,
         ]
       );
       if (!result.rowCount) throw new AppError(404, "Vehicle not found");
@@ -499,8 +503,8 @@ export const mastersService = {
          vehicle_no, vehicle_number, vehicle_type, no_of_boxes, bird_capacity,
          capacity_kg, tracking_id, fastag_bank, engine_number, chassis_number,
          insurance_expiry, permit_expiry, fitness_expiry, purchase_date,
-         purchase_amount, emi_start_date, rc_date, status, emi_day, total_emis, is_rented
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+         purchase_amount, emi_start_date, rc_date, status, emi_day, total_emis, is_rented, is_personal
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
        RETURNING *`,
       [
         body.vehicleNo ?? nextNo.rows[0].n,
@@ -524,6 +528,7 @@ export const mastersService = {
         body.emiDay ?? null,
         body.totalEMIs ?? null,
         isRented,
+        isPersonal,
       ]
     );
     return mapVehicle(result.rows[0]);
@@ -539,12 +544,18 @@ export const mastersService = {
   },
 
   async deleteVehicle(id: number) {
-    const result = await query(
-      `UPDATE vehicles SET status='Inactive' WHERE id=$1 RETURNING *`,
-      [id]
-    );
-    if (!result.rowCount) throw new AppError(404, "Vehicle not found");
-    return { id, deleted: true, deactivated: true };
+    return withTransaction(async (client) => {
+      const vehicle = await client.query(`SELECT is_rented FROM vehicles WHERE id=$1 FOR UPDATE`, [id]);
+      if (!vehicle.rowCount) throw new AppError(404, "Vehicle not found");
+      if (vehicle.rows[0].is_rented) {
+        const used = await client.query(`SELECT 1 FROM trips WHERE vehicle_id=$1 LIMIT 1`, [id]);
+        if (used.rowCount) throw new AppError(409, "This rental vehicle has trip history and cannot be deleted. Set it inactive instead.");
+        await client.query(`DELETE FROM vehicles WHERE id=$1`, [id]);
+        return { id, deleted: true, deactivated: false };
+      }
+      await client.query(`UPDATE vehicles SET status='Inactive' WHERE id=$1`, [id]);
+      return { id, deleted: true, deactivated: true };
+    });
   },
 
   async listFarms() {

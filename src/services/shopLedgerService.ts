@@ -79,12 +79,17 @@ export interface ShopLedgerResponse {
 export interface ShopLedgerCumulativeQuantity {
   shopId: number;
   shopName: string;
-  subShopName: string;
   birds: number;
   weight: number;
   mortalityBirds: number;
   mortalityWeight: number;
   weightLoss: number;
+  mortalityByLoad: Array<{
+    load: number;
+    boxBirds: number;
+    boxWeight: number;
+    weightModeBirds: number;
+  }>;
 }
 
 async function computePerShopOpeningBalances(
@@ -411,7 +416,8 @@ async function computeOpeningBalance(
 
 export const shopLedgerService = {
   async cumulativeQuantities(filters: { fromDate?: string; toDate?: string } = {}): Promise<ShopLedgerCumulativeQuantity[]> {
-    const result = await query<Record<string, unknown>>(
+    const [result, mortalityResult] = await Promise.all([
+      query<Record<string, unknown>>(
       `WITH delivery_by_load_shop AS (
          SELECT t.id AS trip_id, COALESCE(d.leg_id, 0) AS load_key,
                 d.shop_id, MAX(d.shop_name) AS shop_name,
@@ -455,22 +461,54 @@ export const shopLedgerService = {
            FROM delivery_by_load_shop d
            JOIN load_totals t USING (trip_id, load_key)
        )
-       SELECT shop_id, MAX(shop_name) AS shop_name, sub_shop_name,
+       SELECT shop_id, MAX(shop_name) AS shop_name,
               SUM(birds)::float AS birds, SUM(weight)::float AS weight,
               SUM(mortality_birds)::float AS mortality_birds,
               SUM(mortality_weight)::float AS mortality_weight,
               SUM(weight_loss)::float AS weight_loss
          FROM normalized
-        GROUP BY shop_id, sub_shop_name
-        ORDER BY MAX(shop_name), sub_shop_name, shop_id`,
-      [filters.fromDate ?? null, filters.toDate ?? null],
-    );
+        GROUP BY shop_id
+        ORDER BY MAX(shop_name), shop_id`,
+        [filters.fromDate ?? null, filters.toDate ?? null],
+      ),
+      query<Record<string, unknown>>(
+        `SELECT d.shop_id,
+                COALESCE(tl.leg_index, 1)::int AS load_no,
+                COALESCE(SUM(CASE WHEN d.delivery_mode = 'weight' THEN 0 ELSE d.mortality END), 0)::float AS box_birds,
+                COALESCE(SUM(CASE WHEN d.delivery_mode = 'weight' THEN 0 ELSE d.mort_kg END), 0)::float AS box_weight,
+                COALESCE(SUM(CASE WHEN d.delivery_mode = 'weight' THEN d.mortality ELSE 0 END), 0)::float AS weight_mode_birds
+           FROM trips t
+           JOIN trip_deliveries d ON d.trip_id = t.id
+           LEFT JOIN trip_legs tl ON tl.id = d.leg_id
+          WHERE t.status = 'Completed'
+            AND COALESCE(t.deleted, FALSE) = FALSE
+            AND COALESCE(d.deleted, FALSE) = FALSE
+            AND (d.leg_id IS NULL OR tl.pickup_step_submitted = TRUE)
+            AND ($1::date IS NULL OR t.trip_date >= $1::date)
+            AND ($2::date IS NULL OR t.trip_date <= $2::date)
+          GROUP BY d.shop_id, COALESCE(tl.leg_index, 1)
+          ORDER BY d.shop_id, load_no`,
+        [filters.fromDate ?? null, filters.toDate ?? null],
+      ),
+    ]);
+    const mortalityByShop = new Map<number, ShopLedgerCumulativeQuantity["mortalityByLoad"]>();
+    for (const row of mortalityResult.rows) {
+      const shopId = num(row.shop_id);
+      const loads = mortalityByShop.get(shopId) ?? [];
+      loads.push({
+        load: Math.max(1, num(row.load_no, 1)),
+        boxBirds: Math.round(num(row.box_birds)),
+        boxWeight: num(row.box_weight),
+        weightModeBirds: Math.round(num(row.weight_mode_birds)),
+      });
+      mortalityByShop.set(shopId, loads);
+    }
     const rows = result.rows.map((row) => ({
       shopId: num(row.shop_id), shopName: str(row.shop_name),
-      subShopName: str(row.sub_shop_name),
       birds: num(row.birds), weight: num(row.weight),
       mortalityBirds: Math.round(num(row.mortality_birds)), mortalityWeight: num(row.mortality_weight),
       weightLoss: num(row.weight_loss),
+      mortalityByLoad: mortalityByShop.get(num(row.shop_id)) ?? [],
     }));
 
     // Birds are indivisible. SQL computes proportional shop allocations so

@@ -43,6 +43,7 @@ export interface ShopRate {
   status: OpsRecordStatus;
   deleted: boolean;
   deletedReason?: string | null;
+  deletedAt?: string | null;
   approvedBy?: string | null;
   approvedAt?: string | null;
   rejectedBy?: string | null;
@@ -78,6 +79,8 @@ export interface ShopSale {
   selectedBoxCount: number;
   dcBirds?: number;
   dcWeight?: number;
+  /** Weight loss recorded by Trip Entry for this load; Shop Sales edits do not derive it from an unassigned balance. */
+  loadWeightLoss?: number;
   remarks: string;
   status: OpsRecordStatus;
   deleted: boolean;
@@ -194,6 +197,7 @@ export interface FuelExpense {
   imageMime?: string | null;
   deleted: boolean;
   deletedReason?: string | null;
+  deletedAt?: string | null;
   approvedBy?: string | null;
   approvedAt?: string | null;
   rejectedBy?: string | null;

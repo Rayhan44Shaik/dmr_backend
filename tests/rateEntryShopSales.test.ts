@@ -182,6 +182,36 @@ async function addDelivery(
 // ---------------------------------------------------------------------------
 
 describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
+  it("Save & Lock persists submitted rates atomically and refuses stored zero rates", async () => {
+    const m = await seedMasters();
+    const trip = await makeCompletedTrip(m, {
+      tripNo: "RS-ATOMIC-LOCK-1",
+      tripDate: "2026-07-01",
+      totalBirds: 100,
+      dcWeight: 200,
+    });
+    const delivery = await addDelivery(trip.id, m.shopA.id, m.shopA.shopName, 100, 200);
+
+    const zeroLock = await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {
+      lockedBy: "tester",
+    });
+    assert.equal(zeroLock.status, 422, "a stored zero rate must never unlock Shop Sales");
+
+    const atomicLock = await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {
+      lockedBy: "tester",
+      rates: [{ deliveryId: delivery, rate: 125 }],
+    });
+    assert.equal(atomicLock.status, 200, JSON.stringify(atomicLock.body));
+    assert.equal(atomicLock.body.rateLocked, true);
+
+    const persisted = await pool.query<{ rate: string; amount: string }>(
+      `SELECT rate::text, amount::text FROM trip_deliveries WHERE id = $1`,
+      [delivery],
+    );
+    assert.equal(Number(persisted.rows[0].rate), 125);
+    assert.equal(Number(persisted.rows[0].amount), 25000);
+  });
+
   it("trip is hidden from Rate Entry before Completed, visible after; hidden from Shop Sales until locked", async () => {
     const m = await seedMasters();
     // Separate masters for the Draft fixture: a trip left in Draft never

@@ -51,7 +51,7 @@ export function mapPgError(err: unknown): AppError | null {
       if (/rate-locked|permanently locked|correction window|2-week insert window|2 weeks from the Shop Sale insert/i.test(raw)) {
         return new AppError(
           409,
-          "Shop sale is locked — birds, weight, rate and amount can be changed for 2 weeks from the insert date.",
+          "Shop sale is locked — birds, weight, rate and amount can be changed for 2 weeks after the trip enters Shop Sales.",
           { constraint: err.constraint, detail: err.detail }
         );
       }
@@ -71,6 +71,7 @@ export function mapPgError(err: unknown): AppError | null {
         detail: err.detail ?? err.message,
       });
     case "22007":
+    case "22023":
       return new AppError(400, "Invalid date or time value", {
         detail: err.detail ?? err.message,
       });

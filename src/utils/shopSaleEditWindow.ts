@@ -1,7 +1,8 @@
 import { AppError } from "../middleware/errorHandler.js";
 
-/** Shop Sales table: a delivery may be edited for two weeks from INSERT
- *  (`trip_deliveries.created_at`), never from the trip date. */
+/** A Shop Sale may be edited for two weeks from the moment its trip enters
+ * Shop Sales (`trips.rate_locked_at`), never from the earlier trip/delivery
+ * date. Older rows without that timestamp fall back to delivery creation. */
 export const SHOP_SALE_EDIT_WINDOW_DAYS = 14;
 
 export function shopSaleEditExpiresAt(
@@ -33,7 +34,7 @@ export function assertShopSaleWindowOpen(
   const closed = expires ? ` (closed ${expires.toISOString().slice(0, 10)})` : "";
   throw new AppError(
     409,
-    `Shop sale ${saleNo ?? ""} is locked — editing is allowed for 2 weeks from the insert date${closed}.`
+    `Shop sale ${saleNo ?? ""} is locked — editing is allowed for 2 weeks after the trip enters Shop Sales${closed}.`
       .replace(/\s+/g, " ")
       .trim()
   );

@@ -126,6 +126,7 @@ function dieselBody(overrides: Record<string, unknown> = {}) {
     gpsLat: 17.38,
     gpsLon: 78.48,
     gpsAccuracy: 1,
+    gpsCapturedAt: new Date().toString(),
     imageData: `data:image/jpeg;base64,${"Q".repeat(80)}`,
     imageName: "bill.jpg",
     clientKey: "c3-diesel",

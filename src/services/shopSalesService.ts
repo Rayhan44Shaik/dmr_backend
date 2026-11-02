@@ -57,6 +57,26 @@ function computeAmount(weight: number, rate: number): number {
   return Number((Number(weight) * Number(rate)).toFixed(2));
 }
 
+/** Trip Entry owns weight loss. Shop Sales may reassign delivered weight but
+ * must not turn the resulting unassigned balance into new loss. */
+function recordedDeliveryWeightLoss(row: Record<string, unknown>): number {
+  if (str(row.delivery_mode) !== "weight") return 0;
+  return Math.max(0, num(row.farm_weight) - num(row.weight) - num(row.mort_kg));
+}
+
+function isZeroDelivery(row: { birds: number; weight: number; mortality: number; mortalityWeight: number }): boolean {
+  return row.birds === 0 && row.weight === 0 && row.mortality === 0 && row.mortalityWeight === 0;
+}
+
+function assertLoadWeightReconciles(load: number, dcWeight: number, assignedWeight: number, recordedWeightLoss: number): void {
+  const pending = Number((dcWeight - assignedWeight - recordedWeightLoss).toFixed(3));
+  if (Math.abs(pending) <= 0.0005) return;
+  if (pending > 0) {
+    throw new AppError(422, `Load ${load}: ${pending.toFixed(2)} kg is still pending assignment. Weight loss remains ${recordedWeightLoss.toFixed(2)} kg from Trip Entry.`);
+  }
+  throw new AppError(422, `Load ${load}: assigned weight exceeds DC weight by ${Math.abs(pending).toFixed(2)} kg after recorded weight loss.`);
+}
+
 function protectedShopSaleFieldsChanged(
   row: Record<string, unknown>,
   next: { birds: number; weight: number; rate: number; amount: number }
@@ -71,7 +91,7 @@ function protectedShopSaleFieldsChanged(
 
 function assertRowEditWindow(row: Record<string, unknown>): void {
   assertShopSaleWindowOpen(
-    row.created_at as string | Date | null | undefined,
+    (row.rate_locked_at ?? row.created_at) as string | Date | null | undefined,
     str(row.sale_no)
   );
 }
@@ -103,9 +123,13 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
     rate_completed: rateCompleted,
     rate_locked_at: rateLockedAt,
   });
-  const insertedAt = row.created_at == null ? null : row.created_at;
-  const editExpires = shopSaleEditExpiresAt(insertedAt as string | Date | null);
-  const editOpen = isShopSaleWindowOpen(insertedAt as string | Date | null);
+  // A delivery can exist for days while its trip is still being completed.
+  // Shop Sales begins only when Rate Entry is locked, so its two-week edit
+  // clock must start there. `created_at` is retained solely for legacy rows
+  // that predate rate_locked_at.
+  const shopSalesEnteredAt = row.rate_locked_at ?? row.created_at ?? null;
+  const editExpires = shopSaleEditExpiresAt(shopSalesEnteredAt as string | Date | null);
+  const editOpen = isShopSaleWindowOpen(shopSalesEnteredAt as string | Date | null);
 
   return {
     id: num(row.id),
@@ -132,6 +156,7 @@ function mapDeliverySale(row: Record<string, unknown>): ShopSale {
     selectedBoxCount: num(row.selected_box_count),
     dcBirds: num(row.dc_birds),
     dcWeight: num(row.dc_weight),
+    loadWeightLoss: num(row.load_weight_loss),
     remarks: str(row.remarks),
     status: tripToOpsStatus(tripStatus, tripDeleted),
     deleted: saleDeleted,
@@ -160,7 +185,16 @@ const SALE_SELECT = `
          re.rate AS re_rate,
          COALESCE(tl.leg_index, 1) AS load_no,
          COALESCE(tl.total_birds, t.total_birds, 0) AS dc_birds,
-         COALESCE(tl.dc_weight, t.dc_weight, 0) AS dc_weight
+         COALESCE(tl.dc_weight, t.dc_weight, 0) AS dc_weight,
+         COALESCE((
+           SELECT SUM(CASE WHEN loss.delivery_mode = 'weight'
+             THEN GREATEST(0, COALESCE(loss.farm_weight, 0) - COALESCE(loss.weight, 0) - COALESCE(loss.mort_kg, 0))
+             ELSE 0 END)
+             FROM trip_deliveries loss
+            WHERE loss.trip_id = d.trip_id
+              AND loss.leg_id IS NOT DISTINCT FROM d.leg_id
+              AND loss.deleted = FALSE
+         ), 0) AS load_weight_loss
   FROM trip_deliveries d
   INNER JOIN trips t ON t.id = d.trip_id
   LEFT JOIN trip_legs tl ON tl.id = d.leg_id AND tl.trip_id = d.trip_id
@@ -204,6 +238,48 @@ async function synchronizeShopSaleLedger(
       await setLedgerNet(client, num(row.id), newShopId, next, "Shop sale updated in Shop Sales");
     }
   }
+}
+
+/** Keep the one authoritative debit for a delivery aligned with its current
+ * amount. This also repairs legacy deliveries that reached Shop Sales without
+ * a ledger row, which is why cumulative reports could show birds but ₹0 sale. */
+async function synchronizeExistingShopSaleAmount(
+  client: Client,
+  trip: TripRow,
+  saleId: number,
+  shopId: number,
+  oldAmount: number,
+  newAmount: number,
+  note: string,
+): Promise<void> {
+  const ledger = await client.query<{ id: number; debit: string; credit: string }>(
+    `SELECT id, debit, credit
+       FROM shop_ledger
+      WHERE shop_id = $1
+        AND (
+          (reference_type = 'shop_sale' AND reference_id = $2)
+          OR (reference_type = 'trip' AND reference_id = $3)
+        )
+      ORDER BY CASE WHEN reference_type = 'shop_sale' THEN 0 ELSE 1 END, id DESC
+      LIMIT 1
+      FOR UPDATE`,
+    [shopId, saleId, trip.id],
+  );
+  if (!ledger.rowCount) {
+    if (newAmount > 0) {
+      await applyDebit(client, shopId, {
+        entryDate: dateOnly(trip.tripDate) ?? "",
+        entryType: "sale",
+        referenceType: "shop_sale",
+        referenceId: saleId,
+        note: `${note} (ledger repaired)`,
+      }, newAmount);
+    }
+    return;
+  }
+  const currentNet = num(ledger.rows[0].debit) - num(ledger.rows[0].credit);
+  const adjusted = Number((currentNet + newAmount - oldAmount).toFixed(2));
+  await setLedgerNet(client, num(ledger.rows[0].id), shopId, adjusted, note);
 }
 
 async function lockTrip(client: Client, tripId: number, legId?: number | null): Promise<TripRow> {
@@ -397,6 +473,8 @@ export const shopSalesService = {
       trip.capacityWeight = num(leg.dc_weight);
       const existing = await client.query(`${SALE_SELECT} WHERE d.trip_id=$1 AND d.leg_id=$2 AND d.deleted=FALSE FOR UPDATE OF d`, [tripId, leg.id]);
       const existingById = new Map(existing.rows.map((row: Record<string, unknown>) => [num(row.id), row]));
+      const removalIds = new Set(data.deliveries.filter((row) => row.id != null && isZeroDelivery(row)).map((row) => row.id!));
+      const recordedWeightLoss = existing.rows.reduce((sum: number, row: Record<string, unknown>) => removalIds.has(num(row.id)) ? sum : sum + recordedDeliveryWeightLoss(row), 0);
       const submittedIds = new Set<number>();
       let birdsTotal = 0; let mortalityBirds = 0; let weightTotal = 0; let mortalityWeightTotal = 0;
       for (const row of data.deliveries) {
@@ -404,20 +482,31 @@ export const shopSalesService = {
           if (!existingById.has(row.id) || submittedIds.has(row.id)) throw new AppError(422, "Delivery rows changed. Refresh the trip and try again.");
           submittedIds.add(row.id);
         }
+        if (isZeroDelivery(row)) continue;
         await assertShopActive(row.shopId, client);
         birdsTotal += row.birds;
         mortalityBirds += row.mortality;
         weightTotal += row.weight;
-        mortalityWeightTotal += row.mortalityWeight;
+        // Weight-mode mortality is represented by count only for pickup
+        // reconciliation. Only Box-mode mortality kg consumes DC weight.
+        mortalityWeightTotal += row.deliveryMode === "box" ? row.mortalityWeight : 0;
       }
       if (submittedIds.size !== existingById.size) throw new AppError(422, "Every existing shop delivery must be included before saving the load.");
       if (birdsTotal + mortalityBirds !== trip.capacityBirds) {
         throw new AppError(422, `Birds must reconcile exactly to DC pickup (${birdsTotal} delivered + ${mortalityBirds} mortality = ${trip.capacityBirds} DC).`);
       }
-      assertWithinCapacity({ label: "weight", available: trip.capacityWeight, alreadyAllocated: 0, requested: weightTotal + mortalityWeightTotal });
+      assertLoadWeightReconciles(load, trip.capacityWeight, weightTotal + mortalityWeightTotal, recordedWeightLoss);
 
       for (const row of data.deliveries) {
         const old = row.id == null ? null : existingById.get(row.id) as Record<string, unknown>;
+        if (old && isZeroDelivery(row)) {
+          assertRowEditWindow(old);
+          const oldShopId = old.shop_id == null ? null : num(old.shop_id);
+          const oldAmount = num(old.amount);
+          await client.query(`UPDATE trip_deliveries SET deleted=TRUE,deleted_at=NOW(),deleted_reason='Removed from Shop Sales trip editor',updated_at=NOW() WHERE id=$1`, [row.id]);
+          if (oldShopId != null && oldAmount > 0) await applyCredit(client, oldShopId, { entryDate: dateOnly(trip.tripDate) ?? "", entryType: "correction", referenceType: "shop_sale", referenceId: row.id!, note: "Shop sale debit reversed (zero delivery removed)" }, oldAmount);
+          continue;
+        }
         const amount = computeAmount(row.weight, row.rate);
         if (old) {
           if (
@@ -438,12 +527,7 @@ export const shopSalesService = {
           );
           if (oldShopId !== row.shopId) await synchronizeShopSaleLedger(client, { trip, saleId: row.id!, oldShopId, newShopId: row.shopId, oldAmount, newAmount: amount });
           else if (oldShopId != null && amount !== oldAmount) {
-            const ledger = await client.query<{ id: number; debit: string; credit: string }>(`SELECT id,debit,credit FROM shop_ledger WHERE shop_id=$1 AND reference_type='shop_sale' AND reference_id=$2 ORDER BY id DESC LIMIT 1 FOR UPDATE`, [oldShopId, row.id]);
-            if (ledger.rowCount) {
-              const currentNet = num(ledger.rows[0].debit) - num(ledger.rows[0].credit);
-              const adjusted = Number((currentNet + amount - oldAmount).toFixed(2));
-              await setLedgerNet(client, num(ledger.rows[0].id), oldShopId, adjusted, "Shop sale updated from trip load editor");
-            }
+            await synchronizeExistingShopSaleAmount(client, trip, row.id!, oldShopId, oldAmount, amount, "Shop sale updated from trip load editor");
           }
         } else {
           const saleNo = await generateSaleNo(client, tripId, trip.tripNo);
@@ -479,29 +563,40 @@ export const shopSalesService = {
       const existing = await client.query(`${SALE_SELECT} WHERE d.trip_id=$1 AND d.deleted=FALSE FOR UPDATE OF d`, [tripId]);
       const existingById = new Map(existing.rows.map((row: Record<string, unknown>) => [num(row.id), row]));
       const submittedIds = new Set<number>();
-      const sums = new Map<number, { birds: number; mortality: number; weight: number; mortalityWeight: number }>();
+      const sums = new Map<number, { birds: number; mortality: number; weight: number; mortalityWeight: number; weightLoss: number }>();
       for (const row of data.deliveries) {
         if (!legs.has(row.load)) throw new AppError(422, `Load ${row.load} does not exist on this trip.`);
         if (row.id != null) {
           if (!existingById.has(row.id) || submittedIds.has(row.id)) throw new AppError(422, "Delivery rows changed. Refresh the trip and try again.");
           submittedIds.add(row.id);
         }
+        if (isZeroDelivery(row)) continue;
         await assertShopActive(row.shopId, client);
-        const sum = sums.get(row.load) ?? { birds: 0, mortality: 0, weight: 0, mortalityWeight: 0 };
-        sum.birds += row.birds; sum.mortality += row.mortality; sum.weight += row.weight; sum.mortalityWeight += row.mortalityWeight;
+        const sum = sums.get(row.load) ?? { birds: 0, mortality: 0, weight: 0, mortalityWeight: 0, weightLoss: 0 };
+        sum.birds += row.birds; sum.mortality += row.mortality; sum.weight += row.weight;
+        sum.mortalityWeight += row.deliveryMode === "box" ? row.mortalityWeight : 0;
+        if (row.id != null) sum.weightLoss += recordedDeliveryWeightLoss(existingById.get(row.id) as Record<string, unknown>);
         sums.set(row.load, sum);
       }
       if (submittedIds.size !== existingById.size) throw new AppError(422, "Every existing shop delivery on this trip must be included before saving.");
       for (const [loadNo, leg] of legs) {
-        const sum = sums.get(loadNo) ?? { birds: 0, mortality: 0, weight: 0, mortalityWeight: 0 };
+        const sum = sums.get(loadNo) ?? { birds: 0, mortality: 0, weight: 0, mortalityWeight: 0, weightLoss: 0 };
         if (sum.birds + sum.mortality !== num(leg.total_birds)) throw new AppError(422, `Load ${loadNo}: delivered birds + mortality birds must equal DC birds (${num(leg.total_birds)}).`);
-        assertWithinCapacity({ label: "weight", available: num(leg.dc_weight), alreadyAllocated: 0, requested: sum.weight + sum.mortalityWeight });
+        assertLoadWeightReconciles(loadNo, num(leg.dc_weight), sum.weight + sum.mortalityWeight, sum.weightLoss);
       }
 
       for (const row of data.deliveries) {
         const leg = legs.get(row.load)!;
         trip.legId = num(leg.id);
         const old = row.id == null ? null : existingById.get(row.id) as Record<string, unknown>;
+        if (old && isZeroDelivery(row)) {
+          assertRowEditWindow(old);
+          const oldShopId = old.shop_id == null ? null : num(old.shop_id);
+          const oldAmount = num(old.amount);
+          await client.query(`UPDATE trip_deliveries SET deleted=TRUE,deleted_at=NOW(),deleted_reason='Removed from Shop Sales trip editor',updated_at=NOW() WHERE id=$1`, [row.id]);
+          if (oldShopId != null && oldAmount > 0) await applyCredit(client, oldShopId, { entryDate: dateOnly(trip.tripDate) ?? "", entryType: "correction", referenceType: "shop_sale", referenceId: row.id!, note: "Shop sale debit reversed (zero delivery removed)" }, oldAmount);
+          continue;
+        }
         const amount = computeAmount(row.weight, row.rate);
         if (old) {
           if (
@@ -519,12 +614,7 @@ export const shopSalesService = {
           await client.query(`UPDATE trip_deliveries SET leg_id=$2,shop_id=$3,birds=$4,weight=$5,mortality=$6,mort_kg=$7,delivery_mode=$8,rate=$9,amount=$10,remarks=$11,updated_at=NOW() WHERE id=$1`, [row.id, leg.id, row.shopId, row.birds, row.weight, row.mortality, row.mortalityWeight, row.deliveryMode, row.rate, amount, str(row.remarks ?? "").trim().toLocaleUpperCase("en-IN")]);
           if (oldShopId !== row.shopId) await synchronizeShopSaleLedger(client, { trip, saleId: row.id!, oldShopId, newShopId: row.shopId, oldAmount, newAmount: amount });
           else if (oldShopId != null && amount !== oldAmount) {
-            const ledger = await client.query<{ id: number; debit: string; credit: string }>(`SELECT id,debit,credit FROM shop_ledger WHERE shop_id=$1 AND reference_type='shop_sale' AND reference_id=$2 ORDER BY id DESC LIMIT 1 FOR UPDATE`, [oldShopId, row.id]);
-            if (ledger.rowCount) {
-              const currentNet = num(ledger.rows[0].debit) - num(ledger.rows[0].credit);
-              const adjusted = Number((currentNet + amount - oldAmount).toFixed(2));
-              await setLedgerNet(client, num(ledger.rows[0].id), oldShopId, adjusted, "Shop sale updated from trip editor");
-            }
+            await synchronizeExistingShopSaleAmount(client, trip, row.id!, oldShopId, oldAmount, amount, "Shop sale updated from trip editor");
           }
         } else {
           const saleNo = await generateSaleNo(client, tripId, trip.tripNo);
