@@ -5,6 +5,10 @@ import { AppError } from "../../middleware/errorHandler.js";
 import { rateEntryService } from "../rateEntryService.js";
 import { shopSalesService } from "../shopSalesService.js";
 import { tripsService } from "../tripsService.js";
+import { assertDisposableTestDatabase } from "../../config/disposableDbGuard.js";
+
+// D8: refuse to run against an operational database before any query executes.
+assertDisposableTestDatabase("src/services/__tests__/shopSalesRateEditing.test.ts");
 
 /**
  * BUSINESS RULE CORRECTION: Rate Entry LOCKED does not make the Shop Sale's

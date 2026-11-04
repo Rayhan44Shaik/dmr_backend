@@ -4,6 +4,10 @@ import { pool } from "../../config/db.js";
 import { rateEntryService } from "../rateEntryService.js";
 import { collectionsService } from "../collectionsService.js";
 import { dashboardService } from "../dashboardService.js";
+import { assertDisposableTestDatabase } from "../../config/disposableDbGuard.js";
+
+// D8: refuse to run against an operational database before any query executes.
+assertDisposableTestDatabase("src/services/__tests__/collectionsDashboardConsistency.test.ts");
 
 /**
  * Phase B â€” cross-module consistency: rate_entry.locked is now the single

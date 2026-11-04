@@ -17,6 +17,7 @@
  */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
+import { assertDisposableTestDatabase } from "../src/config/disposableDbGuard.js";
 
 const url = process.env.C4_REAL_PG_URL;
 if (!url) {
@@ -24,6 +25,8 @@ if (!url) {
     it.skip("C4_REAL_PG_URL not set", () => undefined);
   });
 } else {
+  // D8: refuse to point the shared pool at an operational database.
+  assertDisposableTestDatabase("tests/shopLedgerIsolation.test.ts", url);
   process.env.DATABASE_URL = url;
   const { pool } = await import("../src/config/db.js");
   const { mastersService } = await import("../src/services/mastersService.js");

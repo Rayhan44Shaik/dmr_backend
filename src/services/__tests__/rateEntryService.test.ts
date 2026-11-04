@@ -6,6 +6,10 @@ import { rateEntryService } from "../rateEntryService.js";
 import { shopSalesService } from "../shopSalesService.js";
 import type { RateEntryTrip } from "../../types/operations.js";
 import type { PaginatedResult } from "../../utils/pagination.js";
+import { assertDisposableTestDatabase } from "../../config/disposableDbGuard.js";
+
+// D8: refuse to run against an operational database before any query executes.
+assertDisposableTestDatabase("src/services/__tests__/rateEntryService.test.ts");
 
 let uniqSeq = 0;
 const uniqBase = (Date.now() % 1_000_000) * 1000 + Math.floor(Math.random() * 1000);

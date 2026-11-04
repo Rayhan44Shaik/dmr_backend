@@ -6,6 +6,10 @@ import { shopSalesService } from "../shopSalesService.js";
 import { rateEntryService } from "../rateEntryService.js";
 import { collectionsService } from "../collectionsService.js";
 import type { ShopSale } from "../../types/operations.js";
+import { assertDisposableTestDatabase } from "../../config/disposableDbGuard.js";
+
+// D8: refuse to run against an operational database before any query executes.
+assertDisposableTestDatabase("src/services/__tests__/shopSalesService.test.ts");
 
 /**
  * Integration tests against the real PostgreSQL database (the backend has no

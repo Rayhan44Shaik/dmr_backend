@@ -2,6 +2,10 @@ import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { pool } from "../../config/db.js";
 import { shopRatesService } from "../shopRatesService.js";
+import { assertDisposableTestDatabase } from "../../config/disposableDbGuard.js";
+
+// D8: refuse to run against an operational database before any query executes.
+assertDisposableTestDatabase("src/services/__tests__/shopRatesService.test.ts");
 
 /**
  * Integration tests against the real PostgreSQL database, verifying the

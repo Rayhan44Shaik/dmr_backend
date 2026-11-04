@@ -4,6 +4,10 @@ import { pool } from "../../config/db.js";
 import { AppError } from "../../middleware/errorHandler.js";
 import { rateEntryService } from "../rateEntryService.js";
 import { shopSalesService } from "../shopSalesService.js";
+import { assertDisposableTestDatabase } from "../../config/disposableDbGuard.js";
+
+// D8: refuse to run against an operational database before any query executes.
+assertDisposableTestDatabase("src/services/__tests__/shopSalesEditWindow.test.ts");
 
 /**
  * Shop Sales edit window: two weeks from trips.rate_locked_at, when the trip
