@@ -1,6 +1,6 @@
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
-import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
+import { dateOnly, isoOrNull, num, numOrNull, parseCoordPair, str } from "../utils/coerce.js";
 import { assertEmployeeExists, assertTripExists, assertVehicleActive, assertVehicleExists, } from "../utils/fkValidation.js";
 import { nextDocNo } from "../utils/operationsHelpers.js";
 import { paginatedResult, } from "../utils/pagination.js";
@@ -15,6 +15,14 @@ function toLegacyApproval(opsStatus) {
 }
 function mapFuelExpense(row) {
     const opsStatus = (str(row.ops_status) || "Pending Approval");
+    const parsedGps = parseCoordPair(row.bunk_address) ?? parseCoordPair(row.diesel_bunk_gps);
+    const gpsLat = numOrNull(row.resolved_gps_lat) ?? numOrNull(row.gps_lat) ?? parsedGps?.lat ?? null;
+    const gpsLon = numOrNull(row.resolved_gps_lon) ?? numOrNull(row.gps_lon) ?? parsedGps?.lon ?? null;
+    const bunkAddressRaw = row.bunk_address == null ? null : str(row.bunk_address);
+    const bunkAddress = bunkAddressRaw && parseCoordPair(bunkAddressRaw) ? null : bunkAddressRaw;
+    const tripStartMeter = num(row.start_meter);
+    const tripEndMeter = num(row.end_meter);
+    const travelledDistance = tripEndMeter > tripStartMeter ? tripEndMeter - tripStartMeter : null;
     return {
         id: str(row.id),
         billNo: str(row.bill_no),
@@ -34,18 +42,21 @@ function mapFuelExpense(row) {
         liters: num(row.litres),
         amount: num(row.amount),
         pumpName: str(row.pump_name || row.petrol_bunk),
-        bunkAddress: row.bunk_address == null ? null : str(row.bunk_address),
-        gpsLat: row.gps_lat == null ? null : num(row.gps_lat),
-        gpsLon: row.gps_lon == null ? null : num(row.gps_lon),
-        gpsAccuracy: row.gps_accuracy == null ? null : num(row.gps_accuracy),
-        gpsCapturedAt: row.gps_captured_at == null ? null : str(row.gps_captured_at),
+        bunkAddress,
+        gpsLat,
+        gpsLon,
+        gpsAccuracy: numOrNull(row.resolved_gps_accuracy) ??
+            (row.gps_accuracy == null ? null : num(row.gps_accuracy)),
+        gpsCapturedAt: isoOrNull(row.resolved_gps_captured_at) ?? isoOrNull(row.gps_captured_at),
         remarks: row.remarks == null ? null : str(row.remarks),
         status: opsStatus,
+        travelDistance: travelledDistance,
         imageData: row.image_data == null ? null : str(row.image_data),
         imageName: row.image_name == null ? null : str(row.image_name),
         imageMime: row.image_mime == null ? null : str(row.image_mime),
         deleted: Boolean(row.deleted),
         deletedReason: row.deleted_reason == null ? null : str(row.deleted_reason),
+        deletedAt: row.deleted_at == null ? null : str(row.deleted_at),
         approvedBy: row.approved_by == null ? null : str(row.approved_by),
         approvedAt: row.approved_date == null ? null : str(row.approved_date),
         rejectedBy: row.rejected_by == null ? null : str(row.rejected_by),
@@ -57,10 +68,31 @@ function mapFuelExpense(row) {
     };
 }
 const FUEL_SELECT = `
-  SELECT fe.*, t.trip_no
+  SELECT fe.*, t.trip_no,
+    COALESCE(fe.gps_lat, de.gps_lat) AS resolved_gps_lat,
+    COALESCE(fe.gps_lon, de.gps_lon) AS resolved_gps_lon,
+    COALESCE(fe.gps_accuracy, de.gps_accuracy) AS resolved_gps_accuracy,
+    COALESCE(fe.gps_captured_at, de.gps_captured_at) AS resolved_gps_captured_at,
+    de.bunk_gps AS diesel_bunk_gps,
+    t.opening_meter AS start_meter,
+    t.end_meter
   FROM fuel_expenses fe
   LEFT JOIN trips t ON t.id = fe.trip_id
+  LEFT JOIN trip_diesel_entries de
+    ON de.trip_id = fe.trip_id
+   AND fe.trip_fuel_entry_index IS NOT NULL
+   AND de.row_index = fe.trip_fuel_entry_index
 `;
+async function assertManualFuelCrew(client, vehicleId, driverId) {
+    if (vehicleId == null)
+        throw new AppError(400, "Vehicle is required");
+    const vehicle = await client.query(`SELECT is_personal FROM vehicles WHERE id=$1 AND status='Active'`, [vehicleId]);
+    if (!vehicle.rowCount)
+        throw new AppError(400, "Active vehicle not found");
+    if (!Boolean(vehicle.rows[0].is_personal) && driverId == null)
+        throw new AppError(400, "Driver is required for non-personal vehicles");
+}
+/** Build the WHERE clause for fuel expense list queries. */
 function buildFuelWhere(filters) {
     const clauses = [];
     const params = [];
@@ -99,7 +131,14 @@ function buildFuelWhere(filters) {
     if (filters.search) {
         params.push(`%${filters.search}%`);
         const p = params.length;
-        clauses.push(`(fe.bill_no ILIKE $${p} OR fe.vehicle_no ILIKE $${p} OR fe.driver_name ILIKE $${p} OR t.trip_no ILIKE $${p})`);
+        clauses.push(`(fe.bill_no ILIKE $${p} OR fe.vehicle_no ILIKE $${p} OR fe.driver_name ILIKE $${p} OR fe.supervisor_name ILIKE $${p} OR t.trip_no ILIKE $${p})`);
+    }
+    if (filters.includeMasterBunks === false) {
+        clauses.push(`NOT EXISTS (
+      SELECT 1 FROM bird_types bt
+      WHERE bt.category = 'Fuel Bunk'
+        AND LOWER(BTRIM(bt.bird_type)) = LOWER(BTRIM(COALESCE(fe.pump_name, fe.petrol_bunk, '')))
+    )`);
     }
     return {
         where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "",
@@ -139,6 +178,7 @@ export const fuelExpensesService = {
         return withTransaction(async (client) => {
             try {
                 await assertVehicleExists(data.vehicleId, client);
+                await assertManualFuelCrew(client, data.vehicleId, data.driverId);
                 await assertEmployeeExists(data.driverId, "Driver", client);
                 await assertEmployeeExists(data.supervisorId, "Supervisor", client);
                 await assertTripExists(data.tripId, client);
@@ -159,7 +199,9 @@ export const fuelExpensesService = {
                 // Amount is always server-computed — never trust a client-supplied amount.
                 const amount = Number((liters * fuelRate).toFixed(2));
                 // Serialize same-day manual allocations (MAX-then-insert needs the day lock).
-                await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`fuel_bill_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`]);
+                await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+                    `fuel_bill_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`,
+                ]);
                 const billNo = 
                 // (day lock held above; number allocated below)
                 data.billNo || (await nextDocNo(client, "FUEL", "fuel_expenses", "bill_no"));
@@ -194,7 +236,7 @@ export const fuelExpensesService = {
                     data.gpsLat ?? null,
                     data.gpsLon ?? null,
                     data.gpsAccuracy ?? null,
-                    data.gpsCapturedAt ?? null,
+                    isoOrNull(data.gpsCapturedAt),
                     data.createdBy ?? "",
                 ]);
                 return mapFuelExpense(result.rows[0]);
@@ -212,13 +254,17 @@ export const fuelExpensesService = {
         await assertVehicleActive(data.vehicleId);
         return withTransaction(async (client) => {
             try {
-                const existing = await client.query(`SELECT source_type, ops_status, vehicle_id, expense_date, created_at
+                const existing = await client.query(`SELECT source_type, ops_status, vehicle_id, driver_id, expense_date, created_at,
+                  created_at >= NOW()-INTERVAL '14 days' AS within_edit_window
            FROM fuel_expenses WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE`, [id]);
                 if (!existing.rowCount)
                     throw new AppError(404, "Fuel expense not found");
                 if (existing.rows[0].source_type === "TRIP") {
                     throw new AppError(409, "Trip-generated fuel records cannot be edited directly. Edit the Trip's Step 5 diesel entry instead.");
                 }
+                if (!existing.rows[0].within_edit_window)
+                    throw new AppError(409, "Manual fuel bills can only be edited for 14 days after entry.");
+                await assertManualFuelCrew(client, data.vehicleId ?? numOrNull(existing.rows[0].vehicle_id), data.driverId === undefined ? numOrNull(existing.rows[0].driver_id) : data.driverId);
                 await assertVehicleExists(data.vehicleId, client);
                 await assertEmployeeExists(data.driverId, "Driver", client);
                 await assertTripExists(data.tripId, client);
@@ -294,7 +340,7 @@ export const fuelExpensesService = {
                     data.gpsLat ?? null,
                     data.gpsLon ?? null,
                     data.gpsAccuracy ?? null,
-                    data.gpsCapturedAt ?? null,
+                    isoOrNull(data.gpsCapturedAt),
                     data.createdBy ?? null,
                 ]);
                 if (!result.rowCount)
@@ -366,16 +412,22 @@ export const fuelExpensesService = {
     async softDelete(id, reason) {
         return withTransaction(async (client) => {
             try {
-                const result = await client.query(`UPDATE fuel_expenses SET
-             deleted = TRUE,
-             deleted_reason = $2,
-             ops_status = 'Deleted'::ops_record_status,
-             status = 'Pending'::approval_status
-           WHERE id = $1 AND COALESCE(deleted, FALSE) = FALSE
-           RETURNING *`, [id, reason ?? null]);
-                if (!result.rowCount)
+                const existing = await client.query(`SELECT source_type,created_at >= NOW()-INTERVAL '14 days' AS within_delete_window
+             FROM fuel_expenses WHERE id=$1 AND COALESCE(deleted,FALSE)=FALSE FOR UPDATE`, [id]);
+                if (!existing.rowCount)
                     throw new AppError(404, "Fuel expense not found");
-                return mapFuelExpense(result.rows[0]);
+                if (existing.rows[0].source_type === "TRIP")
+                    throw new AppError(409, "Trip-generated fuel bills cannot be deleted here");
+                if (!existing.rows[0].within_delete_window)
+                    throw new AppError(409, "Manual fuel bills can only be deleted for 14 days after entry.");
+                // Keep the audit row so every deletion remains visible in the Deleted
+                // register. The previous hard DELETE made a second deleted bill appear
+                // to vanish after the next refresh.
+                await client.query(`UPDATE fuel_expenses
+              SET deleted=TRUE, ops_status='Deleted', deleted_reason=$2,
+                  deleted_at=NOW(), updated_at=NOW()
+            WHERE id=$1`, [id, reason ?? null]);
+                return { id, deleted: true, deletedReason: reason ?? null };
             }
             catch (err) {
                 if (err.code === "42703") {

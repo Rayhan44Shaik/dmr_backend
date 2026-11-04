@@ -33,6 +33,7 @@ export interface ShopRate {
     status: OpsRecordStatus;
     deleted: boolean;
     deletedReason?: string | null;
+    deletedAt?: string | null;
     approvedBy?: string | null;
     approvedAt?: string | null;
     rejectedBy?: string | null;
@@ -53,6 +54,7 @@ export interface ShopSale {
     birdType: string;
     tripId: number | null;
     tripNo: string;
+    load?: number;
     vehicleNo: string | null;
     isRentedVehicle: boolean;
     farmName: string | null;
@@ -64,6 +66,10 @@ export interface ShopSale {
     mortalityWeight: number;
     deliveryMode: "box" | "weight";
     selectedBoxCount: number;
+    dcBirds?: number;
+    dcWeight?: number;
+    /** Weight loss recorded by Trip Entry for this load; Shop Sales edits do not derive it from an unassigned balance. */
+    loadWeightLoss?: number;
     remarks: string;
     status: OpsRecordStatus;
     deleted: boolean;
@@ -171,11 +177,14 @@ export interface FuelExpense {
     gpsCapturedAt?: string | null;
     remarks?: string | null;
     status: OpsRecordStatus;
+    /** Trip travel distance (end_meter − opening_meter) for trip-linked bills; null otherwise. */
+    travelDistance?: number | null;
     imageData?: string | null;
     imageName?: string | null;
     imageMime?: string | null;
     deleted: boolean;
     deletedReason?: string | null;
+    deletedAt?: string | null;
     approvedBy?: string | null;
     approvedAt?: string | null;
     rejectedBy?: string | null;
@@ -217,6 +226,8 @@ export interface RateEntryDelivery {
     birdType: string;
     birds: number;
     weight: number;
+    farmWeight: number | null;
+    dcWeight: number;
     mortality: number;
     mortKg: number | null;
     rate: number | null;
@@ -253,6 +264,12 @@ export interface RateEntryTrip {
         birds: number;
         weight: number;
         amount: number;
+        dcWeight: number;
+        boxMortality: number;
+        boxMortalityWeight: number;
+        weightMortality: number;
+        weightMortalityWeight: number;
+        weightLoss: number;
     }>;
     deliveries: RateEntryDelivery[];
 }

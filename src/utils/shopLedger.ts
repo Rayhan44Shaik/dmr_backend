@@ -105,6 +105,54 @@ export async function setLedgerNet(
   await recalcShopBalance(client, shopId);
 }
 
+/**
+ * Remove a delivery's sale rows (delivery-linked rows of any entry type),
+ * then recompute the shop balance. This is how a deleted/zeroed Shop Sale
+ * leaves the ledger: the sale row disappears instead of lingering as a
+ * visible debit offset by an invisible correction. Returns the removed row
+ * count so callers can fall back to a correction credit only for legacy
+ * trip-level rows, which cannot be surgically removed per delivery.
+ */
+export async function removeShopSaleLedger(
+  client: Client,
+  shopId: number,
+  saleId: number
+): Promise<number> {
+  const removed = await client.query(
+    `DELETE FROM shop_ledger
+      WHERE shop_id = $1
+        AND reference_type = 'shop_sale'
+        AND reference_id = $2`,
+    [shopId, saleId]
+  );
+  await recalcShopBalance(client, shopId);
+  return removed.rowCount ?? 0;
+}
+
+/**
+ * Remove every sale row baked for one trip — delivery-linked rows plus any
+ * legacy trip-level rows — then recompute every affected shop. A deleted
+ * trip takes its sales with it so the ledger can never show debits the
+ * Cumulative view (which ignores deleted trips) no longer counts.
+ * Collections are independent cash records and are left untouched.
+ */
+export async function removeTripSaleLedger(
+  client: Client,
+  tripId: number
+): Promise<void> {
+  const removed = await client.query<{ shop_id: number }>(
+    `DELETE FROM shop_ledger
+      WHERE (reference_type = 'shop_sale'
+        AND reference_id IN (SELECT id FROM trip_deliveries WHERE trip_id = $1))
+        OR (reference_type = 'trip' AND reference_id = $1)
+      RETURNING shop_id`,
+    [tripId]
+  );
+  const shops = new Set<number>();
+  for (const row of removed.rows) shops.add(Number(row.shop_id));
+  for (const shopId of shops) await recalcShopBalance(client, shopId);
+}
+
 /** DEBIT (sale, or a credit that must be returned) against a shop. */
 export async function applyDebit(
   client: Client,

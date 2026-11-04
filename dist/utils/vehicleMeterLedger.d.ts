@@ -3,12 +3,8 @@ type Client = pg.PoolClient;
 type Queryable = Client | null;
 /**
  * Millisecond-precise ISO string for a DB timestamptz value being re-used as
- * a validateVehicleMeter `eventInstant`. NOT the same as coerce.ts's
- * isoOrNull(), which round-trips through Date.toString() and silently
- * truncates to whole seconds — harmless for display, but two records
- * created within the same second then collapse to the same instant (or
- * worse, one that no longer reflects true creation order), which is exactly
- * the precision this validator depends on to pick the right neighbor.
+ * a validateVehicleMeter `eventInstant`. Delegates to isoOrNull so Date
+ * objects keep milliseconds (never Date.toString() locale forms).
  */
 export declare function preciseIsoOrUndefined(value: unknown): string | undefined;
 export type MeterSourceType = "TRIP_START" | "TRIP_END" | "FUEL" | "MAINTENANCE";

@@ -1,6 +1,6 @@
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
-import type { FuelExpense, FuelSourceType, OpsRecordStatus } from "../types/operations.js";
+import type { FuelExpense, FuelSourceType, FuelTripLoad, OpsRecordStatus } from "../types/operations.js";
 import { dateOnly, isoOrNull, num, numOrNull, parseCoordPair, str } from "../utils/coerce.js";
 import {
   assertEmployeeExists,
@@ -44,6 +44,37 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
     numOrNull(row.resolved_gps_lon) ?? numOrNull(row.gps_lon) ?? parsedGps?.lon ?? null;
   const bunkAddressRaw = row.bunk_address == null ? null : str(row.bunk_address);
   const bunkAddress = bunkAddressRaw && parseCoordPair(bunkAddressRaw) ? null : bunkAddressRaw;
+  // Authoritative saved trip distance: the Step-wise computed trips.total_km
+  // when present, otherwise the saved odometer span (end − opening). Fuel
+  // Expenses never invents or stores its own distance — it only reads this.
+  const tripTotalKm = numOrNull(row.trip_total_km);
+  const tripStartMeter = num(row.start_meter);
+  const tripEndMeter = num(row.end_meter);
+  const odometerDistance = tripEndMeter > tripStartMeter ? tripEndMeter - tripStartMeter : null;
+  const travelledDistance =
+    tripTotalKm != null && tripTotalKm > 0 ? tripTotalKm : odometerDistance;
+  // Per-load DC/farm context of the linked trip for the Load 1 / Load 2
+  // display. The payload may arrive as parsed JSON or a JSON string.
+  let tripLoads: FuelTripLoad[] = [];
+  const rawLoads = row.trip_loads;
+  const loadList: unknown[] = Array.isArray(rawLoads)
+    ? rawLoads
+    : typeof rawLoads === "string" && rawLoads
+      ? (() => { try { const parsed: unknown = JSON.parse(rawLoads); return Array.isArray(parsed) ? parsed : []; } catch { return []; } })()
+      : [];
+  tripLoads = loadList.map((value) => {
+    const load = value as Record<string, unknown>;
+    return {
+      load: num(load.load),
+      farmName: load.farmName == null ? null : str(load.farmName),
+      dcWeight: num(load.dcWeight),
+      birds: num(load.birds),
+    };
+  }).filter((load) => load.load > 0);
+  const tripLoadCount =
+    row.trip_load_count == null
+      ? (row.leg_count == null ? null : num(row.leg_count))
+      : num(row.trip_load_count);
   return {
     id: str(row.id),
     billNo: str(row.bill_no),
@@ -72,6 +103,9 @@ function mapFuelExpense(row: Record<string, unknown>): FuelExpense {
     gpsCapturedAt: isoOrNull(row.resolved_gps_captured_at) ?? isoOrNull(row.gps_captured_at),
     remarks: row.remarks == null ? null : str(row.remarks),
     status: opsStatus,
+    travelDistance: travelledDistance,
+    tripLoadCount,
+    tripLoads,
     imageData: row.image_data == null ? null : str(row.image_data),
     imageName: row.image_name == null ? null : str(row.image_name),
     imageMime: row.image_mime == null ? null : str(row.image_mime),
@@ -95,13 +129,31 @@ const FUEL_SELECT = `
     COALESCE(fe.gps_lon, de.gps_lon) AS resolved_gps_lon,
     COALESCE(fe.gps_accuracy, de.gps_accuracy) AS resolved_gps_accuracy,
     COALESCE(fe.gps_captured_at, de.gps_captured_at) AS resolved_gps_captured_at,
-    de.bunk_gps AS diesel_bunk_gps
+    de.bunk_gps AS diesel_bunk_gps,
+    t.opening_meter AS start_meter,
+    t.end_meter,
+    t.total_km AS trip_total_km,
+    t.leg_count,
+    ll.load_count AS trip_load_count,
+    ll.loads AS trip_loads
   FROM fuel_expenses fe
   LEFT JOIN trips t ON t.id = fe.trip_id
   LEFT JOIN trip_diesel_entries de
     ON de.trip_id = fe.trip_id
    AND fe.trip_fuel_entry_index IS NOT NULL
    AND de.row_index = fe.trip_fuel_entry_index
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS load_count,
+           JSONB_AGG(JSONB_BUILD_OBJECT(
+             'load', l.leg_index,
+             'farmName', l.source_farm,
+             'dcWeight', COALESCE(l.dc_weight, 0),
+             'birds', COALESCE(l.total_birds, 0)
+           ) ORDER BY l.leg_index) AS loads
+      FROM trip_legs l
+     WHERE l.trip_id = t.id
+       AND l.pickup_step_submitted = TRUE
+  ) ll ON TRUE
 `;
 
 async function assertManualFuelCrew(client: { query: (text: string, values?: unknown[]) => Promise<{ rowCount: number | null; rows: Record<string, unknown>[] }> }, vehicleId: number | null | undefined, driverId: number | null | undefined) {
@@ -111,6 +163,7 @@ async function assertManualFuelCrew(client: { query: (text: string, values?: unk
   if (!Boolean(vehicle.rows[0].is_personal) && driverId == null) throw new AppError(400, "Driver is required for non-personal vehicles");
 }
 
+/** Build the WHERE clause for fuel expense list queries. */
 function buildFuelWhere(filters: {
   vehicleId?: number;
   driverId?: number;
@@ -118,7 +171,6 @@ function buildFuelWhere(filters: {
   toDate?: string;
   status?: string;
   sourceType?: string;
-  fuelType?: string;
   search?: string;
   includeDeleted?: boolean;
   includeMasterBunks?: boolean;
@@ -266,7 +318,9 @@ export const fuelExpensesService = {
         // Amount is always server-computed — never trust a client-supplied amount.
         const amount = Number((liters * fuelRate).toFixed(2));
         // Serialize same-day manual allocations (MAX-then-insert needs the day lock).
-        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`fuel_bill_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`]);
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+          `fuel_bill_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`,
+        ]);
         const billNo =
           // (day lock held above; number allocated below)
           data.billNo || (await nextDocNo(client, "FUEL", "fuel_expenses", "bill_no"));
@@ -525,7 +579,7 @@ export const fuelExpensesService = {
               SET deleted=TRUE, ops_status='Deleted', deleted_reason=$2,
                   deleted_at=NOW(), updated_at=NOW()
             WHERE id=$1`,
-          [id, reason ?? null],
+          [id, reason ?? null]
         );
         return { id, deleted: true, deletedReason: reason ?? null };
       } catch (err) {

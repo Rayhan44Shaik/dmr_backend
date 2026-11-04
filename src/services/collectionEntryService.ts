@@ -11,10 +11,9 @@ import {
 } from "../utils/pagination.js";
 import { isPgError, rethrowIfAppError } from "../utils/pgErrors.js";
 import {
-  applyCorrection,
   applyCredit,
-  applyDebit,
   lockShop,
+  recalcShopBalance,
 } from "../utils/shopLedger.js";
 import { parseBody } from "../validation/operations.js";
 import { collectionEntryUpdateSchema } from "../validation/collectionEntry.js";
@@ -23,6 +22,48 @@ import { collectionEntryImportSchema, type CollectionEntryImport } from "../vali
 import { isCollectionApprovedDeleteWindowOpen, assertCollectionApprovedDeleteWindowOpen } from "../utils/collectionDeleteWindow.js";
 
 type Client = pg.PoolClient;
+
+/** A collection has exactly one visible financial row. Editing, rejecting or
+ * deleting it changes/removes that row in place — it never appends a
+ * correction transaction to Shop Ledger. */
+async function replaceCollectionLedger(
+  client: Client,
+  shopId: number,
+  collectionId: number,
+  entryDate: string,
+  amount: number,
+): Promise<void> {
+  const updated = await client.query(
+    `UPDATE shop_ledger
+        SET entry_date = $3, debit = 0, credit = $4,
+            entry_type = 'collection', note = 'Collection credit (updated)'
+      WHERE shop_id = $1 AND reference_type = 'collection'
+        AND reference_id = $2 AND entry_type = 'collection'`,
+    [shopId, collectionId, entryDate, amount],
+  );
+  if (!updated.rowCount) {
+    await applyCredit(client, shopId, {
+      entryDate, entryType: "collection", referenceType: "collection",
+      referenceId: collectionId, note: "Collection credit (approved)",
+    }, amount);
+  }
+  await client.query(
+    `DELETE FROM shop_ledger
+      WHERE shop_id = $1 AND reference_type = 'collection'
+        AND reference_id = $2 AND entry_type = 'correction'`,
+    [shopId, collectionId],
+  );
+  await recalcShopBalance(client, shopId);
+}
+
+async function removeCollectionLedger(client: Client, shopId: number, collectionId: number): Promise<void> {
+  await client.query(
+    `DELETE FROM shop_ledger
+      WHERE shop_id = $1 AND reference_type = 'collection' AND reference_id = $2`,
+    [shopId, collectionId],
+  );
+  await recalcShopBalance(client, shopId);
+}
 
 const SEL = `
   SELECT id, collection_no, collection_date, shop_id, shop_name,
@@ -758,13 +799,8 @@ export const collectionEntryService = {
     });
   },
 
-  /**
-   * Edit a collection. A never-applied (pending/rejected) collection is a plain
-   * field update. An APPLIED (approved) collection adjusts the Shop balance by
-   * the DIFFERENCE only (never the whole new amount) via one differential
-   * correction entry, keeping the ledger reconciled. Deleted records are
-   * protected.
-   */
+  /** Edit an approved collection in place so Shop Ledger always has one
+   * current collection row, never a second correction row. */
   async update(id: number, body: unknown): Promise<CollectionEntry> {
     const data = parseBody(collectionEntryUpdateSchema, body);
 
@@ -800,25 +836,11 @@ export const collectionEntryService = {
           targetShopName = targetShop.shopName;
         }
 
-        if (existing.isFinancial && data.amount !== undefined && newAmount !== existing.amount) {
+        if (existing.isFinancial && (newAmount !== existing.amount || newDate !== existing.collectionDate)) {
           if (shopId == null) throw new AppError(422, "Collection has no linked shop");
           const shop = await lockShop(client, shopId);
           if (!shop) throw new AppError(422, "Shop not found", { shopId });
-          // Outstanding falls as the (credit) amount grows:
-          //   newAmount > oldAmount → outstanding −= diff (extra credit)
-          //   newAmount < oldAmount → outstanding += diff (returned credit)
-          await applyCorrection(
-            client,
-            shopId,
-            {
-              entryDate: newDate,
-              entryType: "correction",
-              referenceType: "collection",
-              referenceId: id,
-              note: `Collection edit difference (₹${existing.amount} → ₹${newAmount})`,
-            },
-            -(newAmount - existing.amount)
-          );
+          await replaceCollectionLedger(client, shopId, id, newDate, newAmount);
         }
 
         await client.query(
@@ -948,18 +970,7 @@ export const collectionEntryService = {
         if (existing.isFinancial && existing.shopId != null) {
           const shop = await lockShop(client, existing.shopId);
           if (!shop) throw new AppError(422, "Shop not found", { shopId: existing.shopId });
-          await applyDebit(
-            client,
-            existing.shopId,
-            {
-              entryDate: existing.collectionDate,
-              entryType: "correction",
-              referenceType: "collection",
-              referenceId: id,
-              note: "Collection credit reversed (rejected)",
-            },
-            existing.amount
-          );
+          await removeCollectionLedger(client, existing.shopId, id);
         }
 
         await client.query(
@@ -1005,18 +1016,7 @@ export const collectionEntryService = {
         if (existing.isFinancial && existing.shopId != null) {
           const shop = await lockShop(client, existing.shopId);
           if (!shop) throw new AppError(422, "Shop not found", { shopId: existing.shopId });
-          await applyDebit(
-            client,
-            existing.shopId,
-            {
-              entryDate: existing.collectionDate,
-              entryType: "correction",
-              referenceType: "collection",
-              referenceId: id,
-              note: "Collection credit reversed (deleted)",
-            },
-            existing.amount
-          );
+          await removeCollectionLedger(client, existing.shopId, id);
         }
 
         await client.query(

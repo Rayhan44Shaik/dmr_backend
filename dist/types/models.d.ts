@@ -29,6 +29,7 @@ export interface Vehicle {
     birdCapacity: number;
     capacityKg: number;
     isRented: boolean;
+    isPersonal: boolean;
     trackingId: string;
     fastagBank: string;
     engineNumber: string;

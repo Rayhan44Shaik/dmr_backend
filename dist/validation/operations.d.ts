@@ -76,11 +76,14 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     birdTypeId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     birdType: z.ZodOptional<z.ZodString>;
     tripId: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    load: z.ZodOptional<z.ZodNumber>;
     birds: z.ZodOptional<z.ZodNumber>;
     weight: z.ZodOptional<z.ZodNumber>;
     rate: z.ZodOptional<z.ZodNumber>;
     amount: z.ZodOptional<z.ZodNumber>;
     mortality: z.ZodOptional<z.ZodNumber>;
+    mortalityWeight: z.ZodOptional<z.ZodNumber>;
+    deliveryMode: z.ZodOptional<z.ZodEnum<["box", "weight"]>>;
     remarks: z.ZodOptional<z.ZodString>;
     status: z.ZodOptional<z.ZodEnum<["Draft", "Pending Approval", "Approved", "Rejected", "Deleted"]>>;
     createdBy: z.ZodOptional<z.ZodString>;
@@ -90,6 +93,7 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     birdType?: string | undefined;
     weight?: number | undefined;
     birds?: number | undefined;
+    mortalityWeight?: number | undefined;
     tripId?: number | null | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
@@ -98,14 +102,17 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     createdBy?: string | undefined;
     saleNo?: string | undefined;
     saleDate?: string | undefined;
+    load?: number | undefined;
     amount?: number | undefined;
     mortality?: number | undefined;
+    deliveryMode?: "box" | "weight" | undefined;
 }, {
     status?: "Draft" | "Deleted" | "Approved" | "Rejected" | "Pending Approval" | undefined;
     shopName?: string | undefined;
     birdType?: string | undefined;
     weight?: number | undefined;
     birds?: number | undefined;
+    mortalityWeight?: number | undefined;
     tripId?: number | null | undefined;
     shopId?: number | null | undefined;
     birdTypeId?: number | null | undefined;
@@ -114,8 +121,172 @@ export declare const shopSaleBodySchema: z.ZodObject<{
     createdBy?: string | undefined;
     saleNo?: string | undefined;
     saleDate?: string | undefined;
+    load?: number | undefined;
     amount?: number | undefined;
     mortality?: number | undefined;
+    deliveryMode?: "box" | "weight" | undefined;
+}>;
+export declare const shopSalesLoadSaveSchema: z.ZodObject<{
+    deliveries: z.ZodArray<z.ZodEffects<z.ZodObject<Omit<{
+        id: z.ZodOptional<z.ZodNumber>;
+        load: z.ZodOptional<z.ZodNumber>;
+        shopId: z.ZodNumber;
+        birds: z.ZodNumber;
+        weight: z.ZodNumber;
+        mortality: z.ZodNumber;
+        mortalityWeight: z.ZodNumber;
+        deliveryMode: z.ZodEnum<["box", "weight"]>;
+        rate: z.ZodNumber;
+        remarks: z.ZodOptional<z.ZodString>;
+    }, "load">, "strip", z.ZodTypeAny, {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }, {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }>, {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }, {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }>, "many">;
+}, "strip", z.ZodTypeAny, {
+    deliveries: {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }[];
+}, {
+    deliveries: {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }[];
+}>;
+export declare const shopSalesTripSaveSchema: z.ZodObject<{
+    deliveries: z.ZodArray<z.ZodEffects<z.ZodObject<{
+        id: z.ZodOptional<z.ZodNumber>;
+        weight: z.ZodNumber;
+        birds: z.ZodNumber;
+        mortalityWeight: z.ZodNumber;
+        shopId: z.ZodNumber;
+        rate: z.ZodNumber;
+        remarks: z.ZodOptional<z.ZodString>;
+        load: z.ZodNumber;
+        mortality: z.ZodNumber;
+        deliveryMode: z.ZodEnum<["box", "weight"]>;
+    }, "strip", z.ZodTypeAny, {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        load: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }, {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        load: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }>, {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        load: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }, {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        load: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }>, "many">;
+}, "strip", z.ZodTypeAny, {
+    deliveries: {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        load: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }[];
+}, {
+    deliveries: {
+        weight: number;
+        birds: number;
+        mortalityWeight: number;
+        shopId: number;
+        rate: number;
+        load: number;
+        mortality: number;
+        deliveryMode: "box" | "weight";
+        id?: number | undefined;
+        remarks?: string | undefined;
+    }[];
 }>;
 /** One shop-wise rate line, applied to an existing trip_deliveries row. */
 export declare const rateEntryDeliverySchema: z.ZodObject<{
@@ -214,13 +385,6 @@ export declare const rateEntryUpdateSchema: z.ZodObject<{
     remarks?: string | null | undefined;
     updatedBy?: string | undefined;
 }>;
-export declare const rateEntryLockSchema: z.ZodObject<{
-    lockedBy: z.ZodOptional<z.ZodString>;
-}, "strip", z.ZodTypeAny, {
-    lockedBy?: string | undefined;
-}, {
-    lockedBy?: string | undefined;
-}>;
 /**
  * Rate Entry payload.
  *
@@ -236,6 +400,33 @@ export declare const rateEntryItemSchema: z.ZodObject<{
 }, {
     rate: number;
     deliveryId: number;
+}>;
+export declare const rateEntryLockSchema: z.ZodObject<{
+    lockedBy: z.ZodOptional<z.ZodString>;
+    /** Save & Lock sends the current grid in this same request so rates and the
+     * lock commit atomically; never strip this field during validation. */
+    rates: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        deliveryId: z.ZodNumber;
+        rate: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        rate: number;
+        deliveryId: number;
+    }, {
+        rate: number;
+        deliveryId: number;
+    }>, "many">>;
+}, "strip", z.ZodTypeAny, {
+    lockedBy?: string | undefined;
+    rates?: {
+        rate: number;
+        deliveryId: number;
+    }[] | undefined;
+}, {
+    lockedBy?: string | undefined;
+    rates?: {
+        rate: number;
+        deliveryId: number;
+    }[] | undefined;
 }>;
 export declare const rateEntrySaveSchema: z.ZodObject<{
     /** Partial list — only deliveries included are updated. */

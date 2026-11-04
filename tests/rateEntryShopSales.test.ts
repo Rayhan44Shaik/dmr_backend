@@ -264,7 +264,15 @@ describe("Rate Entry -> Lock -> Shop Sales lifecycle", () => {
     });
     assert.equal(saved.status, 200, JSON.stringify(saved.body));
     assert.equal(saved.body.totalAmount, 94500);
-    assert.deepEqual(saved.body.loadAmounts, [{ load: 1, shops: 2, birds: 550, weight: 950, amount: 94500 }]);
+    // The rate-entry load row also reports mortality/weight-loss telemetry
+    // (all zero here — no mortality was seeded on either delivery).
+    assert.deepEqual(saved.body.loadAmounts, [
+      {
+        load: 1, shops: 2, birds: 550, weight: 950, amount: 94500, dcWeight: 0,
+        boxMortality: 0, boxMortalityWeight: 0, weightMortality: 0,
+        weightMortalityWeight: 0, weightLoss: 0,
+      },
+    ]);
 
     const shopSalesStillBeforeLock = await getJson(baseUrl, "/api/operations/shop-sales");
     assert.ok(
@@ -541,7 +549,7 @@ describe("Duplicate Shop Sale prevention", () => {
 // 5. 2-week-from-insert edit window boundary
 // ---------------------------------------------------------------------------
 
-describe("2-week-from-insert Shop Sales edit window", () => {
+describe("2-week-from-entry Shop Sales edit window", () => {
   it("day 13 still allows edits; day 14 rejects, including delete", async () => {
     const m = await seedMasters();
     const trip = await makeCompletedTrip(m, {
@@ -556,19 +564,21 @@ describe("2-week-from-insert Shop Sales edit window", () => {
     });
     await postJson(baseUrl, `/api/operations/rate-entry/${trip.id}/lock`, {});
 
+    // The Shop Sales edit clock starts when the trip enters Shop Sales
+    // (trips.rate_locked_at), never at the earlier delivery creation.
     const justUnderFourteenDays = new Date(
       Date.now() - (14 * 24 * 60 * 60 * 1000 - 60_000)
     ).toISOString();
-    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [
-      dA,
+    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [
+      trip.id,
       justUnderFourteenDays,
     ]);
     const atDay13 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 120 });
-    assert.equal(atDay13.status, 200, "day 13 must still be editable (inside 2 weeks from insert)");
+    assert.equal(atDay13.status, 200, "day 13 must still be editable (inside 2 weeks from Shop Sales entry)");
 
     const fifteenDaysAgo = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [
-      dA,
+    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [
+      trip.id,
       fifteenDaysAgo,
     ]);
     const atDay15 = await putJson(baseUrl, `/api/operations/shop-sales/${dA}`, { rate: 150 });

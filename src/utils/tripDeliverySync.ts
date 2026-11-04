@@ -3,7 +3,7 @@ import { AppError } from "../middleware/errorHandler.js";
 
 type Client = pg.PoolClient;
 
-const EDIT_WINDOW_DAYS = 10;
+const EDIT_WINDOW_DAYS = 14;
 
 /** Trip statuses finalized enough to receive/carry a Rate Entry and, once
  * locked, to be Shop-Sales-eligible. Single shared source — Rate Entry
@@ -12,10 +12,10 @@ const EDIT_WINDOW_DAYS = 10;
  * Shop Sales afterwards would be a dead end. */
 export const RATE_ENTRY_ELIGIBLE_STATUSES = ["Approved", "Completed"] as const;
 
-/** Anchor date for the 10-day Shop Sales correction window. Prefers
+/** Anchor date for the 14-day Shop Sales correction window. Prefers
  * `rateLockedAt` — the moment Rate Entry actually locked the trip and Shop
- * Sales became available, which is what "10-day editing window" means per
- * the business rule (Trip -> Rate Entry -> LOCK -> Shop Sales -> 10 days).
+ * Sales became available, which is what the 14-day editing window means per
+ * the business rule (Trip -> Rate Entry -> LOCK -> Shop Sales -> 14 days).
  * Falls back to `approvedAt` (trip completion) for any trip locked before
  * rate_locked_at existed/was populated, and finally to tripDate for very old
  * legacy rows that predate approved_at too. */
@@ -71,7 +71,7 @@ export function assertTripEditable(trip: {
     const expired = editWindowExpiresAt(trip);
     throw new AppError(
       409,
-      `Trip ${trip.tripNo ?? ""} is locked — the 10-day edit window closed on ${expired
+      `Trip ${trip.tripNo ?? ""} is locked — the 14-day edit window closed on ${expired
         .toISOString()
         .slice(0, 10)}. No edits, deletes, or field changes are allowed.`.replace(/\s+/g, " ").trim()
     );

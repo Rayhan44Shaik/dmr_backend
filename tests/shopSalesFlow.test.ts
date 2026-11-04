@@ -540,7 +540,7 @@ describe("Shop Sales corrections reflect in Trip List", () => {
 // ---------------------------------------------------------------------------
 describe("2-week-from-insert correction window", () => {
   it("13. Day 13: birds/weight/rate editable", async () => {
-    const { deliveryA } = await makeLockedTrip({
+    const { trip, deliveryA } = await makeLockedTrip({
       tripNo: "SF-DAY13",
       totalBirds: 1000,
       dcWeight: 1800,
@@ -549,8 +549,10 @@ describe("2-week-from-insert correction window", () => {
       birdsB: 250,
       weightB: 450,
     });
+    // The Shop Sales edit clock starts when the trip enters Shop Sales
+    // (trips.rate_locked_at), never at the earlier delivery creation.
     const thirteenDays = new Date(Date.now() - 13 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [deliveryA, thirteenDays]);
+    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [trip.id, thirteenDays]);
     for (const body of [{ birds: 310 }, { weight: 510 }, { rate: 120 }]) {
       const res = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryA}`, body);
       assert.equal(res.status, 200, `day-13 edit ${JSON.stringify(body)} must be allowed, got ${res.status}`);
@@ -558,7 +560,7 @@ describe("2-week-from-insert correction window", () => {
   });
 
   it("14. Day 14 exactly: birds/weight/rate/amount rejected", async () => {
-    const { deliveryA } = await makeLockedTrip({
+    const { trip, deliveryA } = await makeLockedTrip({
       tripNo: "SF-DAY14",
       totalBirds: 1000,
       dcWeight: 1800,
@@ -567,8 +569,10 @@ describe("2-week-from-insert correction window", () => {
       birdsB: 250,
       weightB: 450,
     });
+    // The Shop Sales edit clock starts when the trip enters Shop Sales
+    // (trips.rate_locked_at), never at the earlier delivery creation.
     const fourteenDays = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [deliveryA, fourteenDays]);
+    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [trip.id, fourteenDays]);
     for (const body of [{ birds: 310 }, { weight: 510 }, { rate: 120 }]) {
       const res = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryA}`, body);
       assert.equal(res.status, 409, `day-14 edit ${JSON.stringify(body)} must be rejected, got ${res.status}`);
@@ -576,7 +580,7 @@ describe("2-week-from-insert correction window", () => {
   });
 
   it("15. Day 15: same rejection", async () => {
-    const { deliveryA } = await makeLockedTrip({
+    const { trip, deliveryA } = await makeLockedTrip({
       tripNo: "SF-DAY15",
       totalBirds: 1000,
       dcWeight: 1800,
@@ -585,8 +589,10 @@ describe("2-week-from-insert correction window", () => {
       birdsB: 250,
       weightB: 450,
     });
+    // The Shop Sales edit clock starts when the trip enters Shop Sales
+    // (trips.rate_locked_at), never at the earlier delivery creation.
     const fifteenDays = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [deliveryA, fifteenDays]);
+    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [trip.id, fifteenDays]);
     const res = await putJson(baseUrl, `/api/operations/shop-sales/${deliveryA}`, { rate: 130 });
     assert.equal(res.status, 409, `day-15 edit must be rejected, got ${res.status}`);
   });
@@ -650,7 +656,9 @@ describe("Database-level lock guards", () => {
       weightB: 450,
     });
     const fifteenDays = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
-    await pool.query(`UPDATE trip_deliveries SET created_at = $2 WHERE id = $1`, [deliveryA, fifteenDays]);
+    // The DB trigger anchors the window at trips.rate_locked_at (Shop Sales
+    // entry), falling back to delivery creation only for legacy rows.
+    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [trip.id, fifteenDays]);
     await assert.rejects(
       pool.query(`UPDATE trip_deliveries SET rate = 1, amount = 1 WHERE id = $1`, [deliveryA]),
       /2-week insert window|2 weeks from the Shop Sale insert|locked/

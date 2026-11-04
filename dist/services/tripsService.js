@@ -69,10 +69,45 @@ const START_STEP_FIELDS = new Set([
     "expectedUpdatedAt",
     "updatedAt",
 ]);
+// A pickup correction must never replay the hydrated Step 4 rows. Besides
+// making an old client capable of overwriting newer per-shop saves, doing so
+// validates every delivery against the just-corrected pickup total and blocks
+// Step 3 with a Step 4 capacity error. Full delivery reconciliation belongs to
+// the Step 4 submit endpoint; the per-shop endpoint validates only rows that
+// the operator explicitly saves.
+const PICKUP_STEP_FIELDS = new Set([
+    "dcWeight",
+    "totalBirds",
+    "boxes",
+    "avgWeight",
+    "pickupLoadTime",
+    "dcPhotoKey",
+    "dcPhotoMime",
+    "dcPhotoData",
+    "dcPhotoKey2",
+    "dcPhotoMime2",
+    "dcPhotoData2",
+    "pickupPhotos",
+    "syncPickupPhotos",
+    "boxDetails",
+    "clearBoxDetails",
+    "pickupBoxWrite",
+    "importFingerprint",
+    "pickupStepSubmitted",
+    "legIndex",
+    "mode",
+    "expectedUpdatedAt",
+    "updatedAt",
+]);
 export function scopeTripStepBody(step, body) {
-    if (step !== "start")
+    const fields = step === "start"
+        ? START_STEP_FIELDS
+        : step === "pickup"
+            ? PICKUP_STEP_FIELDS
+            : null;
+    if (!fields)
         return { ...body };
-    return Object.fromEntries(Object.entries(body).filter(([key]) => START_STEP_FIELDS.has(key)));
+    return Object.fromEntries(Object.entries(body).filter(([key]) => fields.has(key)));
 }
 async function resolveDieselBunk(client, body) {
     const requestedSource = str(body.bunkSource).toUpperCase();
@@ -118,7 +153,7 @@ async function resolveDieselBunk(client, body) {
         gpsLat,
         gpsLon,
         gpsAccuracy: numOrNull(body.gpsAccuracy),
-        gpsCapturedAt: body.gpsCapturedAt != null ? str(body.gpsCapturedAt) : null,
+        gpsCapturedAt: isoOrNull(body.gpsCapturedAt),
     };
 }
 function mapTripBase(row) {
@@ -447,24 +482,24 @@ async function loadTripExtras(client, tripId, legId) {
         : `SELECT * FROM trip_boxes WHERE trip_id = $1 ORDER BY box_no`;
     const boxes = await client.query(boxSql, legId != null && legId > 0 ? [tripId, legId] : [tripId]);
     const delSql = legId != null && legId > 0
-        ? `SELECT * FROM trip_deliveries WHERE trip_id = $1 AND leg_id = $2 ORDER BY serial_no NULLS LAST, id`
-        : `SELECT * FROM trip_deliveries WHERE trip_id = $1 ORDER BY serial_no NULLS LAST, id`;
+        ? `SELECT * FROM trip_deliveries WHERE trip_id = $1 AND leg_id = $2 AND COALESCE(deleted, FALSE) = FALSE ORDER BY serial_no NULLS LAST, id`
+        : `SELECT * FROM trip_deliveries WHERE trip_id = $1 AND COALESCE(deleted, FALSE) = FALSE ORDER BY serial_no NULLS LAST, id`;
     const deliveries = await client.query(delSql, legId != null && legId > 0 ? [tripId, legId] : [tripId]);
     const diesel = await client.query(`SELECT * FROM trip_diesel_entries WHERE trip_id = $1 ORDER BY row_index`, [tripId]);
     const deliveryBoxes = await client.query(legId != null && legId > 0
         ? `SELECT db.* FROM trip_delivery_boxes db
          JOIN trip_deliveries d ON d.id = db.delivery_id
-         WHERE d.trip_id = $1 AND d.leg_id = $2`
+         WHERE d.trip_id = $1 AND d.leg_id = $2 AND COALESCE(d.deleted, FALSE) = FALSE`
         : `SELECT db.* FROM trip_delivery_boxes db
          JOIN trip_deliveries d ON d.id = db.delivery_id
-         WHERE d.trip_id = $1`, legId != null && legId > 0 ? [tripId, legId] : [tripId]);
+         WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE`, legId != null && legId > 0 ? [tripId, legId] : [tripId]);
     const perBox = await client.query(legId != null && legId > 0
         ? `SELECT pb.* FROM trip_delivery_per_box pb
          JOIN trip_deliveries d ON d.id = pb.delivery_id
-         WHERE d.trip_id = $1 AND d.leg_id = $2`
+         WHERE d.trip_id = $1 AND d.leg_id = $2 AND COALESCE(d.deleted, FALSE) = FALSE`
         : `SELECT pb.* FROM trip_delivery_per_box pb
          JOIN trip_deliveries d ON d.id = pb.delivery_id
-         WHERE d.trip_id = $1`, legId != null && legId > 0 ? [tripId, legId] : [tripId]);
+         WHERE d.trip_id = $1 AND COALESCE(d.deleted, FALSE) = FALSE`, legId != null && legId > 0 ? [tripId, legId] : [tripId]);
     const helpers = crew.rows
         .filter((r) => r.role === "helper")
         .map((r) => str(r.employee_name));
@@ -908,6 +943,70 @@ async function assertDeliveriesWithinCapacity(client, tripId, deliveries, legId)
     }
     const capacityBirds = farmBirdCount > 0 ? farmBirdCount : totalBirdsCap;
     const capacityWeight = farmLoadWeight > 0 ? farmLoadWeight : dcWeightCap;
+    // Final submit must validate the physical box assignments too, not only
+    // the aggregate load total. Step 3 can be corrected after deliveries were
+    // captured, leaving one or more shop rows with stale weights/box numbers.
+    // Report every affected shop in one response so the operator can repair
+    // only those rows instead of editing unrelated deliveries one by one.
+    const pickupBoxes = await client.query(legId != null && legId > 0
+        ? `SELECT box_no, birds, weight FROM trip_boxes WHERE trip_id = $1 AND leg_id = $2 ORDER BY box_no`
+        : `SELECT box_no, birds, weight FROM trip_boxes WHERE trip_id = $1 ORDER BY box_no`, legId != null && legId > 0 ? [tripId, legId] : [tripId]);
+    const boxesByNo = new Map();
+    for (const box of pickupBoxes.rows) {
+        boxesByNo.set(num(box.box_no), { birds: num(box.birds), weight: num(box.weight) });
+    }
+    const boxOwner = new Map();
+    const assignmentIssues = [];
+    const WEIGHT_TOLERANCE_KG = 0.05;
+    for (const d of deliveries) {
+        const remarks = String(d.remarks ?? "");
+        const isUncapturedOrderPlan = remarks.startsWith("[ORDER]") &&
+            !(d.autoCaptureTime ||
+                d.deliveredAt ||
+                d.deliveryTime);
+        if (isUncapturedOrderPlan)
+            continue;
+        const shop = String(d.shopName ?? "").trim() || `Shop ${d.shopId ?? "unknown"}`;
+        const selected = [...new Set((d.selectedBoxIds ?? []).map(Number))]
+            .filter((boxNo) => Number.isSafeInteger(boxNo) && boxNo > 0)
+            .sort((a, b) => a - b);
+        const boxLabel = selected.length ? selected.join(", ") : "none";
+        const missing = selected.filter((boxNo) => !boxesByNo.has(boxNo));
+        if (missing.length) {
+            assignmentIssues.push(`${shop}: boxes ${missing.join(", ")} no longer exist in Step 3 pickup.`);
+            continue;
+        }
+        const duplicated = selected.filter((boxNo) => {
+            const owner = boxOwner.get(boxNo);
+            if (!owner) {
+                boxOwner.set(boxNo, shop);
+                return false;
+            }
+            return owner !== shop;
+        });
+        if (duplicated.length) {
+            assignmentIssues.push(`${shop}: boxes ${duplicated.join(", ")} are also assigned to another shop.`);
+            continue;
+        }
+        // Legacy/API fixtures may predate physical box assignment. Their
+        // aggregate capacity is still validated below; only rows that actually
+        // carry selectedBoxIds can be diagnosed against specific boxes here.
+        if (!selected.length)
+            continue;
+        const availableBirds = selected.reduce((sum, boxNo) => sum + (boxesByNo.get(boxNo)?.birds ?? 0), 0);
+        const availableWeight = selected.reduce((sum, boxNo) => sum + (boxesByNo.get(boxNo)?.weight ?? 0), 0);
+        const requestedBirds = Number(d.birds ?? 0) + Number(d.mortality ?? 0);
+        const requestedWeight = Number(d.weight ?? 0) + Number(d.mortKg ?? 0);
+        if (requestedBirds > availableBirds) {
+            assignmentIssues.push(`${shop} (boxes ${boxLabel}): birds ${requestedBirds} exceed current box birds ${availableBirds}.`);
+        }
+        if (requestedWeight > availableWeight + WEIGHT_TOLERANCE_KG) {
+            assignmentIssues.push(`${shop} (boxes ${boxLabel}): weight ${requestedWeight.toFixed(2)} kg exceeds current box weight ${availableWeight.toFixed(2)} kg.`);
+        }
+    }
+    if (assignmentIssues.length) {
+        throw new AppError(422, `Step 3 pickup changed. Correct only these Step 4 deliveries: ${assignmentIssues.join(" ")}`);
+    }
     let totalBirds = 0;
     let totalWeight = 0;
     const orderBalances = new Map();
@@ -1106,8 +1205,8 @@ async function replaceDiesel(client, tripId, entries = []) {
             e.gpsLat ?? null,
             e.gpsLon ?? null,
             e.gpsAccuracy ?? null,
-            e.gpsCapturedAt ?? null,
-            e.submittedAt ?? null,
+            isoOrNull(e.gpsCapturedAt),
+            isoOrNull(e.submittedAt),
         ]);
     }
 }
@@ -1219,9 +1318,7 @@ function extractDieselFromBody(body) {
         gpsLat: numOrNull(body[`dieselGpsLat${rowIndex}`]),
         gpsLon: numOrNull(body[`dieselGpsLon${rowIndex}`]),
         gpsAccuracy: numOrNull(body[`dieselGpsAccuracy${rowIndex}`]),
-        gpsCapturedAt: body[`dieselGpsCapturedAt${rowIndex}`]
-            ? str(body[`dieselGpsCapturedAt${rowIndex}`])
-            : null,
+        gpsCapturedAt: isoOrNull(body[`dieselGpsCapturedAt${rowIndex}`]),
     }));
 }
 function flattenDiesel(entries) {
@@ -1439,7 +1536,7 @@ const recentLoadSummarySelect = `,
         'weight', totals.weight,
         'mortality', totals.mortality,
         'mortalityWeight', totals.mortality_weight,
-        'weightLoss', GREATEST(0, totals.dc_weight - totals.weight - totals.mortality_weight),
+        'weightLoss', totals.weight_loss,
         'shops', totals.shops
       ) ORDER BY totals.leg_index
     )
@@ -1449,7 +1546,13 @@ const recentLoadSummarySelect = `,
              COALESCE(SUM(delivery.birds), 0) AS birds,
              COALESCE(SUM(delivery.weight), 0) AS weight,
              COALESCE(SUM(delivery.mortality), 0) AS mortality,
-             COALESCE(SUM(delivery.mort_kg), 0) AS mortality_weight,
+             COALESCE(SUM(delivery.mort_kg) FILTER (WHERE delivery.delivery_mode = 'box'), 0) AS mortality_weight,
+             COALESCE(SUM(
+               CASE WHEN delivery.delivery_mode = 'weight'
+                 THEN GREATEST(0, COALESCE(delivery.farm_weight, 0) - COALESCE(delivery.weight, 0) - COALESCE(delivery.mort_kg, 0))
+                 ELSE 0
+               END
+             ), 0) AS weight_loss,
              COUNT(DISTINCT delivery.shop_id) AS shops
         FROM trip_legs leg
         LEFT JOIN trip_deliveries delivery
@@ -1503,7 +1606,7 @@ export const tripsService = {
             const pagedParams = [...params, filters.pagination.limit, filters.pagination.offset];
             const result = await query(`SELECT trips.*,
                 (SELECT COUNT(*) FROM trip_boxes b WHERE b.trip_id = trips.id) AS box_count,
-                (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id) AS delivery_count,
+                (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id AND COALESCE(d.deleted, FALSE) = FALSE) AS delivery_count,
                 (SELECT COUNT(*) FROM trip_diesel_entries e WHERE e.trip_id = trips.id) AS diesel_count
                 ${recentLoadSummarySelect}
          FROM trips ${where}
@@ -1514,7 +1617,7 @@ export const tripsService = {
         }
         const result = await query(`SELECT trips.*,
               (SELECT COUNT(*) FROM trip_boxes b WHERE b.trip_id = trips.id) AS box_count,
-              (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id) AS delivery_count,
+              (SELECT COUNT(*) FROM trip_deliveries d WHERE d.trip_id = trips.id AND COALESCE(d.deleted, FALSE) = FALSE) AS delivery_count,
               (SELECT COUNT(*) FROM trip_diesel_entries e WHERE e.trip_id = trips.id) AS diesel_count
               ${recentLoadSummarySelect}
        FROM trips ${where} ORDER BY trip_date DESC, id DESC`, params);
@@ -2265,14 +2368,11 @@ export const tripsService = {
                         await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
                             `pickup_import_${tripId}_${activeLeg.id}`,
                         ]);
-                        const inserted = await client.query(`INSERT INTO trip_pickup_import_fingerprints
+                        await client.query(`INSERT INTO trip_pickup_import_fingerprints
                  (trip_id, leg_id, hash_algorithm, hash_version, content_hash, original_filename, byte_length)
                VALUES ($1,$2,$3,$4,$5,$6,$7)
                ON CONFLICT (trip_id, leg_id, hash_algorithm, hash_version, content_hash) DO NOTHING
                RETURNING id`, [tripId, activeLeg.id, algorithm, version, hash, filename.slice(0, 255), byteLength]);
-                        if (!inserted.rowCount) {
-                            throw new AppError(409, "This file has already been imported for the current load.");
-                        }
                     }
                     if (body.boxDetails.length === 0 && body.clearBoxDetails === true) {
                         await client.query(`DELETE FROM trip_pickup_import_fingerprints WHERE trip_id = $1 AND leg_id = $2`, [tripId, activeLeg.id]);
@@ -2574,34 +2674,6 @@ export const tripsService = {
             const usedBoxes = new Set();
             for (const r of otherBoxes.rows)
                 usedBoxes.add(num(r.box_no));
-            // Cross-shop totals from live persisted rows on THIS load, minus rows we replace.
-            let totalBirds = 0;
-            let totalWeight = 0;
-            for (const r of existingRows) {
-                totalBirds += r.birds + r.mortality;
-                totalWeight += r.weight + r.mortKg;
-            }
-            // Assignment-plan rows carry proportional birds/weight for reporting,
-            // but are not physical deliveries. sumActiveDeliveries sees every live
-            // row, so remove uncaptured Orders plans before applying real-capture
-            // capacity checks below.
-            // (existingRows is already scoped to this load's leg_id.)
-            for (const r of existingRows) {
-                const isUncapturedOrderPlan = r.remarks.startsWith("[ORDER]") && !r.autoCaptureTime;
-                if (!isUncapturedOrderPlan)
-                    continue;
-                totalBirds -= r.birds + r.mortality;
-                totalWeight -= r.weight + r.mortKg;
-            }
-            for (const id of excludedIds) {
-                const r = existingRows.find((x) => x.id === id);
-                if (!r)
-                    continue;
-                if (r.remarks.startsWith("[ORDER]") && !r.autoCaptureTime)
-                    continue;
-                totalBirds -= r.birds + r.mortality;
-                totalWeight -= r.weight + r.mortKg;
-            }
             const tripNo = tripRow.trip_no ? str(tripRow.trip_no) : `TR-${tripId}`;
             let maxSerial = 0;
             for (const r of existingRows) {
@@ -2699,13 +2771,6 @@ export const tripsService = {
                             throw new AppError(422, `Box #${pb.boxNo} delivered weight exceeds its available weight (${box.weight.toFixed(2)} kg).`);
                         }
                     }
-                }
-                // Cross-shop totals — only real captures count against pickup capacity.
-                if (enforceBoxCapacity) {
-                    totalBirds += birds + mortality;
-                    totalWeight = Number((totalWeight + weight + mortKg).toFixed(2));
-                    assertWithinCapacity({ label: "birds", available: capacityBirds, alreadyAllocated: 0, requested: totalBirds });
-                    assertWithinCapacity({ label: "weight", available: capacityWeight, alreadyAllocated: 0, requested: totalWeight });
                 }
                 // Ignore client-calculated totals; this prevents tampering and keeps
                 // retries/edits consistent with the persisted weight and rate.
@@ -2806,6 +2871,11 @@ export const tripsService = {
                     await client.query(`INSERT INTO trip_delivery_per_box (delivery_id, box_no, birds, weight) VALUES ($1,$2,$3,$4)`, [deliveryId, Number(pb.boxNo), Number(pb.birds ?? 0), Number(pb.weight ?? 0)]);
                 }
             }
+            // Deliberately do not enforce the whole-load aggregate here. This is a
+            // per-shop persistence endpoint: the edited delivery is checked against
+            // its selected pickup boxes above, while other shops remain independent.
+            // The final Step 4 submit performs the authoritative whole-load birds and
+            // weight reconciliation and blocks submission until the trip balances.
             // The database, rather than a possibly stale browser, owns this sequence.
             // This also repairs legacy duplicate/gapped numbers on the next save.
             await normalizeDeliverySerials(client, tripId, activeLeg.id);
@@ -3285,7 +3355,7 @@ export const tripsService = {
         AND id <> $1`;
         const vehicles = await query(`SELECT id, vehicle_number, no_of_boxes, is_rented
          FROM vehicles
-        WHERE status = 'Active' AND id NOT IN (
+        WHERE status = 'Active' AND COALESCE(is_personal, FALSE) = FALSE AND id NOT IN (
           SELECT vehicle_id FROM trips
           ${occupied} AND vehicle_id IS NOT NULL
         )
@@ -3506,7 +3576,7 @@ export const tripsService = {
                 gpsLat,
                 gpsLon,
                 gpsAccuracy,
-                gpsCapturedAt,
+                isoOrNull(gpsCapturedAt),
             ]);
             // Mirror into Fuel Expenses immediately so Trip List completion only has
             // to approve — bills are never "missing" after a successful Step 5 diesel submit.
@@ -3638,7 +3708,7 @@ export const tripsService = {
                 gpsLat,
                 gpsLon,
                 gpsAccuracy,
-                gpsCapturedAt,
+                isoOrNull(gpsCapturedAt),
             ]);
             await syncTripFuelFromDb(client, tripId, {
                 approveIfCompleted: true,

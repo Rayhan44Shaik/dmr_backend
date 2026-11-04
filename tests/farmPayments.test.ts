@@ -124,7 +124,7 @@ describe("farmPaymentsService", () => {
     }
   });
 
-  it("combines every submitted load into one completed-trip farm payment", async () => {
+  it("keeps one parent farm payment per completed trip with a full load breakdown", async () => {
     const trip = await pool.query<{ id: number }>(
       `INSERT INTO trips (
          trip_no, trip_date, status, deleted, pickup_step_submitted, leg_count,
@@ -160,11 +160,18 @@ describe("farmPaymentsService", () => {
       [1, 40, 80],
       [2, 60, 120],
     ]);
+    // Every load carries its own identity, rate and amount.
+    for (const load of row.loads) {
+      assert.ok(load.legId > 0, "load carries its trip_legs id");
+      assert.equal(typeof load.rate, "number");
+      assert.equal(typeof load.amount, "number");
+    }
 
     const [saved] = await farmPaymentsService.upsertMany([{ tripId, rate: 10 }]);
     assert.equal(saved.totalBirds, 100);
     assert.equal(saved.dcWeight, 200);
     assert.equal(saved.amount, 2000, "rate applies to Load 1 + Load 2 DC weight");
     assert.equal(saved.loads.length, 2);
+    assert.deepEqual(saved.loads.map((load) => load.amount), [800, 1200]);
   });
 });

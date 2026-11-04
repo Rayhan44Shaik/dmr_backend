@@ -140,6 +140,12 @@ async function addDelivery(tripId: number, shopId: number, shopName: string, amo
  * Opens a shop at `opening`, creates a Completed + Rate-Locked trip carrying a
  * delivery worth `saleAmount`. The rate-lock trigger bakes the sale DEBIT, so
  * current outstanding = opening + saleAmount.
+ *
+ * A `saleAmount` of 0 means "no sale": no delivery is seeded and the trip is
+ * left unlocked, because the rate-lock rule requires every rateable delivery
+ * to carry a positive rate (migration 086: amount = weight x rate, so a
+ * zero-amount delivery can never satisfy it). Callers that pass 0 only need
+ * the shop itself.
  */
 async function seedShopWithDebit(
   opening: number,
@@ -154,10 +160,12 @@ async function seedShopWithDebit(
     totalBirds: 1000,
     dcWeight: 1800,
   });
-  await addDelivery(trip.id, shop.id, shop.name, saleAmount);
-  await recalcTripDeliveryTotals(pool as never, trip.id);
-  const lock = await rateEntryService.lock(trip.id, { lockedBy: "ce-test" });
-  assert.ok(lock.rateLocked, "trip must be rate-locked to expose Shop Sales");
+  if (saleAmount > 0) {
+    await addDelivery(trip.id, shop.id, shop.name, saleAmount);
+    await recalcTripDeliveryTotals(pool as never, trip.id);
+    const lock = await rateEntryService.lock(trip.id, { lockedBy: "ce-test" });
+    assert.ok(lock.rateLocked, "trip must be rate-locked to expose Shop Sales");
+  }
   await pool.query(`UPDATE trips SET approved_at = NOW() WHERE id = $1`, [trip.id]);
   return { shop, tripId: trip.id };
 }

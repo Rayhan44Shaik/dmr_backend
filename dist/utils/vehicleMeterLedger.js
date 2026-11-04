@@ -1,20 +1,13 @@
 import { query } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
-import { dateOnly, num, str } from "./coerce.js";
+import { dateOnly, isoOrNull, num, str } from "./coerce.js";
 /**
  * Millisecond-precise ISO string for a DB timestamptz value being re-used as
- * a validateVehicleMeter `eventInstant`. NOT the same as coerce.ts's
- * isoOrNull(), which round-trips through Date.toString() and silently
- * truncates to whole seconds — harmless for display, but two records
- * created within the same second then collapse to the same instant (or
- * worse, one that no longer reflects true creation order), which is exactly
- * the precision this validator depends on to pick the right neighbor.
+ * a validateVehicleMeter `eventInstant`. Delegates to isoOrNull so Date
+ * objects keep milliseconds (never Date.toString() locale forms).
  */
 export function preciseIsoOrUndefined(value) {
-    if (value == null)
-        return undefined;
-    const d = value instanceof Date ? value : new Date(value);
-    return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+    return isoOrNull(value) ?? undefined;
 }
 const SOURCE_LABELS = {
     TRIP_START: "Trip start",

@@ -29,9 +29,16 @@ export function computeTripKpis(opts) {
     const totalDeliveredWeight = round3(deliveries.reduce((sum, d) => sum + Number(d.weight ?? 0), 0));
     const totalBirdsDelivered = deliveries.reduce((sum, d) => sum + Number(d.birds ?? 0), 0);
     const totalMortalityCount = deliveries.reduce((sum, d) => sum + Number(d.mortality ?? 0), 0);
-    const totalMortalityWeight = round3(deliveries.reduce((sum, d) => sum + Number(d.mortKg ?? 0), 0));
+    const totalMortalityWeight = round3(deliveries.reduce((sum, d) => sum + ((d.deliveryMode ?? "box") === "box" ? Number(d.mortKg ?? 0) : 0), 0));
     const totalMortality = totalMortalityWeight;
-    const weightLoss = round3(farmLoadWeight - totalDeliveredWeight - totalMortalityWeight);
+    // Weight loss is a weight-mode delivery fact, not the whole-load residual.
+    // Box-mode rounding differences must never inflate this KPI.
+    const weightLoss = round3(deliveries.reduce((sum, d) => {
+        if ((d.deliveryMode ?? "box") !== "weight")
+            return sum;
+        const rowLoss = Number(d.farmWeight ?? 0) - Number(d.weight ?? 0) - Number(d.mortKg ?? 0);
+        return sum + Math.max(0, rowLoss);
+    }, 0));
     const survivalRate = farmBirdCount > 0 ? round4(totalBirdsDelivered / farmBirdCount) : 0;
     const totalShops = deliveries.length;
     const lastShop = deliveries.length > 0 ? deliveries[deliveries.length - 1].shopName || null : null;

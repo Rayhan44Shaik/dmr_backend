@@ -36,6 +36,7 @@ import {
 } from "../utils/tripCalculations.js";
 import { loadDcPhoto, syncDieselToFuelExpenses, syncTripFuelFromDb } from "../utils/tripFuelSync.js";
 import { assertWithinCapacity, generateSaleNo, recalcTripDeliveryTotals, sumActiveDeliveries } from "../utils/tripDeliverySync.js";
+import { removeTripSaleLedger } from "../utils/shopLedger.js";
 import {
   getLatestVehicleMeter,
   lockVehicleForMeterWrite,
@@ -3957,6 +3958,10 @@ export const tripsService = {
       );
       if (!result.rowCount) throw new AppError(404, `Trip ${id} not found`);
       await client.query(`UPDATE fuel_expenses SET deleted = TRUE WHERE trip_id = $1 AND source_type = 'TRIP' AND COALESCE(deleted, FALSE) = FALSE`, [id]);
+      // A deleted trip takes its baked Shop Sales with it so the ledger can
+      // never show debits the Cumulative view (which ignores deleted trips)
+      // no longer counts. Collections are independent cash records.
+      await removeTripSaleLedger(client, id);
       return { id, deleted: true };
     });
   },
@@ -4026,6 +4031,7 @@ export const tripsService = {
             [id, body.reason ?? body.rejectedReason ?? null]
           );
           await client.query(`UPDATE fuel_expenses SET deleted = TRUE WHERE trip_id = $1 AND source_type = 'TRIP' AND COALESCE(deleted, FALSE) = FALSE`, [id]);
+          await removeTripSaleLedger(client, id);
         } else {
           result = await client.query(
             `UPDATE trips SET status = $2::trip_status, deleted = FALSE WHERE id = $1 RETURNING *`,

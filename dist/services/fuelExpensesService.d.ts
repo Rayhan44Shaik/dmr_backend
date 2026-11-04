@@ -10,6 +10,7 @@ export declare const fuelExpensesService: {
         sourceType?: string;
         search?: string;
         includeDeleted?: boolean;
+        includeMasterBunks?: boolean;
         pagination?: PaginationParams | null;
     }): Promise<FuelExpense[] | PaginatedResult<FuelExpense>>;
     getById(id: string): Promise<FuelExpense>;
@@ -23,5 +24,9 @@ export declare const fuelExpensesService: {
     approve(id: string, body: unknown): Promise<FuelExpense>;
     /** Reject a PENDING manual fuel expense. A reason is mandatory. */
     reject(id: string, body: unknown): Promise<FuelExpense>;
-    softDelete(id: string, reason?: string): Promise<FuelExpense>;
+    softDelete(id: string, reason?: string): Promise<{
+        id: string;
+        deleted: boolean;
+        deletedReason: string | null;
+    }>;
 };

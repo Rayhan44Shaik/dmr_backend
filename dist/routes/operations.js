@@ -12,6 +12,7 @@ import { shopSalesService } from "../services/shopSalesService.js";
 import { shopLedgerService } from "../services/shopLedgerService.js";
 import { tripsService } from "../services/tripsService.js";
 import { tripExpensesService } from "../services/tripExpensesService.js";
+import { manualExpensesService } from "../services/manualExpensesService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { operationsSensitiveBoundary, operationsTripsBoundary } from "../middleware/businessBoundary.js";
 import { operationsPendingDeleteRouter } from "./operations_pending_delete.js";
@@ -34,6 +35,17 @@ function tripListFilters(req) {
 function opsListPagination(req) {
     const { params, enabled } = parsePagination(req.query);
     return enabled ? params : null;
+}
+function optionalPositiveInt(value) {
+    if (value == null || value === "")
+        return undefined;
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 1)
+        return undefined;
+    return parsed;
+}
+function optionalIsoDate(value) {
+    return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
 }
 // ── Dashboard ────────────────────────────────────────────────────
 operationsRouter.get("/dashboard", asyncHandler(async (req, res) => {
@@ -64,16 +76,48 @@ operationsRouter.get("/trips", asyncHandler(async (req, res) => {
 }));
 /** Completed Step-5 expense register. Draft/Pending/Deleted trips are excluded in SQL. */
 operationsRouter.get("/expenses", asyncHandler(async (req, res) => {
+    const fromDate = optionalIsoDate(req.query.fromDate);
+    const toDate = optionalIsoDate(req.query.toDate);
+    const vehicleId = optionalPositiveInt(req.query.vehicleId);
+    const supervisorId = optionalPositiveInt(req.query.supervisorId);
+    const isExport = req.query.export === "true";
+    if (isExport && !fromDate && !toDate && !vehicleId && !supervisorId) {
+        throw new AppError(400, "Choose a date, vehicle or supervisor to export");
+    }
+    const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 80) : undefined;
     res.json(await tripExpensesService.list({
-        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
-        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
-        supervisorId: req.query.supervisorId ? Number(req.query.supervisorId) : undefined,
-        search: typeof req.query.search === "string" ? req.query.search : undefined,
+        fromDate,
+        toDate,
+        vehicleId,
+        supervisorId,
+        search: search || undefined,
         sortBy: typeof req.query.sortBy === "string" ? req.query.sortBy : undefined,
         sortDir: req.query.sortDir === "asc" ? "asc" : "desc",
-        pagination: opsListPagination(req),
+        includeMasterBunks: req.query.includeMasterBunks !== "false" &&
+            req.query.includeMasterBunks !== "0" &&
+            req.query.includeShiva !== "false" &&
+            req.query.includeShiva !== "0",
+        pagination: isExport ? null : opsListPagination(req) ?? { page: 1, limit: 50, offset: 0 },
     }));
+}));
+operationsRouter.get("/expenses/manual", asyncHandler(async (req, res) => {
+    res.json(await manualExpensesService.list({
+        fromDate: optionalIsoDate(req.query.fromDate),
+        toDate: optionalIsoDate(req.query.toDate),
+        search: typeof req.query.search === "string" ? req.query.search.trim().slice(0, 80) : undefined,
+    }));
+}));
+operationsRouter.post("/expenses/manual", asyncHandler(async (req, res) => {
+    res.status(201).json(await manualExpensesService.create(req.body, authUser(res).displayName));
+}));
+operationsRouter.put("/expenses/manual/:id", asyncHandler(async (req, res) => {
+    res.json(await manualExpensesService.update(Number(req.params.id), req.body));
+}));
+operationsRouter.post("/expenses/manual/:id/approve", asyncHandler(async (req, res) => {
+    res.json(await manualExpensesService.approve(Number(req.params.id), authUser(res).displayName));
+}));
+operationsRouter.delete("/expenses/manual/:id", asyncHandler(async (req, res) => {
+    res.json(await manualExpensesService.remove(Number(req.params.id)));
 }));
 operationsRouter.get("/trips/:id", asyncHandler(async (req, res) => {
     res.json(await tripsService.getById(Number(req.params.id)));
@@ -115,14 +159,12 @@ operationsRouter.delete("/trips/:id", asyncHandler(async (req, res) => {
 operationsRouter.get("/rate-entry", asyncHandler(async (req, res) => {
     const { params: pagination, enabled } = parsePagination(req.query);
     res.json(await rateEntryService.list({
-        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
-        vehicleId: req.query.vehicleId ? Number(req.query.vehicleId) : undefined,
-        supervisorId: req.query.supervisorId
-            ? Number(req.query.supervisorId)
-            : undefined,
-        driverId: req.query.driverId ? Number(req.query.driverId) : undefined,
-        farmId: req.query.farmId ? Number(req.query.farmId) : undefined,
+        fromDate: optionalIsoDate(req.query.fromDate),
+        toDate: optionalIsoDate(req.query.toDate),
+        vehicleId: optionalPositiveInt(req.query.vehicleId),
+        supervisorId: optionalPositiveInt(req.query.supervisorId),
+        driverId: optionalPositiveInt(req.query.driverId),
+        farmId: optionalPositiveInt(req.query.farmId),
         search: typeof req.query.search === "string" ? req.query.search : undefined,
         pagination: enabled ? pagination : null,
     }));
@@ -202,6 +244,12 @@ operationsRouter.get("/shop-sales/:id", asyncHandler(async (req, res) => {
 operationsRouter.post("/shop-sales", asyncHandler(async (req, res) => {
     res.status(201).json(await shopSalesService.create(req.body));
 }));
+operationsRouter.put("/shop-sales/trip/:tripId/deliveries", asyncHandler(async (req, res) => {
+    res.json(await shopSalesService.updateTrip(Number(req.params.tripId), req.body));
+}));
+operationsRouter.put("/shop-sales/trip/:tripId/load/:load", asyncHandler(async (req, res) => {
+    res.json(await shopSalesService.updateLoad(Number(req.params.tripId), Number(req.params.load), req.body));
+}));
 operationsRouter.put("/shop-sales/:id", asyncHandler(async (req, res) => {
     res.json(await shopSalesService.update(Number(req.params.id), req.body));
 }));
@@ -259,8 +307,8 @@ operationsRouter.delete("/collections/:id", asyncHandler(async (req, res) => {
 operationsRouter.get("/shop-ledger", asyncHandler(async (req, res) => {
     res.json(await shopLedgerService.list({
         shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
-        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        fromDate: optionalIsoDate(req.query.fromDate),
+        toDate: optionalIsoDate(req.query.toDate),
         pagination: opsListPagination(req),
     }));
 }));
@@ -276,9 +324,9 @@ operationsRouter.use("/collection-entry", operationsPendingDeleteRouter);
 // The existing /collections endpoints above are preserved unmodified.
 function collectionEntryFilters(req) {
     return {
-        shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
-        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        shopId: optionalPositiveInt(req.query.shopId),
+        fromDate: optionalIsoDate(req.query.fromDate),
+        toDate: optionalIsoDate(req.query.toDate),
         status: typeof req.query.status === "string" ? req.query.status : undefined,
         includeDeleted: req.query.includeDeleted === "true",
         pagination: opsListPagination(req),
@@ -287,10 +335,22 @@ function collectionEntryFilters(req) {
 operationsRouter.get("/collection-entry", asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.list(collectionEntryFilters(req)));
 }));
+operationsRouter.get("/shop-ledger/cumulative", asyncHandler(async (req, res) => {
+    const reportType = req.query.reportType;
+    if (reportType != null && !["all", "sales", "collection"].includes(String(reportType))) {
+        throw new AppError(400, "Invalid reportType");
+    }
+    res.json(await shopLedgerService.cumulative({
+        shopId: optionalPositiveInt(req.query.shopId),
+        fromDate: optionalIsoDate(req.query.fromDate),
+        toDate: optionalIsoDate(req.query.toDate),
+        reportType: reportType == null ? "all" : String(reportType),
+    }));
+}));
 operationsRouter.get("/shop-ledger/cumulative-quantities", asyncHandler(async (req, res) => {
     res.json(await shopLedgerService.cumulativeQuantities({
-        fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
-        toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
+        fromDate: optionalIsoDate(req.query.fromDate),
+        toDate: optionalIsoDate(req.query.toDate),
     }));
 }));
 // Keep named collection routes above /collection-entry/:id. Otherwise Express
@@ -315,7 +375,9 @@ operationsRouter.get("/collection-entry/week-bounds", asyncHandler(async (req, r
     res.json(await collectionEntryService.weekBounds(typeof req.query.date === "string" ? req.query.date : undefined, req.query.period === "previous-completed"));
 }));
 operationsRouter.get("/collection-entry/pending-summary", asyncHandler(async (req, res) => {
-    res.json(await collectionEntryService.pendingSummary(typeof req.query.date === "string" ? req.query.date : undefined));
+    const fromDate = typeof req.query.fromDate === "string" ? req.query.fromDate : undefined;
+    const toDate = typeof req.query.toDate === "string" ? req.query.toDate : undefined;
+    res.json(await collectionEntryService.pendingSummary(typeof req.query.date === "string" ? req.query.date : undefined, fromDate && toDate ? { fromDate, toDate } : undefined));
 }));
 operationsRouter.get("/collection-entry/report", asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.report({
@@ -326,11 +388,24 @@ operationsRouter.get("/collection-entry/report", asyncHandler(async (req, res) =
         paymentMode: typeof req.query.paymentMode === "string" ? req.query.paymentMode : undefined,
     }));
 }));
+operationsRouter.get("/collection-entry/import-masters", asyncHandler(async (_req, res) => {
+    res.json(await collectionEntryService.importMasters());
+}));
 operationsRouter.get("/collection-entry/:id", asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.getById(Number(req.params.id)));
 }));
 operationsRouter.post("/collection-entry", asyncHandler(async (req, res) => {
     res.status(201).json(await collectionEntryService.create(req.body));
+}));
+operationsRouter.post("/collection-entry/import-validate", asyncHandler(async (req, res) => {
+    res.json(await collectionEntryService.validateImport(req.body));
+}));
+operationsRouter.post("/collection-entry/import", asyncHandler(async (req, res) => {
+    res.status(201).json(await collectionEntryService.importMany(req.body, authUser(res).displayName));
+}));
+operationsRouter.post("/collection-entry/bulk-approve", asyncHandler(async (req, res) => {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number) : [];
+    res.json(await collectionEntryService.approveMany(ids, { approvedBy: authUser(res).displayName }));
 }));
 operationsRouter.put("/collection-entry/:id", asyncHandler(async (req, res) => {
     res.json(await collectionEntryService.update(Number(req.params.id), req.body));
@@ -358,6 +433,7 @@ operationsRouter.get("/fuel-expenses", asyncHandler(async (req, res) => {
         sourceType: typeof req.query.sourceType === "string" ? req.query.sourceType : undefined,
         search: typeof req.query.search === "string" ? req.query.search : undefined,
         includeDeleted: req.query.includeDeleted === "true",
+        includeMasterBunks: req.query.includeMasterBunks !== "false" && req.query.includeMasterBunks !== "0",
         pagination: opsListPagination(req),
     }));
 }));

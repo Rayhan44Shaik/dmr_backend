@@ -166,6 +166,14 @@ export interface CollectionEntry {
 
 export type FuelSourceType = "TRIP" | "MANUAL";
 
+/** One pickup-submitted load of the trip linked to a fuel bill (DC/load context). */
+export interface FuelTripLoad {
+  load: number;
+  farmName: string | null;
+  dcWeight: number;
+  birds: number;
+}
+
 export interface FuelExpense {
   id: string;
   billNo: string;
@@ -192,6 +200,15 @@ export interface FuelExpense {
   gpsCapturedAt?: string | null;
   remarks?: string | null;
   status: OpsRecordStatus;
+  /** Authoritative saved trip distance (trips.total_km, falling back to
+   * end_meter − opening_meter) for trip-linked bills; null otherwise.
+   * Fuel Expenses only reads this saved trip source of truth — it never
+   * stores its own distance. */
+  travelDistance?: number | null;
+  /** Number of pickup-submitted loads on the linked trip; null when unlinked. */
+  tripLoadCount?: number | null;
+  /** Per-load DC/farm context of the linked trip for the Load 1/Load 2 display. */
+  tripLoads?: FuelTripLoad[];
   imageData?: string | null;
   imageName?: string | null;
   imageMime?: string | null;

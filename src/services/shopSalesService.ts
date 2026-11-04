@@ -36,6 +36,7 @@ import {
   applyCredit,
   applyDebit,
   recalcShopBalance,
+  removeShopSaleLedger,
   setLedgerNet,
 } from "../utils/shopLedger.js";
 
@@ -212,16 +213,25 @@ async function synchronizeShopSaleLedger(
     `SELECT l.id, l.debit, l.credit FROM shop_ledger l
       WHERE l.shop_id = $1 AND ((l.reference_type = 'shop_sale' AND l.reference_id = $2)
         OR (l.reference_type = 'trip' AND l.reference_id = $3))
-      ORDER BY CASE WHEN l.reference_type = 'shop_sale' AND l.entry_type = 'correction' THEN 0
-                    WHEN l.reference_type = 'shop_sale' THEN 1 ELSE 2 END, l.id DESC
+      ORDER BY CASE WHEN l.reference_type = 'shop_sale' AND l.entry_type = 'sale' THEN 0
+                    WHEN l.reference_type = 'trip' AND l.entry_type = 'sale' THEN 1
+                    WHEN l.reference_type = 'shop_sale' THEN 2 ELSE 3 END, l.id DESC
       LIMIT 1 FOR UPDATE`, [shopId, saleId, trip.id]
   );
   if (oldShopId != null && oldShopId !== newShopId) {
-    const oldLedger = await findLedger(oldShopId);
-    if (oldLedger.rowCount) {
-      const row = oldLedger.rows[0];
-      const next = Number((num(row.debit) - num(row.credit) - oldAmount).toFixed(2));
-      await setLedgerNet(client, num(row.id), oldShopId, next, "Shop sale reassigned to another shop");
+    // The sale leaves the old shop entirely: its one authoritative row is
+    // removed in place (collections-style) so the old shop keeps no
+    // lingering adjustment row and both views stay in perfect agreement.
+    const removed = await removeShopSaleLedger(client, oldShopId, saleId);
+    if (removed === 0) {
+      // Legacy trip-level rows cannot be removed per delivery: net the old
+      // shop's row down instead so its outstanding drops by this sale.
+      const oldLedger = await findLedger(oldShopId);
+      if (oldLedger.rowCount) {
+        const row = oldLedger.rows[0];
+        const next = Number((num(row.debit) - num(row.credit) - oldAmount).toFixed(2));
+        await setLedgerNet(client, num(row.id), oldShopId, next, "Shop sale reassigned to another shop");
+      }
     }
   }
   if (newShopId != null && oldShopId !== newShopId) {
@@ -238,48 +248,6 @@ async function synchronizeShopSaleLedger(
       await setLedgerNet(client, num(row.id), newShopId, next, "Shop sale updated in Shop Sales");
     }
   }
-}
-
-/** Keep the one authoritative debit for a delivery aligned with its current
- * amount. This also repairs legacy deliveries that reached Shop Sales without
- * a ledger row, which is why cumulative reports could show birds but ₹0 sale. */
-async function synchronizeExistingShopSaleAmount(
-  client: Client,
-  trip: TripRow,
-  saleId: number,
-  shopId: number,
-  oldAmount: number,
-  newAmount: number,
-  note: string,
-): Promise<void> {
-  const ledger = await client.query<{ id: number; debit: string; credit: string }>(
-    `SELECT id, debit, credit
-       FROM shop_ledger
-      WHERE shop_id = $1
-        AND (
-          (reference_type = 'shop_sale' AND reference_id = $2)
-          OR (reference_type = 'trip' AND reference_id = $3)
-        )
-      ORDER BY CASE WHEN reference_type = 'shop_sale' THEN 0 ELSE 1 END, id DESC
-      LIMIT 1
-      FOR UPDATE`,
-    [shopId, saleId, trip.id],
-  );
-  if (!ledger.rowCount) {
-    if (newAmount > 0) {
-      await applyDebit(client, shopId, {
-        entryDate: dateOnly(trip.tripDate) ?? "",
-        entryType: "sale",
-        referenceType: "shop_sale",
-        referenceId: saleId,
-        note: `${note} (ledger repaired)`,
-      }, newAmount);
-    }
-    return;
-  }
-  const currentNet = num(ledger.rows[0].debit) - num(ledger.rows[0].credit);
-  const adjusted = Number((currentNet + newAmount - oldAmount).toFixed(2));
-  await setLedgerNet(client, num(ledger.rows[0].id), shopId, adjusted, note);
 }
 
 async function lockTrip(client: Client, tripId: number, legId?: number | null): Promise<TripRow> {
@@ -504,7 +472,13 @@ export const shopSalesService = {
           const oldShopId = old.shop_id == null ? null : num(old.shop_id);
           const oldAmount = num(old.amount);
           await client.query(`UPDATE trip_deliveries SET deleted=TRUE,deleted_at=NOW(),deleted_reason='Removed from Shop Sales trip editor',updated_at=NOW() WHERE id=$1`, [row.id]);
-          if (oldShopId != null && oldAmount > 0) await applyCredit(client, oldShopId, { entryDate: dateOnly(trip.tripDate) ?? "", entryType: "correction", referenceType: "shop_sale", referenceId: row.id!, note: "Shop sale debit reversed (zero delivery removed)" }, oldAmount);
+          if (oldShopId != null) {
+            // The deleted sale's one authoritative row goes away
+            // (collections-style). Only legacy trip-level rows, which cannot
+            // be removed per delivery, still get an offsetting correction.
+            const removed = await removeShopSaleLedger(client, oldShopId, row.id!);
+            if (removed === 0 && oldAmount > 0) await applyCredit(client, oldShopId, { entryDate: dateOnly(trip.tripDate) ?? "", entryType: "correction", referenceType: "shop_sale", referenceId: row.id!, note: "Shop sale debit reversed (zero delivery removed)" }, oldAmount);
+          }
           continue;
         }
         const amount = computeAmount(row.weight, row.rate);
@@ -526,9 +500,6 @@ export const shopSalesService = {
             [row.id, row.shopId, row.birds, row.weight, row.mortality, row.mortalityWeight, row.deliveryMode, row.rate, amount, str(row.remarks ?? "").trim().toLocaleUpperCase("en-IN")]
           );
           if (oldShopId !== row.shopId) await synchronizeShopSaleLedger(client, { trip, saleId: row.id!, oldShopId, newShopId: row.shopId, oldAmount, newAmount: amount });
-          else if (oldShopId != null && amount !== oldAmount) {
-            await synchronizeExistingShopSaleAmount(client, trip, row.id!, oldShopId, oldAmount, amount, "Shop sale updated from trip load editor");
-          }
         } else {
           const saleNo = await generateSaleNo(client, tripId, trip.tripNo);
           const inserted = await client.query<{ id: number }>(`INSERT INTO trip_deliveries(trip_id,leg_id,sale_no,shop_id,shop_name,birds,weight,mortality,mort_kg,delivery_mode,rate,amount,remarks) SELECT $1,$2,$3,$4,shop_name,$5,$6,$7,$8,$9,$10,$11,$12 FROM shops WHERE id=$4 RETURNING id`, [tripId, leg.id, saleNo, row.shopId, row.birds, row.weight, row.mortality, row.mortalityWeight, row.deliveryMode, row.rate, amount, str(row.remarks ?? "").trim().toLocaleUpperCase("en-IN")]);
@@ -594,7 +565,13 @@ export const shopSalesService = {
           const oldShopId = old.shop_id == null ? null : num(old.shop_id);
           const oldAmount = num(old.amount);
           await client.query(`UPDATE trip_deliveries SET deleted=TRUE,deleted_at=NOW(),deleted_reason='Removed from Shop Sales trip editor',updated_at=NOW() WHERE id=$1`, [row.id]);
-          if (oldShopId != null && oldAmount > 0) await applyCredit(client, oldShopId, { entryDate: dateOnly(trip.tripDate) ?? "", entryType: "correction", referenceType: "shop_sale", referenceId: row.id!, note: "Shop sale debit reversed (zero delivery removed)" }, oldAmount);
+          if (oldShopId != null) {
+            // The deleted sale's one authoritative row goes away
+            // (collections-style). Only legacy trip-level rows, which cannot
+            // be removed per delivery, still get an offsetting correction.
+            const removed = await removeShopSaleLedger(client, oldShopId, row.id!);
+            if (removed === 0 && oldAmount > 0) await applyCredit(client, oldShopId, { entryDate: dateOnly(trip.tripDate) ?? "", entryType: "correction", referenceType: "shop_sale", referenceId: row.id!, note: "Shop sale debit reversed (zero delivery removed)" }, oldAmount);
+          }
           continue;
         }
         const amount = computeAmount(row.weight, row.rate);
@@ -613,9 +590,6 @@ export const shopSalesService = {
           const oldAmount = num(old.amount);
           await client.query(`UPDATE trip_deliveries SET leg_id=$2,shop_id=$3,birds=$4,weight=$5,mortality=$6,mort_kg=$7,delivery_mode=$8,rate=$9,amount=$10,remarks=$11,updated_at=NOW() WHERE id=$1`, [row.id, leg.id, row.shopId, row.birds, row.weight, row.mortality, row.mortalityWeight, row.deliveryMode, row.rate, amount, str(row.remarks ?? "").trim().toLocaleUpperCase("en-IN")]);
           if (oldShopId !== row.shopId) await synchronizeShopSaleLedger(client, { trip, saleId: row.id!, oldShopId, newShopId: row.shopId, oldAmount, newAmount: amount });
-          else if (oldShopId != null && amount !== oldAmount) {
-            await synchronizeExistingShopSaleAmount(client, trip, row.id!, oldShopId, oldAmount, amount, "Shop sale updated from trip editor");
-          }
         } else {
           const saleNo = await generateSaleNo(client, tripId, trip.tripNo);
           const inserted = await client.query<{ id: number }>(`INSERT INTO trip_deliveries(trip_id,leg_id,sale_no,shop_id,shop_name,birds,weight,mortality,mort_kg,delivery_mode,rate,amount,remarks) SELECT $1,$2,$3,$4,shop_name,$5,$6,$7,$8,$9,$10,$11,$12 FROM shops WHERE id=$4 RETURNING id`, [tripId, leg.id, saleNo, row.shopId, row.birds, row.weight, row.mortality, row.mortalityWeight, row.deliveryMode, row.rate, amount, str(row.remarks ?? "").trim().toLocaleUpperCase("en-IN")]);
@@ -886,73 +860,6 @@ export const shopSalesService = {
         trip, saleId: id, oldShopId: saleShopId > 0 ? saleShopId : null,
         newShopId: nextShopId, oldAmount, newAmount: nextAmount,
       });
-      if (saleShopId > 0 && saleShopId === nextShopId && nextAmount !== oldAmount) {
-        // Keep one financial row for one sale. Editing a Shop Sale changes the
-        // existing ledger row in place instead of appending a second
-        // "correction" row. This preserves the exact balance delta while the
-        // Shop Ledger displays one sale with its current rate and amount.
-        const diff = nextAmount - oldAmount;
-        const ledgerRow = await client.query<{
-          id: number;
-          debit: string;
-          credit: string;
-        }>(
-          `SELECT l.id, l.debit, l.credit
-             FROM shop_ledger l
-            WHERE l.shop_id = $1
-              AND (
-                (l.reference_type = 'shop_sale' AND l.reference_id = $2)
-                OR
-                (l.reference_type = 'trip' AND l.reference_id = $3)
-              )
-            ORDER BY
-              CASE
-                WHEN l.reference_type = 'shop_sale' AND l.entry_type = 'correction' THEN 0
-                WHEN l.reference_type = 'shop_sale' THEN 1
-                WHEN ABS((l.debit - l.credit) - $4::numeric) < 0.01 THEN 2
-                ELSE 3
-              END,
-              l.id DESC
-            LIMIT 1
-            FOR UPDATE`,
-          [saleShopId, id, trip.id, oldAmount]
-        );
-        if (!ledgerRow.rowCount) {
-          // Repair legacy/incomplete deliveries that reached Shop Sales before
-          // their financial row was created. The delivery update and this
-          // authoritative debit share one transaction, so neither can persist
-          // alone. Use the full new amount (not merely the rate-change delta),
-          // because there is no prior ledger value to correct.
-          await applyDebit(
-            client,
-            saleShopId,
-            {
-              entryDate: dateOnly(trip.tripDate) ?? "",
-              entryType: "sale",
-              referenceType: "shop_sale",
-              referenceId: id,
-              note: `Shop sale debit repaired during update (₹${nextAmount.toFixed(2)})`,
-            },
-            nextAmount
-          );
-        } else {
-          const currentNet = num(ledgerRow.rows[0].debit) - num(ledgerRow.rows[0].credit);
-          const correctedNet = Number((currentNet + diff).toFixed(2));
-          await client.query(
-            `UPDATE shop_ledger
-                SET debit = $2, credit = $3,
-                    note = $4
-              WHERE id = $1`,
-            [
-              ledgerRow.rows[0].id,
-              correctedNet > 0 ? correctedNet : 0,
-              correctedNet < 0 ? -correctedNet : 0,
-              `Shop sale updated (₹${oldAmount.toFixed(2)} → ₹${nextAmount.toFixed(2)})`,
-            ]
-          );
-          await recalcShopBalance(client, saleShopId);
-        }
-      }
       if (saleShopId <= 0 && nextShopId != null) await synchronizeShopSaleLedger(client, {
         trip, saleId: id, oldShopId: null, newShopId: nextShopId, oldAmount: 0, newAmount: nextAmount,
       });
@@ -1031,20 +938,25 @@ export const shopSalesService = {
       if (!result.rowCount) throw new AppError(404, "Shop sale not found");
 
       if (saleShopId > 0) {
-        // Deleting a sale removes its DEBIT → credit the shop back by the full
-        // amount so outstanding no longer includes this sale.
-        await applyCredit(
-          client,
-          saleShopId,
-          {
-            entryDate: trip.tripDate,
-            entryType: "correction",
-            referenceType: "shop_sale",
-            referenceId: id,
-            note: "Shop sale debit reversed (deleted)",
-          },
-          saleAmount
-        );
+        // Deleting a sale removes its one authoritative DEBIT row in place
+        // (collections-style) so the Transactions list and the Cumulative
+        // view agree. Only legacy trip-level rows, which cannot be removed
+        // per delivery, still fall back to an offsetting correction.
+        const removed = await removeShopSaleLedger(client, saleShopId, id);
+        if (removed === 0 && saleAmount > 0) {
+          await applyCredit(
+            client,
+            saleShopId,
+            {
+              entryDate: trip.tripDate,
+              entryType: "correction",
+              referenceType: "shop_sale",
+              referenceId: id,
+              note: "Shop sale debit reversed (deleted)",
+            },
+            saleAmount
+          );
+        }
       }
 
       await recalcTripDeliveryTotals(client, trip.id);

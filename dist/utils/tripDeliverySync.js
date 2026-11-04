@@ -90,8 +90,7 @@ export async function recalcTripDeliveryTotals(client, tripId) {
        -- fallback computeTripKpis() (tripCalculations.ts) already uses —
        -- Step 2 farm-load fields take precedence when genuinely populated,
        -- otherwise fall back to the mandatory Step 3 Pickup values.
-       weight_loss = (CASE WHEN t.farm_load_weight > 0 THEN t.farm_load_weight ELSE t.dc_weight END)
-                     - sub.wt - sub.mort_wt,
+       weight_loss = sub.weight_loss,
        survival_rate = CASE WHEN COALESCE(NULLIF(t.farm_bird_count, 0), t.total_birds) > 0
                          THEN ROUND(sub.birds::numeric / COALESCE(NULLIF(t.farm_bird_count, 0), t.total_birds), 4)
                          ELSE 0 END,
@@ -102,7 +101,10 @@ export async function recalcTripDeliveryTotals(client, tripId) {
               COALESCE(SUM(weight), 0) AS wt,
               COALESCE(SUM(birds), 0)::int AS birds,
               COALESCE(SUM(mortality), 0)::int AS mort_cnt,
-              COALESCE(SUM(mort_kg), 0) AS mort_wt,
+              COALESCE(SUM(mort_kg) FILTER (WHERE delivery_mode = 'box'), 0) AS mort_wt,
+              COALESCE(SUM(CASE WHEN delivery_mode = 'weight'
+                THEN GREATEST(0, COALESCE(farm_weight, 0) - COALESCE(weight, 0) - COALESCE(mort_kg, 0))
+                ELSE 0 END), 0) AS weight_loss,
               (SELECT d2.shop_name FROM trip_deliveries d2
                 WHERE d2.trip_id = $1 AND d2.deleted = FALSE
                 ORDER BY d2.id DESC LIMIT 1) AS last_shop
@@ -119,7 +121,7 @@ export async function recalcTripDeliveryTotals(client, tripId) {
 export async function sumActiveDeliveries(client, tripId, excludeId, legId) {
     const result = await client.query(`SELECT COALESCE(SUM(birds), 0)::text AS birds,
             COALESCE(SUM(weight), 0)::text AS weight,
-            COALESCE(SUM(mortality), 0)::text AS mortality_count,
+            COALESCE(SUM(mortality) FILTER (WHERE delivery_mode = 'box'), 0)::text AS mortality_count,
             COALESCE(SUM(mort_kg), 0)::text AS mortality_weight
        FROM trip_deliveries
       WHERE trip_id = $1

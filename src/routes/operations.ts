@@ -578,6 +578,22 @@ operationsRouter.get(
 );
 
 operationsRouter.get(
+  "/shop-ledger/cumulative",
+  asyncHandler(async (req, res) => {
+    const reportType = req.query.reportType;
+    if (reportType != null && !["all", "sales", "collection"].includes(String(reportType))) {
+      throw new AppError(400, "Invalid reportType");
+    }
+    res.json(await shopLedgerService.cumulative({
+      shopId: optionalPositiveInt(req.query.shopId),
+      fromDate: optionalIsoDate(req.query.fromDate),
+      toDate: optionalIsoDate(req.query.toDate),
+      reportType: reportType == null ? "all" : String(reportType) as "all" | "sales" | "collection",
+    }));
+  })
+);
+
+operationsRouter.get(
   "/shop-ledger/cumulative-quantities",
   asyncHandler(async (req, res) => {
     res.json(await shopLedgerService.cumulativeQuantities({

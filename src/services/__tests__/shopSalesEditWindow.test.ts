@@ -165,6 +165,29 @@ describe("2-week Shop Sales entry window (direct API/service calls, not frontend
     // direct-API-call case; asserting again explicitly for the record.
     await assertStatus(shopSalesService.update(deliveryId, { weight: 999 }), 409);
   });
+
+  test("12. Direct database rate update after the UI window closes: PASS and synchronizes the ledger", async (t) => {
+    const f = newFixture();
+    t.after(() => cleanup(f));
+    const { deliveryId } = await makeAgedTrip(f, 15 * DAY);
+    await pool.query(`UPDATE trip_deliveries SET rate = 101 WHERE id = $1`, [deliveryId]);
+    const delivery = await pool.query<{ shop_id: number; rate: string; weight: string; amount: string }>(
+      `SELECT shop_id, rate, weight, amount FROM trip_deliveries WHERE id = $1`,
+      [deliveryId],
+    );
+    assert.equal(delivery.rows[0].rate, "101.00");
+    assert.equal(delivery.rows[0].amount, "10100.00");
+    const ledger = await pool.query<{ debit: string; credit: string }>(
+      `SELECT debit, credit
+         FROM shop_ledger
+        WHERE shop_id = $1 AND entry_type = 'sale'
+          AND reference_type = 'shop_sale' AND reference_id = $2`,
+      [delivery.rows[0].shop_id, deliveryId],
+    );
+    assert.equal(ledger.rowCount, 1, "one current ledger row is retained for the sale");
+    assert.equal(ledger.rows[0].debit, "10100.00");
+    assert.equal(ledger.rows[0].credit, "0.00");
+  });
 });
 
 describe("Shop Sales DELETE stays blocked once Rate Entry is locked", () => {

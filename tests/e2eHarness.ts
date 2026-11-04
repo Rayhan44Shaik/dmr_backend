@@ -1,12 +1,20 @@
 /**
- * Isolated test database + production server on :4100 for browser runs.
- * Defaults to PGlite. Set E2E_DATABASE_URL to a disposable, migrated PostgreSQL
- * database when the browser page's parallel requests need true transactions
- * (the PGlite pg-gateway shares one session across pool connections).
- * Never connects to the operational database.
+ * Isolated test database + production server for browser runs. Defaults to
+ * PGlite on :4100 with Vite :5199 as the CORS origin. Set E2E_DATABASE_URL to a
+ * disposable, migrated PostgreSQL database when the browser page's parallel
+ * requests need true transactions (the PGlite pg-gateway shares one session
+ * across pool connections). Never connects to the operational database.
+ *
+ * The API port, CORS origin and browser-login owner are configurable via
+ * environment (E2E_API_PORT, E2E_CORS_ORIGIN, E2E_TEST_OWNER_USERNAME) so the
+ * same harness can run on isolated ports; the committed defaults are unchanged.
  */
 import { startApp } from "./helpers/app.js";
 import { applySchema, startTestDb } from "./helpers/testDb.js";
+
+const API_PORT = Number(process.env.E2E_API_PORT ?? "") || 4100;
+const WEB_ORIGIN = process.env.E2E_CORS_ORIGIN ?? "http://127.0.0.1:5199";
+const OWNER_USERNAME = process.env.E2E_TEST_OWNER_USERNAME ?? "test-owner-4100";
 
 const externalDbUrl = process.env.E2E_DATABASE_URL?.trim() || null;
 const testDb = externalDbUrl ? null : await startTestDb();
@@ -181,16 +189,16 @@ const c2Trip = await tripsService.save(null, {
   ],
 } as Record<string, unknown>);
 
-// Vite :5199 proxies /api here; browsers send Origin. Pin CORS to the FE origin
+// Vite proxies /api here; browsers send Origin. Pin CORS to the FE origin
 // so SameSite session cookies work through the proxy without CORS crashes.
 const app = await startApp(
-  { DATABASE_URL: databaseUrl, CORS_ORIGIN: "http://127.0.0.1:5199" },
-  4100,
+  { DATABASE_URL: databaseUrl, CORS_ORIGIN: WEB_ORIGIN },
+  API_PORT,
 );
 
 const meta = {
-  baseUrl: "http://127.0.0.1:4100",
-  login: { username: "test-owner-4100", password: "Test-only-password-123!" },
+  baseUrl: `http://127.0.0.1:${API_PORT}`,
+  login: { username: OWNER_USERNAME, password: "Test-only-password-123!" },
   c2TripId: c2Trip.id,
   c2TripNo: c2Trip.tripNo,
   shops: shops.map((s) => ({ id: s.id, name: s.shopName })),
@@ -200,7 +208,7 @@ const meta = {
   birdTypeId: birdType.id,
   birdType: birdType.birdType,
 };
-console.log("E2E harness ready on http://127.0.0.1:4100");
+console.log(`E2E harness ready on ${meta.baseUrl}`);
 console.log(JSON.stringify(meta));
 
 let stopping = false;

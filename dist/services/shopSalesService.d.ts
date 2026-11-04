@@ -12,6 +12,8 @@ export declare const shopSalesService: {
         pagination?: PaginationParams | null;
     }): Promise<ShopSale[] | PaginatedResult<ShopSale>>;
     getById(id: number): Promise<ShopSale>;
+    updateLoad(tripId: number, load: number, body: unknown): Promise<ShopSale[]>;
+    updateTrip(tripId: number, body: unknown): Promise<ShopSale[]>;
     create(body: unknown): Promise<ShopSale>;
     update(id: number, body: unknown): Promise<ShopSale>;
     updateStatus(id: number, body: unknown): Promise<ShopSale>;

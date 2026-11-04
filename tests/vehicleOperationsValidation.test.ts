@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isValidDateOnly } from "../dist/utils/dateValidation.js";
-import { emiCreateSchema, emiPaySchema } from "../dist/validation/emi.js";
-import { fleetMaintenanceBodySchema } from "../dist/validation/fleet.js";
-import { permitBodySchema } from "../dist/validation/permits.js";
+import { isValidDateOnly } from "../src/utils/dateValidation.js";
+import { emiCreateSchema, emiPaySchema } from "../src/validation/emi.js";
+import { fleetMaintenanceBodySchema } from "../src/validation/fleet.js";
+import { permitBodySchema } from "../src/validation/permits.js";
 
 const impossibleDates = ["2026-09-31", "2025-02-29", "2026-04-31", "2026-13-01"];
 

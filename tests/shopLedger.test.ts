@@ -28,6 +28,7 @@ const { mastersService } = await import("../src/services/mastersService.js");
 const { tripsService } = await import("../src/services/tripsService.js");
 const { rateEntryService } = await import("../src/services/rateEntryService.js");
 const { collectionEntryService } = await import("../src/services/collectionEntryService.js");
+const { shopSalesService } = await import("../src/services/shopSalesService.js");
 const { shopLedgerService } = await import("../src/services/shopLedgerService.js");
 const { recalcTripDeliveryTotals } = await import("../src/utils/tripDeliverySync.js");
 
@@ -156,10 +157,17 @@ async function seedShopWithDebit(
     totalBirds: 1000,
     dcWeight: 1800,
   });
-  await addDelivery(trip.id, shop.id, shop.name, saleAmount);
-  await recalcTripDeliveryTotals(pool as never, trip.id);
-  const lock = await rateEntryService.lock(trip.id, { lockedBy: "lg-test" });
-  assert.ok(lock.rateLocked, "trip must be rate-locked to expose Shop Sales");
+  // A `saleAmount` of 0 means "no sale": no delivery is seeded and the trip
+  // is left unlocked, because the rate-lock rule requires every rateable
+  // delivery to carry a positive rate (migration 086: amount = weight x
+  // rate, so a zero-amount delivery can never satisfy it). Callers that pass
+  // 0 only need the shop itself.
+  if (saleAmount > 0) {
+    await addDelivery(trip.id, shop.id, shop.name, saleAmount);
+    await recalcTripDeliveryTotals(pool as never, trip.id);
+    const lock = await rateEntryService.lock(trip.id, { lockedBy: "lg-test" });
+    assert.ok(lock.rateLocked, "trip must be rate-locked to expose Shop Sales");
+  }
   await pool.query(`UPDATE trips SET approved_at = NOW() WHERE id = $1`, [trip.id]);
   return { shop, tripId: trip.id };
 }
@@ -229,7 +237,7 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     assert.equal(ledger.data[1].referenceNo, c.collectionNo);
   });
 
-  it("2b. Sale rows carry the Step 4 sub-shop name and remark into the ledger", async () => {
+  it("2b. legacy correction rows never appear as another Shop Sale", async () => {
     const { shop, tripId } = await seedShopWithDebit(0, 5000, "2026-08-07");
     const delivery = await pool.query<{ id: number }>(
       `UPDATE trip_deliveries
@@ -251,11 +259,12 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
       toDate: "2026-08-07",
     });
 
-    assert.equal(ledger.data.length, 1, "sale corrections must not create duplicate ledger rows");
-    assert.equal(ledger.data[0].subShopName, "Counter B");
-    assert.equal(ledger.data[0].remarks, "Morning delivery");
+    // A current-only statement must expose exactly one delivery. Migration 097
+    // removes historical corrections; the read guard also prevents a row from
+    // appearing between deployment and migration completion.
+    assert.equal(ledger.data.length, 1, "only the canonical Shop Sale is visible");
     assert.equal(ledger.data[0].type, "sale");
-    assert.equal(ledger.data[0].debit, 5100, "original sale and adjustment are merged");
+    assert.equal(ledger.data[0].debit, 5000, "original sale debit stands on its own row");
 
     // Shop Sales is the quantity/rate source of truth. An edit replaces the
     // visible values on the same canonical row; it must never append a second
@@ -271,13 +280,13 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
       fromDate: "2026-08-07",
       toDate: "2026-08-07",
     });
-    assert.equal(edited.data.length, 1, "editing Shop Sales must not duplicate the sale row");
+    assert.equal(edited.data.length, 1, "editing Shop Sales keeps one visible sale row");
     assert.equal(edited.data[0].birds, 2000);
     assert.equal(edited.data[0].weight, 3456.75);
     assert.equal(edited.data[0].rate, 187.25);
   });
 
-  it("2c. legacy trip ledger rows count a shop's birds and weight exactly once", async () => {
+  it("2c. legacy trip ledger rows show a shop's birds and weight only on the original sale", async () => {
     const shop = await seedShop(0);
     const sup = await seedSupport();
     const trip = await makeCompletedTrip(sup, {
@@ -309,10 +318,22 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
       toDate: "2026-08-09",
     });
 
-    assert.equal(ledger.data.length, 1, "legacy rows collapse to one shop/trip sale");
-    assert.equal(ledger.data[0].birds, 153);
-    assert.equal(ledger.data[0].weight, 391.2);
-    assert.equal(ledger.data[0].debit, 44205.6, "all legacy debits remain included once");
+    // Legacy `trip`-reference rows are listed one per ledger entry, but the
+    // aggregate delivery quantity belongs to the first original sale only.
+    // Further financial rows must not double birds or weight in the report.
+    assert.equal(ledger.data.length, 2, "one row per legacy ledger entry");
+    assert.equal(ledger.data[0].birds, 153, "original sale owns the trip aggregate");
+    assert.equal(ledger.data[0].weight, 391.2, "original sale owns the aggregate weight");
+    assert.equal(ledger.data[1].birds, 0, "financial adjustment must not repeat birds");
+    assert.equal(ledger.data[1].weight, 0, "financial adjustment must not repeat weight");
+    assert.equal(ledger.data[1].rate, 0, "financial adjustment must not repeat rate");
+    assert.equal(ledger.data[0].debit, 25086);
+    assert.equal(ledger.data[1].debit, 19119.6);
+    assert.equal(
+      Number((ledger.data[0].debit + ledger.data[1].debit).toFixed(1)),
+      44205.6,
+      "all legacy debits remain included once"
+    );
   });
 
   it("2d. cumulative quantities reconcile Step 4 farm, delivery, mortality and weight loss", async () => {
@@ -397,6 +418,29 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     assert.equal(rows[0].shopName, shop.name);
     assert.equal(rows[0].birds, 100);
     assert.equal(rows[0].weight, 200);
+  });
+
+  it("2f. cumulative Sales always match current Shop Sales for all dates and every date range", async () => {
+    await seedShopWithDebit(0, 1111.11, "2026-09-30");
+    await seedShopWithDebit(0, 2222.22, "2026-10-01");
+
+    const assertSalesMatch = async (filters: { fromDate?: string; toDate?: string }) => {
+      const shopSales = await shopSalesService.list(filters);
+      assert.ok(Array.isArray(shopSales), "unpaged Shop Sales returns all matching rows");
+      const shopSalesAmount = shopSales.reduce((sum, sale) => sum + sale.amount, 0);
+      const cumulative = await shopLedgerService.cumulative(filters);
+      const cumulativeAmount = cumulative.reduce((sum, row) => sum + row.sale, 0);
+      assert.equal(
+        Number(cumulativeAmount.toFixed(2)),
+        Number(shopSalesAmount.toFixed(2)),
+        `Cumulative Sales must equal Shop Sales for ${filters.fromDate ?? "all dates"} to ${filters.toDate ?? "all dates"}`,
+      );
+    };
+
+    await assertSalesMatch({});
+    await assertSalesMatch({ fromDate: "2026-09-30", toDate: "2026-09-30" });
+    await assertSalesMatch({ fromDate: "2026-10-01", toDate: "2026-10-01" });
+    await assertSalesMatch({ fromDate: "2026-09-30", toDate: "2026-10-01" });
   });
 
   it("3. Custom date range is complete — a late range returns only its matching tail", async () => {
@@ -545,14 +589,17 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
         amount: 1000,
         collector: `Deposit${i}`,
       });
-      // While PENDING the ledger has NO credit (financial rule).
+      // While PENDING the ledger has NO credit (financial rule). The type
+      // guard matters: numeric ids are per-table sequences, so the sale debit
+      // row can share an id with a pending collection; only a `collection`
+      // row would be a premature credit.
       const pendingLedger = await shopLedgerService.list({
         shopId: shop.id,
         fromDate: "2026-08-01",
         toDate: "2026-08-31",
       });
       assert.equal(
-        pendingLedger.data.filter((r) => r.referenceId === created.id).length,
+        pendingLedger.data.filter((r) => r.type === "collection" && r.referenceId === created.id).length,
         0,
         `collection #${i} must not credit the ledger while pending`
       );
@@ -620,5 +667,27 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
       100000 + 5000 - sumCredits,
       "Shop Master outstanding driven by the full ledger, not by the recent-10 window"
     );
+  });
+
+  it("8. a historical sale correction is excluded from the current-only statement", async () => {
+    const { shop, tripId } = await seedShopWithDebit(0, 5000, "2026-08-21");
+
+    // Corrections from older releases must never create an extra transaction
+    // row. The migration removes them and this read guard covers deployment.
+    await pool.query(
+      `INSERT INTO shop_ledger
+         (shop_id, entry_date, entry_type, reference_type, reference_id, debit, credit, note)
+       VALUES ($1, '2026-08-21', 'correction', 'trip', $2, 0, 750, 'Sale amount correction')`,
+      [shop.id, tripId],
+    );
+
+    const ledger = await shopLedgerService.list({
+      shopId: shop.id,
+      fromDate: "2026-08-21",
+      toDate: "2026-08-21",
+    });
+    assert.equal(ledger.data.length, 1);
+    assert.equal(ledger.data[0].birds, 300, "canonical sale carries the delivery quantities");
+    assert.equal(ledger.data[0].weight, 500);
   });
 });

@@ -4,6 +4,12 @@ import { dateOnly, num, numOrNull, str } from "../utils/coerce.js";
 import { paginatedResult, } from "../utils/pagination.js";
 import { rethrowIfAppError } from "../utils/pgErrors.js";
 import { parseBody, rateEntryLockSchema, rateEntrySaveSchema, } from "../validation/operations.js";
+function isoOrNull(value) {
+    if (value == null || value === "")
+        return null;
+    const date = value instanceof Date ? value : new Date(String(value));
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
 const ELIGIBLE_WHERE = `
   WHERE t.status = 'Completed'
     AND COALESCE(t.deleted, FALSE) = FALSE
@@ -130,9 +136,9 @@ async function loadMarketRates(client, pairs) {
 }
 async function loadDeliveries(client, tripId) {
     const result = await client.query(`SELECT d.id, d.serial_no, d.box_no, d.shop_id, d.shop_name, d.sub_shop_name,
-            d.bird_type_id, d.bird_type, d.birds, d.weight, d.mortality, d.mort_kg,
+            d.bird_type_id, d.bird_type, d.birds, d.weight, d.farm_weight, d.mortality, d.mort_kg,
             d.rate, d.amount, d.remarks, d.delivery_mode, d.auto_capture_time,
-            COALESCE(l.leg_index, 1) AS load_no
+            COALESCE(l.leg_index, 1) AS load_no, COALESCE(l.dc_weight, 0) AS dc_weight
        FROM trip_deliveries d
        LEFT JOIN trip_legs l ON l.id = d.leg_id AND l.trip_id = d.trip_id
       WHERE d.trip_id = $1
@@ -166,15 +172,15 @@ async function loadDeliveries(client, tripId) {
             birdType: str(r.bird_type),
             birds: num(r.birds),
             weight,
+            farmWeight: numOrNull(r.farm_weight),
+            dcWeight: num(r.dc_weight),
             mortality: num(r.mortality),
             mortKg: numOrNull(r.mort_kg),
             rate,
             amount,
             remarks: str(r.remarks),
             deliveryMode: str(r.delivery_mode) || "box",
-            autoCaptureTime: r.auto_capture_time == null
-                ? null
-                : new Date(r.auto_capture_time).toISOString(),
+            autoCaptureTime: isoOrNull(r.auto_capture_time),
             marketRate: market.get(key) ?? null,
         };
     });
@@ -201,6 +207,12 @@ function mapTrip(row, deliveries) {
             birds: rows.reduce((sum, delivery) => sum + delivery.birds, 0),
             weight: Number(rows.reduce((sum, delivery) => sum + delivery.weight, 0).toFixed(2)),
             amount: Number(ratedRows.reduce((sum, delivery) => sum + delivery.amount, 0).toFixed(2)),
+            dcWeight: Number(Math.max(0, ...rows.map((delivery) => delivery.dcWeight)).toFixed(2)),
+            boxMortality: rows.filter((delivery) => delivery.deliveryMode !== "weight").reduce((sum, delivery) => sum + delivery.mortality, 0),
+            boxMortalityWeight: Number(rows.filter((delivery) => delivery.deliveryMode !== "weight").reduce((sum, delivery) => sum + Number(delivery.mortKg ?? 0), 0).toFixed(2)),
+            weightMortality: rows.filter((delivery) => delivery.deliveryMode === "weight").reduce((sum, delivery) => sum + delivery.mortality, 0),
+            weightMortalityWeight: Number(rows.filter((delivery) => delivery.deliveryMode === "weight").reduce((sum, delivery) => sum + Number(delivery.mortKg ?? 0), 0).toFixed(2)),
+            weightLoss: Number(rows.filter((delivery) => delivery.deliveryMode === "weight").reduce((sum, delivery) => sum + Math.max(0, Number(delivery.farmWeight ?? 0) - delivery.weight - Number(delivery.mortKg ?? 0)), 0).toFixed(2)),
         };
     });
     return {
@@ -219,7 +231,7 @@ function mapTrip(row, deliveries) {
         // still include pending `[ORDER]` plan stubs).
         totalShops: deliveries.length > 0 ? deliveries.length : num(row.total_shops),
         rateLocked: Boolean(row.rate_completed),
-        rateLockedAt: row.rate_locked_at == null ? null : new Date(str(row.rate_locked_at)).toISOString(),
+        rateLockedAt: isoOrNull(row.rate_locked_at),
         rateLockedBy: row.rate_locked_by == null ? null : str(row.rate_locked_by),
         ratesEntered: deliveries.filter((d) => d.rate != null).length,
         deliveriesCount: deliveries.length,
@@ -278,21 +290,11 @@ export const rateEntryService = {
                 const result = await client.query(`SELECT t.* FROM trips t ${baseWhere}
            ORDER BY t.trip_date DESC, t.id DESC
            LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, pagedParams);
-                const items = [];
-                for (const row of result.rows) {
-                    const deliveries = await loadDeliveries(client, num(row.id));
-                    items.push(mapTrip(row, deliveries));
-                }
-                return paginatedResult(items, total, filters.pagination);
+                return paginatedResult(result.rows.map((row) => mapTrip(row, [])), total, filters.pagination);
             }
             const result = await client.query(`SELECT t.* FROM trips t ${baseWhere}
          ORDER BY t.trip_date DESC, t.id DESC`, params);
-            const items = [];
-            for (const row of result.rows) {
-                const deliveries = await loadDeliveries(client, num(row.id));
-                items.push(mapTrip(row, deliveries));
-            }
-            return items;
+            return result.rows.map((row) => mapTrip(row, []));
         });
     },
     async getById(id) {
@@ -382,6 +384,33 @@ export const rateEntryService = {
                     }
                     throw new AppError(422, `Trip ${tripId} is not eligible for Rate Entry (must be Completed and not deleted)`);
                 }
+                // The UI's Save & Lock action sends the edited rates with the lock.
+                // Persist them inside this transaction before validating completeness;
+                // previously the schema stripped this array and zero-valued delivery
+                // rows were locked unchanged.
+                if (data.rates?.length) {
+                    const deliveryIds = data.rates.map((row) => row.deliveryId);
+                    const existing = await client.query(`SELECT id, weight
+               FROM trip_deliveries
+              WHERE trip_id = $1
+                AND id = ANY($2::int[])
+                AND COALESCE(deleted, FALSE) = FALSE`, [tripId, deliveryIds]);
+                    const found = new Set(existing.rows.map((row) => num(row.id)));
+                    const missingIds = deliveryIds.filter((id) => !found.has(id));
+                    if (missingIds.length) {
+                        throw new AppError(422, "Some deliveries do not belong to this trip", {
+                            tripId,
+                            missingDeliveryIds: missingIds,
+                        });
+                    }
+                    const weightById = new Map(existing.rows.map((row) => [num(row.id), num(row.weight)]));
+                    for (const row of data.rates) {
+                        const amount = Number(((weightById.get(row.deliveryId) ?? 0) * row.rate).toFixed(2));
+                        await client.query(`UPDATE trip_deliveries
+                  SET rate = $2, amount = $3, updated_at = NOW()
+                WHERE id = $1 AND trip_id = $4`, [row.deliveryId, row.rate, amount, tripId]);
+                    }
+                }
                 const rateable = await client.query(`SELECT id, shop_name, rate FROM trip_deliveries
            WHERE ${RATEABLE_DELIVERY_WHERE}
            ORDER BY auto_capture_time ASC NULLS LAST, serial_no ASC NULLS LAST, id ASC`, [tripId]);
@@ -391,7 +420,7 @@ export const rateEntryService = {
                         missingDeliveries: [],
                     });
                 }
-                const missing = rateable.rows.filter((r) => r.rate == null);
+                const missing = rateable.rows.filter((r) => r.rate == null || num(r.rate) <= 0);
                 if (missing.length) {
                     throw new AppError(422, "Every shop delivery must have a rate before locking", {
                         tripId,
