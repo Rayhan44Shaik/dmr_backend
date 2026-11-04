@@ -188,6 +188,18 @@ describe("2-week Shop Sales entry window (direct API/service calls, not frontend
     assert.equal(ledger.rows[0].debit, "10100.00");
     assert.equal(ledger.rows[0].credit, "0.00");
   });
+
+  test("13. Direct database delete remains blocked after Rate Entry locks the trip", async (t) => {
+    const f = newFixture();
+    t.after(() => cleanup(f));
+    const { deliveryId } = await makeAgedTrip(f, 15 * DAY);
+    await assert.rejects(
+      pool.query(`DELETE FROM trip_deliveries WHERE id = $1`, [deliveryId]),
+      /rate-locked trip|Cannot delete a shop delivery/i,
+    );
+    const row = await pool.query<{ deleted: boolean }>(`SELECT deleted FROM trip_deliveries WHERE id = $1`, [deliveryId]);
+    assert.equal(row.rows[0].deleted, false);
+  });
 });
 
 describe("Shop Sales DELETE stays blocked once Rate Entry is locked", () => {

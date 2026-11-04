@@ -645,7 +645,7 @@ describe("Collections never creates or reopens the Rate Entry lock", () => {
 // 17 & 18. DB-level guards after lock
 // ---------------------------------------------------------------------------
 describe("Database-level lock guards", () => {
-  it("17. Direct DB update after 14 days rejected (DB trigger)", async () => {
+  it("17. Direct DB rate update after the 14-day window succeeds and keeps one canonical ledger row", async () => {
     const { trip, deliveryA } = await makeLockedTrip({
       tripNo: "SF-DBTRIG",
       totalBirds: 1000,
@@ -656,18 +656,45 @@ describe("Database-level lock guards", () => {
       weightB: 450,
     });
     const fifteenDays = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
-    // The DB trigger anchors the window at trips.rate_locked_at (Shop Sales
-    // entry), falling back to delivery creation only for legacy rows.
+    // Age the Shop Sales entry stamp past 14 days. The frontend/API lock still
+    // applies (service layer), but an administrator correcting the rate
+    // directly in pgAdmin must succeed: migration 099 removed the database-wide
+    // update guard and migration 086 recalculates amount from weight x rate.
     await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [trip.id, fifteenDays]);
-    await assert.rejects(
-      pool.query(`UPDATE trip_deliveries SET rate = 1, amount = 1 WHERE id = $1`, [deliveryA]),
-      /2-week insert window|2 weeks from the Shop Sale insert|locked/
+
+    // Bare rate update — amount is deliberately NOT supplied here, so the
+    // database itself has to derive it.
+    await pool.query(`UPDATE trip_deliveries SET rate = 120 WHERE id = $1`, [deliveryA]);
+
+    const after = await pool.query<{ shop_id: number; rate: string; weight: string; amount: string }>(
+      `SELECT shop_id, rate, weight, amount FROM trip_deliveries WHERE id = $1`,
+      [deliveryA]
     );
-    void trip;
+    assert.equal(after.rows[0].rate, "120.00", "direct database rate correction must be accepted");
+    assert.equal(
+      Number(after.rows[0].amount),
+      Number(after.rows[0].weight) * 120,
+      "amount must be recalculated from weight x rate"
+    );
+
+    const ledger = await pool.query<{ debit: string; credit: string }>(
+      `SELECT debit, credit
+         FROM shop_ledger
+        WHERE shop_id = $1 AND entry_type = 'sale'
+          AND reference_type = 'shop_sale' AND reference_id = $2`,
+      [after.rows[0].shop_id, deliveryA]
+    );
+    assert.equal(ledger.rowCount, 1, "exactly one canonical Shop Ledger sale row, never duplicated");
+    assert.equal(
+      Number(ledger.rows[0].debit),
+      Number(after.rows[0].amount),
+      "ledger debit follows the corrected amount"
+    );
+    assert.equal(Number(ledger.rows[0].credit), 0, "a shop sale debit carries no credit");
   });
 
-  it("18. Delete after Rate Entry lock rejected", async () => {
-    const { trip, deliveryA } = await makeLockedTrip({
+  it("18. Removal is accepted inside the 14-day window and rejected after it closes", async () => {
+    const { trip, deliveryA, deliveryB } = await makeLockedTrip({
       tripNo: "SF-DELAFTERLOCK",
       totalBirds: 1000,
       dcWeight: 1800,
@@ -676,12 +703,48 @@ describe("Database-level lock guards", () => {
       birdsB: 250,
       weightB: 450,
     });
+
+    // Inside the Shop Sales window removal is a normal operation: the trip
+    // editor removes a zeroed sale exactly this way.
+    await pool.query(`UPDATE trip_deliveries SET deleted = true WHERE id = $1`, [deliveryB]);
+    const removed = await pool.query<{ deleted: boolean }>(
+      `SELECT deleted FROM trip_deliveries WHERE id = $1`,
+      [deliveryB]
+    );
+    assert.equal(removed.rowCount, 1);
+    assert.equal(removed.rows[0].deleted, true, "an in-window removal must be accepted");
+
+    // Once the window has closed the delivery is permanent.
+    const fifteenDays = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+    await pool.query(`UPDATE trips SET rate_locked_at = $2 WHERE id = $1`, [trip.id, fifteenDays]);
+
     await assert.rejects(
       pool.query(`DELETE FROM trip_deliveries WHERE id = $1`, [deliveryA]),
-      /rate-locked/
+      /rate-locked trip|Cannot delete a shop delivery/i,
+      "a direct DELETE after the Shop Sales window must fail"
     );
-    const still = await pool.query(`SELECT id FROM trip_deliveries WHERE id = $1`, [deliveryA]);
-    assert.equal(still.rowCount, 1, "delivery must not be deleted");
-    void trip;
+    const afterDelete = await pool.query<{ deleted: boolean }>(
+      `SELECT deleted FROM trip_deliveries WHERE id = $1`,
+      [deliveryA]
+    );
+    assert.equal(afterDelete.rowCount, 1, "delivery must not be deleted");
+    assert.equal(afterDelete.rows[0].deleted, false);
+
+    // A direct SQL soft delete is deletion too and must hit the same guard.
+    await assert.rejects(
+      pool.query(`UPDATE trip_deliveries SET deleted = true WHERE id = $1`, [deliveryA]),
+      /rate-locked trip|Cannot delete a shop delivery/i,
+      "a direct soft-delete after the Shop Sales window must fail"
+    );
+    const afterSoftDelete = await pool.query<{ deleted: boolean }>(
+      `SELECT deleted FROM trip_deliveries WHERE id = $1`,
+      [deliveryA]
+    );
+    assert.equal(afterSoftDelete.rowCount, 1, "delivery must remain present");
+    assert.equal(
+      afterSoftDelete.rows[0].deleted,
+      false,
+      "a rejected soft delete must not have partially applied"
+    );
   });
 });
