@@ -1,5 +1,5 @@
 /**
- * Test-only safety guard for backend tests that talk to a real PostgreSQL
+ * Test-only safety guard for backend tests that talk to a PostgreSQL
  * server through the shared pool (`src/config/db.ts`).
  *
  * Why this exists (D8): `src/config/env.ts` auto-loads `backend/.env`, and
@@ -8,8 +8,19 @@
  * pool and forgets to override `DATABASE_URL` therefore writes fixtures into
  * operational data. This guard makes that failure mode impossible to reach:
  * it runs synchronously, before any INSERT/migration/fixture/DELETE, and
- * refuses to continue unless the resolved database name is clearly
+ * refuses to continue unless the resolved database is clearly
  * disposable.
+ *
+ * DBSAFE-1 adds fail-closed enforcement for every test/E2E path:
+ *  - `dmr_poultries` and any `dmr_poultries`-prefixed name are refused, with
+ *    exactly one documented exception: the setup script's historic default
+ *    `dmr_poultries_e2e` (deprecated, warns on every use).
+ *  - production-like hostnames (managed Postgres suffixes, prod/live tokens)
+ *    and any non-loopback host are refused unless the database name is
+ *    allowed AND `ALLOW_REMOTE_TEST_DB=1` is explicitly set.
+ *  - the PGlite gateway (`postgres` on loopback) is accepted ONLY with an
+ *    explicit caller opt-in (`allowPgliteGateway`), because a real
+ *    PostgreSQL cluster also has a `postgres` maintenance database.
  *
  * This module is imported by tests only. It must never be imported by runtime
  * code, and it must not import `src/config/env.ts` (which would itself load
@@ -50,6 +61,55 @@ export const FORBIDDEN_DATABASE_NAMES: readonly string[] = [
  */
 export const FORBIDDEN_DATABASE_PREFIXES: readonly string[] = ["dmr_poultries"];
 
+/**
+ * DBSAFE-1: single documented exception to the `dmr_poultries` prefix rule.
+ * This is the historic default database name of `src/scripts/setupE2eDatabase.ts`
+ * (and `e2e.env.example`). It stays connectable by tests so existing disposable
+ * E2E databases keep working, but every use logs a deprecation warning.
+ * All OTHER `dmr_poultries*` names stay refused. A future batch may rename the
+ * setup default to `dmr_e2e_default`; that rename is explicitly out of scope.
+ */
+export const GRANDFATHERED_DATABASE_NAMES: readonly string[] = ["dmr_poultries_e2e"];
+
+/** DBSAFE-1: hosts that are always test-local. Anything else is remote. */
+export const LOOPBACK_HOSTS: readonly string[] = ["localhost", "127.0.0.1", "::1"];
+
+/**
+ * DBSAFE-1: managed PostgreSQL host suffixes. A test must never silently
+ * target a cloud database just because its name looks disposable — the README
+ * documents RDS/Neon/Supabase migration purely through `DATABASE_URL`.
+ */
+export const MANAGED_POSTGRES_HOST_SUFFIXES: readonly string[] = [
+  "rds.amazonaws.com",
+  "neon.tech",
+  "supabase.co",
+  "supabase.com",
+  "googleapis.com",
+  "database.azure.com",
+  "herokuapp.com",
+  "herokussl.com",
+];
+
+/**
+ * DBSAFE-1: hostname tokens that mark a host as production-like. Matched as
+ * whole dot/dash/underscore-separated tokens (`prod-db` matches, `liveoak`
+ * does not), case-insensitively.
+ */
+export const PRODUCTION_LIKE_HOST_TOKENS: readonly string[] = [
+  "prod",
+  "production",
+  "live",
+  "primary",
+];
+
+/**
+ * DBSAFE-1: explicit opt-in that allows an allowed (disposable or
+ * grandfathered) database name on a non-loopback host. Fail-closed default:
+ * nothing in the repo sets it; CI for a remote throwaway cluster must set
+ * `ALLOW_REMOTE_TEST_DB=1` deliberately.
+ */
+export const ALLOW_REMOTE_TEST_DB_ENV = "ALLOW_REMOTE_TEST_DB";
+
 export interface DatabaseTarget {
   /** Database name resolved from the URL, or a marker for the broken cases. */
   databaseName: string;
@@ -75,7 +135,7 @@ export const EMPTY_DATABASE_NAME = "(empty)";
 export const UNPARSEABLE_DATABASE_URL = "(unparseable URL)";
 
 /**
- * Resolves the database name a test would connect to, using the same rule as
+ * Resolves the database a test would connect to, using the same rule as
  * `src/config/env.ts`: explicit `DATABASE_URL`, else the built-in default.
  * Credentials are never included in the returned value.
  */
@@ -106,6 +166,38 @@ export function isDisposableDatabaseName(databaseName: string): boolean {
   return DISPOSABLE_DATABASE_PATTERNS.some((pattern) => pattern.test(databaseName));
 }
 
+/** DBSAFE-1: exact (case-insensitive) match only — `dmr_poultries_e2e_backup` is NOT covered. */
+export function isGrandfatheredDatabaseName(databaseName: string): boolean {
+  return GRANDFATHERED_DATABASE_NAMES.includes(databaseName.toLowerCase());
+}
+
+/** DBSAFE-1: `localhost`, IPv4 loopback, and IPv6 loopback (with or without brackets). */
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return (LOOPBACK_HOSTS as readonly string[]).includes(normalized);
+}
+
+/** DBSAFE-1: exact suffix or dot-separated subsuffix match, case-insensitive. */
+export function isManagedPostgresHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return MANAGED_POSTGRES_HOST_SUFFIXES.some(
+    (suffix) => normalized === suffix || normalized.endsWith(`.${suffix}`)
+  );
+}
+
+/** DBSAFE-1: whole-token match so `liveoak` does not count but `live-db` does. */
+export function hasProductionLikeHostToken(host: string): boolean {
+  const tokens = host.toLowerCase().split(/[.\-_]/);
+  return tokens.some((token) =>
+    (PRODUCTION_LIKE_HOST_TOKENS as readonly string[]).includes(token)
+  );
+}
+
+/** DBSAFE-1: the only way a non-loopback host passes. Fail-closed default. */
+export function isRemoteTestingAllowed(): boolean {
+  return process.env[ALLOW_REMOTE_TEST_DB_ENV] === "1";
+}
+
 function refusalMessage(context: string, target: DatabaseTarget, reason: string): string {
   const where = target.host ? `${target.host}${target.port ? `:${target.port}` : ""}` : "unknown host";
   return [
@@ -121,13 +213,39 @@ function refusalMessage(context: string, target: DatabaseTarget, reason: string)
     "",
     "Allowed database names:",
     "  dmr_d4_verify, dmr_test_<name>, dmr_e2e_<name>, <name>_test",
+    "Deprecated exception (warns on every use): dmr_poultries_e2e",
     "Never allowed:",
-    "  dmr_poultries, postgres, template0, template1",
+    "  dmr_poultries, dmr_poultries_* (except the exception above), postgres, template0, template1",
+    "Hosts:",
+    "  loopback only (localhost, 127.0.0.1, ::1) unless the name is allowed AND",
+    `  ${ALLOW_REMOTE_TEST_DB_ENV}=1 is set. Production-like hosts (RDS, Neon, Supabase,`,
+    "  Heroku Postgres, Google Cloud SQL, Azure Database, prod/live/primary hostnames)",
+    "  are always refused without that explicit opt-in.",
     "",
     "Set a disposable database, for example:",
     '  DATABASE_URL="postgresql://<user>:<password>@localhost:5432/dmr_test_<yourname>" \\',
     "    node -r ./tests/helpers/osUserInfoShim.cjs --import tsx --test <test-file>",
   ].join("\n");
+}
+
+export interface DisposableDbGuardOptions {
+  /**
+   * Allow the `postgres` database name, but ONLY on a loopback host. The
+   * PGlite test gateway serves database `postgres` on 127.0.0.1, which is
+   * otherwise forbidden because every real PostgreSQL cluster also has a
+   * `postgres` maintenance database. Test harnesses pass this when the URL
+   * is proven to be the PGlite gateway; every other caller stays refused.
+   */
+  allowPgliteGateway?: boolean;
+}
+
+function isAllowedPgliteTarget(target: DatabaseTarget, options: DisposableDbGuardOptions): boolean {
+  return (
+    options.allowPgliteGateway === true &&
+    target.databaseName.toLowerCase() === "postgres" &&
+    target.host !== null &&
+    isLoopbackHost(target.host)
+  );
 }
 
 /**
@@ -136,10 +254,12 @@ function refusalMessage(context: string, target: DatabaseTarget, reason: string)
  *
  * @param context human-readable owner of the check, e.g. the test file path
  * @param rawUrl  override, defaulting to `process.env.DATABASE_URL`
+ * @param options `{ allowPgliteGateway: true }` for the PGlite gateway only
  */
 export function assertDisposableTestDatabase(
   context: string,
-  rawUrl: string | undefined = process.env.DATABASE_URL
+  rawUrl: string | undefined = process.env.DATABASE_URL,
+  options: DisposableDbGuardOptions = {}
 ): DatabaseTarget {
   const target = inspectDatabaseUrl(rawUrl);
 
@@ -157,6 +277,56 @@ export function assertDisposableTestDatabase(
       target.databaseName
     );
   }
+
+  // Host policy first: anything off loopback needs an allowed name plus the
+  // explicit remote-testing opt-in. This runs before any name verdict so a
+  // production-like host can never be reached even with a disposable name.
+  if (target.host !== null && !isLoopbackHost(target.host)) {
+    const nameOk =
+      isDisposableDatabaseName(target.databaseName) ||
+      isGrandfatheredDatabaseName(target.databaseName);
+    if (nameOk && !isRemoteTestingAllowed()) {
+      if (isManagedPostgresHost(target.host) || hasProductionLikeHostToken(target.host)) {
+        throw new OperationalDatabaseRefusedError(
+          refusalMessage(
+            context,
+            target,
+            `this is a production-like database host and ${ALLOW_REMOTE_TEST_DB_ENV}=1 is not set`
+          ),
+          context,
+          target.databaseName
+        );
+      }
+      throw new OperationalDatabaseRefusedError(
+        refusalMessage(
+          context,
+          target,
+          `non-loopback test hosts require an allowed database name AND ${ALLOW_REMOTE_TEST_DB_ENV}=1`
+        ),
+        context,
+        target.databaseName
+      );
+    }
+    // A non-allowed name on a remote host falls through to the name checks
+    // below, which refuse it with the name reason.
+  }
+
+  // Deprecated exception: exact match only, still subject to the host policy
+  // above. Kept visible with a warning on every use.
+  if (isGrandfatheredDatabaseName(target.databaseName)) {
+    console.warn(
+      `[disposableDbGuard] DEPRECATED: database "${target.databaseName}" is a grandfathered ` +
+        `exception to the dmr_poultries-prefix rule (context: ${context}). ` +
+        `Prefer dmr_e2e_<name>.`
+    );
+    return target;
+  }
+
+  // PGlite gateway: `postgres` on loopback, only with explicit caller opt-in.
+  if (isAllowedPgliteTarget(target, options)) {
+    return target;
+  }
+
   if (
     FORBIDDEN_DATABASE_NAMES.includes(target.databaseName.toLowerCase()) ||
     FORBIDDEN_DATABASE_PREFIXES.some((prefix) => target.databaseName.toLowerCase().startsWith(prefix))

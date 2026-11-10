@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { assertDisposableTestDatabase } from "../src/config/disposableDbGuard.js";
 
 const url = process.env.C5_REAL_PG_URL;
 if (!url) {
@@ -26,6 +27,8 @@ if (!url) {
     it.skip("C5_REAL_PG_URL not set", () => undefined);
   });
 } else {
+  // DBSAFE-1: fail closed before the direct pg.Client is even constructed.
+  assertDisposableTestDatabase("tests/migration086HistoricalAmounts.test.ts", url);
   const migrationPath = fileURLToPath(new URL("../sql/086_trip_delivery_amount_sync.sql", import.meta.url));
   const schema = `c5_mig086_${Date.now().toString(36)}`;
   const client = new pg.Client({ connectionString: url });

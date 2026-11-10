@@ -9,6 +9,7 @@
  * environment (E2E_API_PORT, E2E_CORS_ORIGIN, E2E_TEST_OWNER_USERNAME) so the
  * same harness can run on isolated ports; the committed defaults are unchanged.
  */
+import { assertDisposableTestDatabase } from "../src/config/disposableDbGuard.js";
 import { startApp } from "./helpers/app.js";
 import { applySchema, startTestDb } from "./helpers/testDb.js";
 
@@ -17,6 +18,12 @@ const WEB_ORIGIN = process.env.E2E_CORS_ORIGIN ?? "http://127.0.0.1:5199";
 const OWNER_USERNAME = process.env.E2E_TEST_OWNER_USERNAME ?? "test-owner-4100";
 
 const externalDbUrl = process.env.E2E_DATABASE_URL?.trim() || null;
+// DBSAFE-1: refuse operational / prefixed / production-like targets BEFORE any
+// DATABASE_URL assignment, seed, write, pool creation, or server start.
+// (PGlite is used when externalDbUrl is null; startApp re-validates that path.)
+if (externalDbUrl) {
+  assertDisposableTestDatabase("tests/e2eHarness.ts", externalDbUrl);
+}
 const testDb = externalDbUrl ? null : await startTestDb();
 const databaseUrl = externalDbUrl ?? testDb!.url;
 process.env.DATABASE_URL = databaseUrl;

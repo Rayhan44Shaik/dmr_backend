@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import pg from "pg";
+import { assertDisposableTestDatabase } from "../config/disposableDbGuard.js";
 import { hashPassword } from "../utils/passwordHash.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -14,11 +15,12 @@ const protectedUrl = new URL(process.env.DATABASE_URL ?? "postgresql://dmr:dmr_l
 const e2eUrl = new URL(process.env.E2E_DATABASE_URL ?? protectedUrl.toString());
 if (!process.env.E2E_DATABASE_URL) e2eUrl.pathname = "/dmr_poultries_e2e";
 const databaseName = decodeURIComponent(e2eUrl.pathname.slice(1));
-const protectedName = decodeURIComponent(protectedUrl.pathname.slice(1));
 
-if (e2eUrl.toString() === protectedUrl.toString() || databaseName === protectedName || databaseName === "dmr_poultries" || !/_e2e$/i.test(databaseName)) {
-  throw new Error(`REFUSING E2E setup for protected/non-E2E database "${databaseName}". The name must end in _e2e and differ from "${protectedName}".`);
-}
+// DBSAFE-1: single shared enforcement point (replaces the bespoke inline
+// check). Grandfathers dmr_poultries_e2e exactly; refuses operational names,
+// prefixed copies, production-like and non-loopback hosts. Throws before any
+// connection, database creation, migration, or seed.
+assertDisposableTestDatabase("src/scripts/setupE2eDatabase.ts", e2eUrl.toString());
 
 const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
 const localEnvPath = path.join(backendRoot, ".env.e2e.local");

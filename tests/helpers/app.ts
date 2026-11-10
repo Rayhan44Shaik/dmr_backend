@@ -10,6 +10,11 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertDisposableTestDatabase,
+  inspectDatabaseUrl,
+  isLoopbackHost,
+} from "../../src/config/disposableDbGuard.js";
 
 const repoRoot = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const testAuth = new Map<string, Record<string, string>>();
@@ -37,6 +42,18 @@ function getFreePort(): Promise<number> {
 }
 
 export async function startApp(env: Record<string, string>, requestedPort?: number): Promise<TestApp> {
+  // DBSAFE-1: fail closed FIRST — before pool creation, writes, or server spawn.
+  // The effective target is what the child server will actually receive.
+  const effectiveDatabaseUrl = env.DATABASE_URL ?? process.env.DATABASE_URL;
+  const probedTarget = inspectDatabaseUrl(effectiveDatabaseUrl);
+  const looksLikePgliteGateway =
+    probedTarget.databaseName.toLowerCase() === "postgres" &&
+    probedTarget.host !== null &&
+    isLoopbackHost(probedTarget.host);
+  assertDisposableTestDatabase("tests/helpers/app.ts::startApp", effectiveDatabaseUrl, {
+    allowPgliteGateway: looksLikePgliteGateway,
+  });
+
   const port = requestedPort ?? await getFreePort();
   const { pool } = await import("../../src/config/db.js");
   const { hashPassword } = await import("../../src/utils/passwordHash.js");

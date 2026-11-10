@@ -1,7 +1,15 @@
 import pg from "pg";
 
 const API = "http://localhost:4000/api";
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL ?? "postgresql://dmr:dmr_local_dev@localhost:5432/dmr_poultries" });
+// DBSAFE-1: fail closed — never fall back to the operational database.
+const configuredDatabaseUrl = process.env.DATABASE_URL;
+if (!configuredDatabaseUrl) {
+  throw new Error(
+    'Refusing to run vehicleOperationsConcurrency against the operational database: ' +
+    'DATABASE_URL is not set. Set DATABASE_URL to a disposable test database (for example dmr_test_<name>).'
+  );
+}
+const pool = new pg.Pool({ connectionString: configuredDatabaseUrl });
 const db = (sql, params = []) => pool.query(sql, params);
 const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const png = Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,0x0d,0x49,0x48,0x44,0x52]);
