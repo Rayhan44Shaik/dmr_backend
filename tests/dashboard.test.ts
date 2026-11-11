@@ -6,8 +6,8 @@
  * Covers the existing GET /api/operations/dashboard contract:
  *   • empty state returns zeros (not nulls, not 500)
  *   • totals from completed trips only (deleted trips excluded)
- *   • sales = delivery amounts; collections only for rate-locked trips;
- *     unlocked trips stay pending
+ *   • sales = delivery amounts; collections = approved financial Collection
+ *     Entry transactions; recovery is sales less those collections
  *   • fuel = approved bills (linked + date-ranged unlinked); pending ignored
  *   • fromDate/toDate windows scope totals; todays/weekly/monthly stay
  *     relative to asOf
@@ -154,7 +154,7 @@ describe("Operations Dashboard aggregation", () => {
     }
   });
 
-  it("2. totals aggregate completed trips; locked vs unlocked splits collections/pending", async () => {
+  it("2. totals aggregate completed trips and approved Collection Entry transactions", async () => {
     const sup = await seedSupport();
     const tripA = await seedTrip(sup, "2026-03-10");
     const delA1 = await addDelivery(tripA.id, sup.shop.id, sup.shop.shopName, 30000, 300, 500, 60);
@@ -179,15 +179,26 @@ describe("Operations Dashboard aggregation", () => {
     await addFuelBill("DB-FUEL-A", "2026-03-10", 1500, "Approved", tripA.id);
     await addFuelBill("DB-FUEL-OPEN", "2026-03-11", 700, "Approved", null);
     await addFuelBill("DB-FUEL-PEND", "2026-03-10", 9999, "Pending", tripA.id);
+    await pool.query(
+      `INSERT INTO collections (
+         collection_no, collection_date, shop_id, shop_name, amount_due,
+         amount_collected, amount, payment_mode, status, is_financial
+       ) VALUES ($1, '2026-03-10', $2, $3, 10000, 10000, 10000, 'Cash', 'Approved', TRUE)`,
+      [`DB-COL-${seq}`, sup.shop.id, sup.shop.shopName]
+    );
 
     const { status, body } = await getJson(
       baseUrl, "/api/operations/dashboard?fromDate=2026-03-01&toDate=2026-03-31&asOf=2026-03-12"
     );
     assert.equal(status, 200);
     assert.equal(body.totalTrips, 3, "one row per trip even though trip A has two deliveries");
-    assert.equal(body.totalSales, 60000, "30000 + 28000 + 2000");
-    assert.equal(body.totalCollections, 58000, "only the rate-locked trip");
-    assert.equal(body.pendingCollections, 2000, "unlocked trip B; tripless trip C adds nothing");
+    assert.equal(body.totalSales, 158000, "rate-derived delivery amounts across both trips");
+    assert.equal(body.totalCollections, 10000, "approved financial Collection Entry amount");
+    assert.equal(body.pendingCollections, 148000, "selected-period sales less approved collections");
+    assert.deepEqual(body.collectionsByMode, [{ name: "Cash", value: 10000 }]);
+    assert.equal(body.collectionPerformanceByShop.length, 1);
+    assert.equal(body.collectionPerformanceByShop[0].collectionAmount, 10000);
+    assert.equal(body.collectionPerformanceByShop[0].salesAmount, 158000);
     assert.equal(body.fuelExpenses, 2200, "approved linked + ranged unlinked; pending bill ignored");
     assert.equal(body.todaysTrips, 1);
     assert.equal(body.weeklyTrips, 3);
@@ -217,9 +228,9 @@ describe("Operations Dashboard aggregation", () => {
     );
     assert.equal(status, 200);
     assert.equal(body.totalTrips, 1);
-    assert.equal(body.totalSales, 2000);
+    assert.equal(body.totalSales, 100000);
     assert.equal(body.totalCollections, 0);
-    assert.equal(body.pendingCollections, 2000);
+    assert.equal(body.pendingCollections, 100000);
     assert.equal(body.fuelExpenses, 700, "trip-A bill excluded (trip out of range); unlinked in-range bill kept");
   });
 
@@ -234,13 +245,13 @@ describe("Operations Dashboard aggregation", () => {
       baseUrl, "/api/operations/dashboard?fromDate=2026-03-11&toDate=2026-03-11&asOf=2026-03-12"
     );
     assert.equal(body.totalTrips, 1, "deleted trip not counted");
-    assert.equal(body.totalSales, 2000, "deleted trip delivery not summed");
+    assert.equal(body.totalSales, 100000, "deleted trip delivery not summed");
     await pool.query(`UPDATE trips SET deleted = FALSE WHERE id = $1`, [doomed.id]);
     const restored = await getJson(
       baseUrl, "/api/operations/dashboard?fromDate=2026-03-11&toDate=2026-03-11&asOf=2026-03-12"
     );
     assert.equal(restored.body.totalTrips, 2);
-    assert.equal(restored.body.totalSales, 11000);
+    assert.equal(restored.body.totalSales, 200000);
     await pool.query(`UPDATE trips SET deleted = TRUE WHERE id = $1`, [doomed.id]);
   });
 

@@ -4240,8 +4240,10 @@ export const tripsService = {
       const amount = numOrNull(body.amount);
       const meter = numOrNull(body.meter);
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
+      if (litres > 200) throw new AppError(422, "Diesel litres cannot exceed 200");
       if (!(amount != null && amount > 0)) throw new AppError(422, "Diesel amount must be greater than zero");
       const rate = Number((amount / litres).toFixed(2));
+      if (rate > 200) throw new AppError(422, "Diesel rate cannot exceed 200 per litre");
       if (!isRentedVehicle && !(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
       const imageData = body.imageData != null ? str(body.imageData) : "";
       if (!imageData || imageData.length < 40) {
@@ -4424,8 +4426,10 @@ export const tripsService = {
       const amount = numOrNull(body.amount);
       const meter = numOrNull(body.meter);
       if (!(litres != null && litres > 0)) throw new AppError(422, "Diesel litres must be greater than zero");
+      if (litres > 200) throw new AppError(422, "Diesel litres cannot exceed 200");
       if (!(amount != null && amount > 0)) throw new AppError(422, "Diesel amount must be greater than zero");
       const rate = Number((amount / litres).toFixed(2));
+      if (rate > 200) throw new AppError(422, "Diesel rate cannot exceed 200 per litre");
       if (!isRentedVehicle && !(meter != null && meter > 0)) throw new AppError(422, "Diesel meter reading is required");
       const rowIndex = num(existing.rows[0].row_index);
       const neighbors = await client.query<{ meter: string; row_index: number }>(
@@ -4589,10 +4593,12 @@ export const tripsService = {
         tripId,
       ]);
 
-      // Drop matching Pending trip-synced fuel bill if present.
+      // Drop the matching trip-synced fuel bill completely. Meter-locked trips
+      // are rejected above, so an allowed delete must not leave an orphaned
+      // expense that reappears in fuel/accounting views.
       await client.query(
         `DELETE FROM fuel_expenses
-          WHERE trip_id = $1 AND source_type = 'TRIP' AND status = 'Pending' AND deleted = FALSE
+          WHERE trip_id = $1 AND source_type = 'TRIP' AND deleted = FALSE
             AND trip_fuel_entry_index = $2`,
         [tripId, rowIndex]
       );

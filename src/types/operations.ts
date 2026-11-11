@@ -27,6 +27,14 @@ export interface OperationsDashboard {
   todaysTrips: number;
   weeklyTrips: number;
   monthlyTrips: number;
+  collectionsByMode: Array<{ name: string; value: number }>;
+  collectionPerformanceByShop: Array<{
+    shopId: number | null;
+    shopName: string;
+    salesAmount: number;
+    collectionAmount: number;
+    outstandingAmount: number;
+  }>;
 }
 
 export interface ShopRate {

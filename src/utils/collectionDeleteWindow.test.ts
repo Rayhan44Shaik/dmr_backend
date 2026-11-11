@@ -4,6 +4,7 @@ import {
   COLLECTION_APPROVED_DELETE_WINDOW_DAYS,
   collectionApprovedDeleteExpiresAt,
   isCollectionApprovedDeleteWindowOpen,
+  isPendingCollectionMutationWindowOpen,
 } from "./collectionDeleteWindow.js";
 
 test("approved collections stay deletable for 14 days from approval", () => {
@@ -31,4 +32,18 @@ test("one second under 14 days the window is still open", () => {
 test("a missing approval stamp is not deletable", () => {
   assert.equal(isCollectionApprovedDeleteWindowOpen(null), false);
   assert.equal(isCollectionApprovedDeleteWindowOpen(""), false);
+});
+
+test("a newly entered pending collection remains editable when its business date is backdated", () => {
+  assert.equal(
+    isPendingCollectionMutationWindowOpen("2026-11-11T08:00:00.000Z", new Date("2026-11-11T10:00:00.000Z")),
+    true,
+  );
+});
+
+test("pending mutation closes exactly 14 days after database entry", () => {
+  assert.equal(
+    isPendingCollectionMutationWindowOpen("2026-10-28T10:00:00.000Z", new Date("2026-11-11T10:00:00.000Z")),
+    false,
+  );
 });

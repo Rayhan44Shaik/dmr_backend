@@ -173,7 +173,13 @@ function mapRow(row: Record<string, unknown>, openingBalance: number): ShopLedge
 const DATA_SELECT = `
   WITH txs AS (
     SELECT l.id, l.shop_id, l.entry_date, l.entry_type, l.reference_type,
-           l.reference_id, l.debit, l.credit, l.note, l.created_at, s.shop_name,
+           l.reference_id,
+           CASE
+             WHEN l.entry_type = 'sale' AND l.reference_type = 'shop_sale'
+               THEN COALESCE(dd.amount, l.debit)
+             ELSE l.debit
+           END::numeric AS debit,
+           l.credit, l.note, l.created_at, s.shop_name,
            COALESCE(NULLIF(dd.sale_no, ''), NULLIF(tt.trip_no, ''), NULLIF(c.collection_no, ''), '') AS ref_no,
            COALESCE(dd.sub_shop_name, '') AS sub_shop_name,
            COALESCE(dd.remarks, '') AS delivery_remarks,
@@ -242,9 +248,18 @@ const COUNT_SELECT = `SELECT COUNT(*)::text AS c FROM shop_ledger l
 async function computePerShopOpeningBalances(fromDate?: string) {
   const result = await query<{ shop_id: string; shop_name: string; opening_balance: string }>(
     `SELECT s.id::text AS shop_id, s.shop_name,
-            (s.opening_balance + COALESCE(SUM(l.debit - l.credit), 0))::text AS opening_balance
+            (s.opening_balance + COALESCE(SUM(
+              CASE
+                WHEN l.entry_type = 'sale' AND l.reference_type = 'shop_sale'
+                  THEN COALESCE(d.amount, l.debit)
+                ELSE l.debit
+              END - l.credit
+            ), 0))::text AS opening_balance
        FROM shops s LEFT JOIN shop_ledger l ON l.shop_id = s.id
         AND ($1::date IS NULL OR l.entry_date < $1::date)
+        AND l.entry_type <> 'correction'
+       LEFT JOIN trip_deliveries d ON l.entry_type = 'sale'
+        AND l.reference_type = 'shop_sale' AND d.id = l.reference_id
       GROUP BY s.id, s.shop_name, s.opening_balance ORDER BY s.shop_name, s.id`,
     [fromDate ?? null],
   );
@@ -257,14 +272,34 @@ async function computeOpeningBalance(shopId?: number, fromDate?: string) {
       `SELECT id, shop_name, opening_balance FROM shops WHERE id = $1`, [shopId]);
     if (!shop.rowCount) return { shopId, shopName: "", openingBalance: 0 };
     const before = await query<{ n: string }>(
-      `SELECT COALESCE(SUM(debit - credit), 0)::text AS n FROM shop_ledger
-        WHERE shop_id = $1 AND ($2::date IS NULL OR entry_date < $2::date)`, [shopId, fromDate ?? null]);
+      `SELECT COALESCE(SUM(
+          CASE
+            WHEN l.entry_type = 'sale' AND l.reference_type = 'shop_sale'
+              THEN COALESCE(d.amount, l.debit)
+            ELSE l.debit
+          END - l.credit
+        ), 0)::text AS n
+         FROM shop_ledger l
+         LEFT JOIN trip_deliveries d ON l.entry_type = 'sale'
+          AND l.reference_type = 'shop_sale' AND d.id = l.reference_id
+        WHERE l.shop_id = $1 AND l.entry_type <> 'correction'
+          AND ($2::date IS NULL OR l.entry_date < $2::date)`, [shopId, fromDate ?? null]);
     return { shopId, shopName: str(shop.rows[0].shop_name), openingBalance: num(shop.rows[0].opening_balance) + num(before.rows[0]?.n) };
   }
   const openings = await query<{ n: string }>(`SELECT COALESCE(SUM(opening_balance), 0)::text AS n FROM shops`);
   const before = await query<{ n: string }>(
-    `SELECT COALESCE(SUM(debit - credit), 0)::text AS n FROM shop_ledger
-      WHERE ($1::date IS NULL OR entry_date < $1::date)`, [fromDate ?? null]);
+    `SELECT COALESCE(SUM(
+        CASE
+          WHEN l.entry_type = 'sale' AND l.reference_type = 'shop_sale'
+            THEN COALESCE(d.amount, l.debit)
+          ELSE l.debit
+        END - l.credit
+      ), 0)::text AS n
+       FROM shop_ledger l
+       LEFT JOIN trip_deliveries d ON l.entry_type = 'sale'
+        AND l.reference_type = 'shop_sale' AND d.id = l.reference_id
+      WHERE l.entry_type <> 'correction'
+        AND ($1::date IS NULL OR l.entry_date < $1::date)`, [fromDate ?? null]);
   return { shopId: null, shopName: "", openingBalance: num(openings.rows[0]?.n) + num(before.rows[0]?.n) };
 }
 

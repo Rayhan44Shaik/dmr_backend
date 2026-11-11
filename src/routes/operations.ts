@@ -537,6 +537,9 @@ operationsRouter.delete(
 operationsRouter.get(
   "/shop-ledger",
   asyncHandler(async (req, res) => {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
     res.json(
       await shopLedgerService.list({
         shopId: req.query.shopId ? Number(req.query.shopId) : undefined,
@@ -580,6 +583,9 @@ operationsRouter.get(
 operationsRouter.get(
   "/shop-ledger/cumulative",
   asyncHandler(async (req, res) => {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
     const reportType = req.query.reportType;
     if (reportType != null && !["all", "sales", "collection"].includes(String(reportType))) {
       throw new AppError(400, "Invalid reportType");
@@ -596,6 +602,9 @@ operationsRouter.get(
 operationsRouter.get(
   "/shop-ledger/cumulative-quantities",
   asyncHandler(async (req, res) => {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
     res.json(await shopLedgerService.cumulativeQuantities({
       fromDate: optionalIsoDate(req.query.fromDate),
       toDate: optionalIsoDate(req.query.toDate),
@@ -612,6 +621,8 @@ operationsRouter.get(
       shopId: Number(req.query.shopId),
       limit: req.query.limit == null ? undefined : Number(req.query.limit),
       includeDeleted: req.query.includeDeleted === "true",
+      fromDate: typeof req.query.fromDate === "string" ? req.query.fromDate : undefined,
+      toDate: typeof req.query.toDate === "string" ? req.query.toDate : undefined,
     }));
   })
 );

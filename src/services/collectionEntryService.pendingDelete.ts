@@ -10,14 +10,14 @@ import { num, str } from "../utils/coerce.js";
  * - Only records that are currently `Pending Approval` and not yet financial may
  *   be deleted. Approved/financial collections are not reachable through this
  *   path (they must be rejected or handled by the existing softDelete flow).
- * - The 7-day window is enforced server-side so a pending collection cannot be
+ * - The 14-day window is enforced server-side so a pending collection cannot be
  *   silently removed after the business expected it to be approved/rejected.
  * - The collection number is permanent and is NOT cleared, so it is never reused.
  */
 export async function deletePendingCollection(id: number): Promise<CollectionEntry> {
   return withTransaction(async (client) => {
     const lockRow = await client.query(
-      `SELECT id, collection_no, collection_date, shop_id, status, deleted, is_financial, deleted_at
+      `SELECT id, collection_no, collection_date, created_at, shop_id, status, deleted, is_financial, deleted_at
          FROM collections WHERE id = $1 FOR UPDATE`,
       [id]
     );
@@ -39,13 +39,13 @@ export async function deletePendingCollection(id: number): Promise<CollectionEnt
     }
 
     const windowResult = await client.query<{ ok: boolean }>(
-      `SELECT (CURRENT_DATE <= ($1::date + INTERVAL '7 days')) AS ok`,
-      [row.collection_date]
+      `SELECT (NOW() < ($1::timestamptz + INTERVAL '14 days')) AS ok`,
+      [row.created_at]
     );
     if (!windowResult.rows[0]?.ok) {
       throw new AppError(
         409,
-        "Pending collection is outside the 7-day deletion window and cannot be removed"
+        "Pending collection is outside the 14-day deletion window and cannot be removed"
       );
     }
 

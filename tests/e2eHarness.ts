@@ -196,6 +196,56 @@ const c2Trip = await tripsService.save(null, {
   ],
 } as Record<string, unknown>);
 
+// Additive Orders live-workflow fixture (E2E-4C): the orders-live-workflow
+// spec was written against backend/tests/ordersE2eHarness.ts, which no
+// Playwright project boots. These rows use distinct ORD-E2E names so the
+// trip-workflow C2/E2E seeds above are untouched: the ORD-E2E trip occupies
+// only ORD-E2E-TRUCK-01 (Draft + start-submitted), leaving E2E-TRUCK-01 /
+// E2E-TRUCK-03 / E2E-RENTAL-01 availability exactly as the E2E-4A smoke
+// asserts it.
+const ordVehicle = await mastersService.upsertVehicle({
+  vehicleNumber: "ORD-E2E-TRUCK-01", vehicleType: "Lorry", noOfBoxes: 80,
+  birdCapacity: 5000, capacityKg: 6000, engineNumber: "ORD-E2E-ENG-01",
+  chassisNumber: "ORD-E2E-CHS-01", status: "Active",
+});
+const ordDriver = await mastersService.upsertEmployee({
+  employeeName: "Orders E2E Driver", department: "Operations", role: "Driver",
+  phoneNumber: "9700000201", licenseNumber: "ORD-E2E-DL", salary: 18000, status: "Active",
+});
+const ordSupervisor = await mastersService.upsertEmployee({
+  employeeName: "Orders E2E Supervisor", department: "Operations", role: "Supervisor",
+  phoneNumber: "9700000202", salary: 24000, status: "Active",
+});
+const ordFarm = await mastersService.upsertFarm({
+  farmName: "Orders E2E Farm", ownerName: "Orders Owner", supervisorName: "Orders Supervisor",
+  phoneNumber: "9700000203", village: "Orders Village", address: "Orders Farm Road",
+  capacity: 10000, status: "Active",
+});
+const ordBirdType = await mastersService.upsertBirdType({
+  birdType: "Orders E2E Broiler", averageWeight: 2, description: "Orders E2E", status: "Active",
+});
+for (let i = 1; i <= 5; i += 1) {
+  await mastersService.upsertShop({
+    shopName: `Orders E2E Shop ${i}`, ownerName: "Orders Owner",
+    phoneNumber: `97000003${String(i).padStart(2, "0")}`,
+    village: "Orders Village", status: "Active",
+  });
+}
+
+const ordDay = new Date().toISOString().slice(0, 10);
+await tripsService.save(null, {
+  tripDate: ordDay, status: "Draft", vehicleId: ordVehicle.id, vehicleNo: ordVehicle.vehicleNumber,
+  driverId: ordDriver.id, driverName: ordDriver.employeeName,
+  supervisorId: ordSupervisor.id, supervisorName: ordSupervisor.employeeName,
+  sourceFarmId: ordFarm.id, sourceFarm: ordFarm.farmName, birdTypeId: ordBirdType.id,
+  birdType: ordBirdType.birdType, openingMeter: 1000, startStepSubmitted: true,
+  farmStepSubmitted: true, pickupStepSubmitted: true, totalBirds: 300,
+  dcWeight: 600, farmBirdCount: 300, farmLoadWeight: 600, boxes: 30,
+  boxDetails: Array.from({ length: 30 }, (_, index) => ({
+    boxNo: index + 1, birds: 10, weight: 20,
+  })),
+});
+
 // Vite proxies /api here; browsers send Origin. Pin CORS to the FE origin
 // so SameSite session cookies work through the proxy without CORS crashes.
 const app = await startApp(

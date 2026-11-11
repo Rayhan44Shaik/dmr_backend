@@ -19,7 +19,7 @@ import { parseBody } from "../validation/operations.js";
 import { collectionEntryUpdateSchema } from "../validation/collectionEntry.js";
 import { parseCollectionEntryBody } from "../validation/collectionEntry.js";
 import { collectionEntryImportSchema, type CollectionEntryImport } from "../validation/collectionEntry.js";
-import { isCollectionApprovedDeleteWindowOpen, assertCollectionApprovedDeleteWindowOpen } from "../utils/collectionDeleteWindow.js";
+import { isCollectionApprovedDeleteWindowOpen, assertCollectionApprovedDeleteWindowOpen, assertPendingCollectionMutationWindowOpen, isPendingCollectionMutationWindowOpen } from "../utils/collectionDeleteWindow.js";
 
 type Client = pg.PoolClient;
 
@@ -363,29 +363,42 @@ export const collectionEntryService = {
     });
   },
 
-  async recent(filters: { shopId: number; limit?: number; includeDeleted?: boolean }) {
+  async recent(filters: { shopId: number; limit?: number; includeDeleted?: boolean; fromDate?: string; toDate?: string }) {
     if (!Number.isInteger(filters.shopId) || filters.shopId <= 0) {
       throw new AppError(400, "A valid shopId is required");
     }
     const requestedLimit = Number.isFinite(filters.limit) ? Math.trunc(filters.limit as number) : 10;
     const limit = Math.min(Math.max(requestedLimit, 1), 100);
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    if (filters.fromDate && !datePattern.test(filters.fromDate)) throw new AppError(400, "Invalid fromDate");
+    if (filters.toDate && !datePattern.test(filters.toDate)) throw new AppError(400, "Invalid toDate");
+    if (filters.fromDate && filters.toDate && filters.fromDate > filters.toDate) {
+      throw new AppError(400, "fromDate cannot be after toDate");
+    }
     const result = await query(
       `${SEL}
        WHERE shop_id = $1
          AND ($2::boolean = TRUE OR COALESCE(deleted, FALSE) = FALSE)
+         AND ($4::date IS NULL OR collection_date >= $4::date)
+         AND ($5::date IS NULL OR collection_date <= $5::date)
        ORDER BY collection_date DESC, created_at DESC, id DESC
        LIMIT $3`,
-      [filters.shopId, Boolean(filters.includeDeleted), limit]
+      [filters.shopId, Boolean(filters.includeDeleted), limit, filters.fromDate ?? null, filters.toDate ?? null]
     );
     return result.rows.map((row) => {
       const entry = mapEntry(row);
       const pending = String(entry.status ?? "").toLowerCase().startsWith("pending");
       const canDelete = !entry.deleted && (
         pending
-          ? true
+          ? isPendingCollectionMutationWindowOpen(entry.createdAt)
           : isCollectionApprovedDeleteWindowOpen(entry.approvedAt ?? entry.createdAt)
       );
-      return { ...entry, canDelete };
+      const canEdit = !entry.deleted && (
+        pending
+          ? isPendingCollectionMutationWindowOpen(entry.createdAt)
+          : isCollectionApprovedDeleteWindowOpen(entry.approvedAt ?? entry.createdAt)
+      );
+      return { ...entry, canDelete, canEdit };
     });
   },
 
@@ -571,6 +584,9 @@ export const collectionEntryService = {
   },
 
   async pendingSummary(date?: string, range?: { fromDate?: string; toDate?: string }) {
+    if (range?.fromDate && range?.toDate && range.fromDate > range.toDate) {
+      throw new AppError(400, "fromDate cannot be after toDate");
+    }
     const today = new Date().toISOString().slice(0, 10);
     const bounds =
       range?.fromDate && range?.toDate
@@ -581,7 +597,9 @@ export const collectionEntryService = {
           }
         : pendingRecentBounds(date);
     const result = await query(
-      `SELECT s.id AS shop_id, s.shop_name, COALESCE(s.current_balance, 0) AS balance,
+      `SELECT s.id AS shop_id, s.shop_name,
+              COALESCE(s.opening_balance, 0) + COALESCE(all_sales.amount, 0)
+                - COALESCE(all_approved.amount, 0) AS balance,
               COALESCE(ws.amount, 0) AS weekly_sales,
               COALESCE(ac.amount, 0) AS approved_collections,
               COALESCE(pc.amount, 0) AS pending_collections,
@@ -589,7 +607,20 @@ export const collectionEntryService = {
               lc.last_collection_date
          FROM shops s
          LEFT JOIN LATERAL (
-           SELECT SUM(COALESCE(d.amount, 0)) AS amount
+           SELECT SUM(COALESCE(d.amount, 0)) AS amount, COUNT(*)::int AS row_count
+             FROM trip_deliveries d JOIN trips t ON t.id = d.trip_id
+            WHERE d.shop_id = s.id AND COALESCE(d.deleted, FALSE) = FALSE
+              AND COALESCE(t.deleted, FALSE) = FALSE AND t.status = 'Completed'
+              AND COALESCE(t.rate_completed, FALSE) = TRUE
+         ) all_sales ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount
+             FROM collections c WHERE c.shop_id = s.id
+              AND COALESCE(c.deleted, FALSE) = FALSE
+              AND (COALESCE(c.is_financial, FALSE) = TRUE OR c.status = 'Approved')
+         ) all_approved ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT SUM(COALESCE(d.amount, 0)) AS amount, COUNT(*)::int AS row_count
              FROM trip_deliveries d JOIN trips t ON t.id = d.trip_id
             WHERE d.shop_id = s.id AND COALESCE(d.deleted, FALSE) = FALSE
               AND COALESCE(t.deleted, FALSE) = FALSE AND COALESCE(t.rate_completed, FALSE) = TRUE
@@ -613,6 +644,7 @@ export const collectionEntryService = {
            SELECT MAX(c.collection_date) AS last_collection_date
              FROM collections c WHERE c.shop_id = s.id AND COALESCE(c.deleted, FALSE) = FALSE
               AND (COALESCE(c.is_financial, FALSE) = TRUE OR c.status = 'Approved')
+              AND ($3::boolean = FALSE OR c.collection_date BETWEEN $1::date AND $2::date)
          ) lc ON TRUE
          LEFT JOIN LATERAL (
            SELECT SUM(COALESCE(c.amount, c.amount_collected, 0)) AS amount
@@ -621,12 +653,16 @@ export const collectionEntryService = {
               AND lc.last_collection_date IS NOT NULL
               AND c.collection_date = lc.last_collection_date
          ) lca ON TRUE
-        WHERE s.status = 'Active'
-           OR COALESCE(s.opening_balance, 0) <> 0
-           OR COALESCE(s.current_balance, 0) <> 0
-           OR COALESCE(pc.row_count, 0) > 0
+        WHERE (
+          $3::boolean = FALSE
+          AND ((COALESCE(s.opening_balance, 0) + COALESCE(all_sales.amount, 0)
+                - COALESCE(all_approved.amount, 0)) <> 0 OR COALESCE(pc.row_count, 0) > 0)
+        ) OR (
+          $3::boolean = TRUE
+          AND (COALESCE(ws.row_count, 0) > 0 OR COALESCE(ac.row_count, 0) > 0 OR COALESCE(pc.row_count, 0) > 0)
+        )
         ORDER BY s.shop_name`,
-      [bounds.weekStart, bounds.weekEnd]
+      [bounds.weekStart, bounds.weekEnd, Boolean(range?.fromDate && range?.toDate)]
     );
     const shops = result.rows.map((row) => {
       const weeklySales = num(row.weekly_sales);
@@ -635,7 +671,9 @@ export const collectionEntryService = {
       // Recent Collections must match the shop view's latest approved day.
       // A week with no collections used to print ₹0 while Last Collection
       // still showed 19/10 with money in the view.
-      const approved = windowApproved > 0 ? windowApproved : lastDayApproved;
+      const approved = range?.fromDate && range?.toDate
+        ? windowApproved
+        : (windowApproved > 0 ? windowApproved : lastDayApproved);
       const lastDate = dateOnly(row.last_collection_date);
       const overdueDays = lastDate ? Math.max(0, Math.floor((new Date(`${bounds.asOfDate}T00:00:00Z`).getTime() - new Date(`${lastDate}T00:00:00Z`).getTime()) / 86_400_000)) : null;
       return {
@@ -814,6 +852,9 @@ export const collectionEntryService = {
         const existing = mapEntry(lockRow.rows[0]);
         const imported = await isImportedCollection(client, id);
         if (existing.deleted) throw new AppError(409, "Cannot edit a deleted collection");
+        if (!existing.isFinancial && existing.status === "Pending Approval") {
+          assertPendingCollectionMutationWindowOpen(existing.createdAt, existing.collectionNo);
+        }
 
         const newAmount = data.amount !== undefined ? data.amount : existing.amount;
         const newDate = data.collectionDate !== undefined ? dateOnly(data.collectionDate) : existing.collectionDate;

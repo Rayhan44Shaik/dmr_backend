@@ -275,6 +275,13 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
         WHERE id = $1`,
       [delivery.rows[0].id]
     );
+    // Reproduce a database where the canonical delivery was corrected but the
+    // denormalized ledger copy remained stale (the production symptom).
+    await pool.query(
+      `UPDATE shop_ledger SET debit = 5000
+        WHERE reference_type = 'shop_sale' AND reference_id = $1`,
+      [delivery.rows[0].id],
+    );
     const edited = await shopLedgerService.list({
       shopId: shop.id,
       fromDate: "2026-08-07",
@@ -284,6 +291,19 @@ describe("Shop Ledger — complete history with shop + custom date range", () =>
     assert.equal(edited.data[0].birds, 2000);
     assert.equal(edited.data[0].weight, 3456.75);
     assert.equal(edited.data[0].rate, 187.25);
+    assert.equal(edited.data[0].debit, 647276.44, "ledger debit follows the current Shop Sale amount");
+    assert.equal(edited.data[0].balance, 647276.44, "running balance uses the current Shop Sale amount");
+
+    const followingRange = await shopLedgerService.list({
+      shopId: shop.id,
+      fromDate: "2026-08-08",
+      toDate: "2026-08-08",
+    });
+    assert.equal(
+      followingRange.openingBalance,
+      647276.44,
+      "a later statement carries forward the current Shop Sale amount",
+    );
   });
 
   it("2c. legacy trip ledger rows show a shop's birds and weight only on the original sale", async () => {

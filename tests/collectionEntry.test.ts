@@ -397,8 +397,9 @@ describe("Collection edit/approve/delete idempotency", () => {
   it("moves a pending collection to another active shop without losing its amount", async () => {
     const source = await seedShop(1000);
     const target = await seedShop(2000);
+    const today = new Date().toISOString().slice(0, 10);
     const collection = await collectionEntryService.create({
-      collectionDate: "2026-08-16",
+      collectionDate: today,
       shopId: source.id,
       amount: 750,
       remarks: "MOVE WITH PAYMENT",
@@ -458,6 +459,68 @@ describe("Collection edit/approve/delete idempotency", () => {
     const before = await currentOutstanding(shop.id);
     await collectionEntryService.reject(c.id, { reason: "n/a" });
     assert.equal(await currentOutstanding(shop.id), before, "rejected pending collection has no effect");
+  });
+
+  it("15b. direct PostgreSQL corrections keep approved collection and shop balance synchronized", async () => {
+    const source = await seedShop(10000);
+    const target = await seedShop(20000);
+    const collection = await collectionEntryService.create({
+      collectionDate: "2026-08-16",
+      shopId: source.id,
+      amount: 2000,
+    });
+    await collectionEntryService.approve(collection.id);
+    assert.equal(await currentOutstanding(source.id), 8000);
+
+    await pool.query(
+      `UPDATE collections
+          SET amount = 2500, collection_date = '2026-08-17', shop_id = $2,
+              shop_name = $3
+        WHERE id = $1`,
+      [collection.id, target.id, target.name],
+    );
+
+    assert.equal(await currentOutstanding(source.id), 10000, "old shop credit is removed");
+    assert.equal(await currentOutstanding(target.id), 17500, "new shop receives the corrected credit once");
+    const ledger = await pool.query(
+      `SELECT shop_id, entry_date::text AS entry_date, credit
+         FROM shop_ledger
+        WHERE reference_type = 'collection' AND reference_id = $1`,
+      [collection.id],
+    );
+    assert.equal(ledger.rowCount, 1, "one canonical ledger row remains");
+    assert.equal(Number(ledger.rows[0].shop_id), target.id);
+    assert.equal(ledger.rows[0].entry_date, "2026-08-17");
+    assert.equal(Number(ledger.rows[0].credit), 2500);
+
+    await pool.query(`UPDATE collections SET deleted = TRUE WHERE id = $1`, [collection.id]);
+    assert.equal(await currentOutstanding(target.id), 20000, "direct soft-delete removes the credit");
+  });
+
+  it("15c. pending amount edits persist inside 14 days and are locked afterwards", async () => {
+    const shop = await seedShop(10000);
+    const today = new Date().toISOString().slice(0, 10);
+    const editable = await collectionEntryService.create({ collectionDate: today, shopId: shop.id, amount: 500 });
+    const saved = await collectionEntryService.update(editable.id, { amount: 725 });
+    assert.equal(saved.amount, 725);
+    const stored = await pool.query(`SELECT amount, amount_due, amount_collected FROM collections WHERE id = $1`, [editable.id]);
+    assert.equal(Number(stored.rows[0].amount), 725);
+    assert.equal(Number(stored.rows[0].amount_due), 725);
+    assert.equal(Number(stored.rows[0].amount_collected), 725);
+
+    await pool.query(`UPDATE collections SET amount_collected = 13971 WHERE id = $1`, [editable.id]);
+    const normalized = await pool.query(`SELECT amount, amount_due, amount_collected FROM collections WHERE id = $1`, [editable.id]);
+    assert.equal(Number(normalized.rows[0].amount), 13971, "pgAdmin amount_collected edit updates canonical amount");
+    assert.equal(Number(normalized.rows[0].amount_due), 13971, "all compatibility amount columns stay synchronized");
+    const recent = await collectionEntryService.recent({ shopId: shop.id, limit: 10 });
+    assert.equal(recent.find((row) => row.id === editable.id)?.amount, 13971, "pending view reads the direct DB correction");
+
+    const oldDate = new Date(Date.now() - 15 * 86_400_000).toISOString().slice(0, 10);
+    const locked = await collectionEntryService.create({ collectionDate: oldDate, shopId: shop.id, amount: 300 });
+    await assert.rejects(
+      collectionEntryService.update(locked.id, { amount: 350 }),
+      /14 days|locked/i,
+    );
   });
 });
 
