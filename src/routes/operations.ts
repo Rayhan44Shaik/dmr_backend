@@ -16,7 +16,9 @@ import { manualExpensesService } from "../services/manualExpensesService.js";
 import { parsePagination } from "../utils/pagination.js";
 import { operationsSensitiveBoundary, operationsTripsBoundary } from "../middleware/businessBoundary.js";
 import { operationsPendingDeleteRouter } from "./operations_pending_delete.js";
+import { exportOnly } from "../middleware/staffRateLimit.js";
 export const operationsRouter = Router();
+operationsRouter.use(exportOnly);
 operationsRouter.use(operationsTripsBoundary, operationsSensitiveBoundary);
 
 function tripListFilters(req: { query: Record<string, unknown> }) {

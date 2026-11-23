@@ -2,7 +2,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { authService } from "../services/authService.js";
 import { AppError, asyncHandler } from "../middleware/errorHandler.js";
-import { authExpiresAt, authToken, authUser, clearSessionCookie, requestToken, requireAuth, sessionCookie } from "../middleware/auth.js";
+import { authToken, authUser, clearSessionCookie, requestToken, requireAuth, sessionCookie } from "../middleware/auth.js";
+import { clientAddress } from "../middleware/clientAddress.js";
 
 export const authRouter = Router();
 const credentials = z.object({ username: z.string().trim().min(1).max(100), password: z.string().min(1).max(1024) }).strict();
@@ -32,9 +33,9 @@ const resetRequests = new Map<string, { count: number; resetAt: number }>();
 const RESET_WINDOW_MS = 15 * 60 * 1000;
 const RESET_ATTEMPTS = 5;
 
-function auditMeta(req: { ip?: string }, res: { locals: Record<string, unknown> }) {
+function auditMeta(req: Parameters<typeof clientAddress>[0], res: { locals: Record<string, unknown> }) {
   return {
-    ip: typeof req.ip === "string" ? req.ip : null,
+    ip: clientAddress(req),
     requestId: typeof res.locals.requestId === "string" ? (res.locals.requestId as string) : null,
     userAgent: typeof (req as { headers?: Record<string,string> }).headers?.["user-agent"] === "string" ? (req as { headers: Record<string,string> }).headers["user-agent"] : null,
   };
@@ -43,7 +44,7 @@ function auditMeta(req: { ip?: string }, res: { locals: Record<string, unknown> 
 authRouter.post("/login", asyncHandler(async (req, res) => {
   const parsed = credentials.safeParse(req.body);
   if (!parsed.success) throw new AppError(400, "Invalid login request");
-  const loginKey = `${req.ip}:${parsed.data.username.toLowerCase()}`;
+  const loginKey = `${clientAddress(req)}:${parsed.data.username.toLowerCase()}`;
   // Shared (multi-instance) allowance first; memory map remains as fallback
   // inside the service when the store is unreachable.
   await authService.throttleConsume(loginKey);
@@ -67,20 +68,13 @@ authRouter.post("/login", asyncHandler(async (req, res) => {
   }
   if ("mfaRequired" in session && session.mfaRequired) {
     // Password accepted, second factor pending. No session exists yet — the
-    // ticket authorizes exactly one verify call (same shape for mobile).
+    // ticket authorizes exactly one verify call.
     return res.json({ mfaRequired: true, mfaTicket: session.mfaTicket, user: session.user });
   }
-  const mobile = req.baseUrl.includes("/mobile/");
-  if (mobile) {
-    if (session.user.role !== "SUPERVISOR" || session.user.employeeId == null) {
-      await authService.logout(session.token, auditMeta(req, res));
-      throw new AppError(403, "Mobile access requires a linked Supervisor account");
-    }
-    return res.json({ token: session.token, expiresAt: session.expiresAt, supervisor: mobileProfile(session.user) });
-  }
-  // Desktop: HttpOnly cookie for same-origin browsers, plus `token` in the body
-  // so the SPA Bearer [REDACTED] (localStorage) can authenticate through the Vite
-  // /api proxy without relying on cookie forwarding alone.
+  // Desktop authentication is cookie-only. The session token is never exposed
+  // to browser JavaScript. Supervisor Mobile is intentionally disabled in this
+  // release (no /mobile router exists), so no token-returning login branch is
+  // kept here.
   res.setHeader("Set-Cookie", sessionCookie(session.token, session.expiresAt));
   return res.json({
     user: session.user,
@@ -98,13 +92,8 @@ authRouter.post("/activity", requireAuth, asyncHandler(async (req, res) => {
   if (!touched) throw new AppError(401, "Authentication required");
   return res.json({ expiresAt: touched.expiresAt, version: touched.version });
 }));
-authRouter.get("/me", requireAuth, asyncHandler(async (req, res) => {
-  const user = authUser(res);
-  if (req.baseUrl.includes("/mobile/")) {
-    if (user.role !== "SUPERVISOR" || user.employeeId == null) throw new AppError(403, "Mobile access requires a linked Supervisor account");
-    return res.json({ supervisor: mobileProfile(user), expiresAt: authExpiresAt(res) });
-  }
-  return res.json({ user });
+authRouter.get("/me", requireAuth, asyncHandler(async (_req, res) => {
+  return res.json({ user: authUser(res) });
 }));
 authRouter.get("/profile", requireAuth, asyncHandler(async (_req, res) => {
   const user = authUser(res);
@@ -143,12 +132,14 @@ authRouter.post("/change-password", requireAuth, asyncHandler(async (req, res) =
  * same status, comparable work). Rate limited per IP+account.
  */
 authRouter.post("/forgot-password", asyncHandler(async (req, res) => {
+  // Never cache a reset response: it is per-request and never reusable.
+  res.setHeader("Cache-Control", "no-store");
   const parsed = forgotPasswordBody.safeParse(req.body);
   if (!parsed.success) {
     // Generic shape even for malformed input (no oracle either way).
     return res.json({ message: "If an account exists for that username, a reset was prepared." });
   }
-  const resetKey = `${req.ip}:${parsed.data.username.toLowerCase()}`;
+  const resetKey = `${clientAddress(req)}:${parsed.data.username.toLowerCase()}`;
   const prior = resetRequests.get(resetKey);
   if (prior && prior.resetAt > Date.now() && prior.count >= RESET_ATTEMPTS) {
     throw new AppError(429, "Too many reset attempts; try again later");
@@ -158,8 +149,9 @@ authRouter.post("/forgot-password", asyncHandler(async (req, res) => {
   resetRequests.set(resetKey, { ...current, count: current.count + 1 });
   return res.json({
     message: "If an account exists for that username, a reset was prepared.",
-    // Present ONLY outside production, for operator relay until a delivery
-    // channel is configured. Production responses never contain it.
+    // Present ONLY outside production, for operator relay when no mail
+    // transport is configured. Production responses never contain it, and
+    // the link itself is only ever delivered by email.
     ...(result.resetToken ? { resetToken: result.resetToken } : {}),
   });
 }));
@@ -170,6 +162,7 @@ authRouter.post("/forgot-password", asyncHandler(async (req, res) => {
  * signs in normally afterwards.
  */
 authRouter.post("/reset-password", asyncHandler(async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   const parsed = resetPasswordBody.safeParse(req.body);
   if (!parsed.success) throw new AppError(401, "This reset link is invalid or has expired");
   await authService.completePasswordReset(parsed.data.token, parsed.data.newPassword, auditMeta(req, res));
@@ -203,20 +196,13 @@ authRouter.post("/mfa/confirm", requireAuth, asyncHandler(async (req, res) => {
 }));
 
 /**
- * Consume a login challenge ticket. Creates the real session on success
- * (desktop cookie+token shape, or the mobile supervisor shape).
+ * Consume a login challenge ticket. Creates the real session on success and
+ * returns it only as a desktop HttpOnly cookie.
  */
 authRouter.post("/mfa/verify", asyncHandler(async (req, res) => {
   const parsed = mfaVerifyBody.safeParse(req.body);
   if (!parsed.success) throw new AppError(401, "Two-factor verification failed");
   const session = await authService.mfaVerifyTicket(parsed.data.ticket, parsed.data.code, auditMeta(req, res));
-  if (req.baseUrl.includes("/mobile/")) {
-    if (session.user.role !== "SUPERVISOR" || session.user.employeeId == null) {
-      await authService.logout(session.token, auditMeta(req, res));
-      throw new AppError(403, "Mobile access requires a linked Supervisor account");
-    }
-    return res.json({ token: session.token, expiresAt: session.expiresAt, supervisor: mobileProfile(session.user) });
-  }
   res.setHeader("Set-Cookie", sessionCookie(session.token, session.expiresAt));
   return res.json({
     user: session.user,
@@ -245,14 +231,3 @@ authRouter.post("/mfa/reset/:userId", requireAuth, asyncHandler(async (req, res)
   await authService.mfaAdminReset(authUser(res), target, auditMeta(req, res));
   return res.status(204).end();
 }));
-
-function mobileProfile(user: ReturnType<typeof authUser>) {
-  return {
-    accountId: String(user.id),
-    employeeId: user.employeeId,
-    employeeName: user.displayName,
-    username: user.username,
-    role: user.role,
-    department: "Operations",
-  };
-}

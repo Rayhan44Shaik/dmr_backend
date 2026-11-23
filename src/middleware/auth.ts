@@ -31,7 +31,6 @@ export const requireAuth: RequestHandler = asyncHandler(async (req, res, next) =
     session = await authService.authenticate(cookie);
     if (session) {
       authenticatedToken = cookie;
-      res.setHeader("X-DMR-Session-Token", cookie);
     }
   }
   if (!session) throw new AppError(401, "Authentication required");

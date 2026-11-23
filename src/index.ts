@@ -1,12 +1,13 @@
 ﻿import http from "node:http";
 import cors from "cors";
 import express from "express";
-import { env } from "./config/env.js";
+import { env, isSmtpDeliveryEnabled } from "./config/env.js";
 import { pool } from "./config/db.js";
 import { apiRouter } from "./routes/index.js";
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
 import { requestId } from "./middleware/requestId.js";
 import { securityHeaders } from "./middleware/securityHeaders.js";
+import { protectCookieWrites } from "./middleware/browserRequest.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -31,54 +32,26 @@ app.use(
       return callback(null, false);
     },
     credentials: true,
-    exposedHeaders: ["X-DMR-Session-Token"],
   })
 );
-app.use(express.json({ limit: "25mb" }));
+
+// Default JSON bodies are intentionally small. Only known high-volume
+// spreadsheet/import endpoints receive the larger cap, so a pre-auth request
+// cannot make the process buffer an arbitrary 25 MB body. `inflate: false`
+// rejects compressed request bodies; this API does not accept them.
+const JSON_DEFAULT_LIMIT = "1mb";
+const JSON_BULK_LIMIT = "12mb";
+const BULK_JSON_PATH =
+  /^\/api\/(?:masters\/[^/]+\/(?:bulk|opening-balances\/bulk)|operations\/collection-entry\/(?:import|import-validate)|accounts\/farm-payments)(?:\/|$)/i;
+const parseDefaultJson = express.json({ limit: JSON_DEFAULT_LIMIT, inflate: false });
+const parseBulkJson = express.json({ limit: JSON_BULK_LIMIT, inflate: false });
+app.use((req, res, next) =>
+  (BULK_JSON_PATH.test(req.path) ? parseBulkJson : parseDefaultJson)(req, res, next)
+);
+app.use(protectCookieWrites);
 
 app.get("/", (_req, res) => {
-  res.json({
-    name: "DMR Poultries API",
-    phase: "2 — Masters + Trips + Staff + Operations",
-    docs: {
-      swagger: "GET /api/docs",
-      openapi: "GET /api/docs/openapi.json",
-      health: "GET /api/health",
-      masters: "GET /api/masters/{employees|vehicles|farms|shops|banks|bird-types}",
-      trips: "GET|POST /api/trips  PUT /api/trips/:id  POST /api/trips/:id/steps/:step  PATCH /api/trips/:id/status",
-      staff: "GET|POST /api/staff/{duties|leaves|salaries|advances|attendance}",
-      operations: {
-        dashboard: "GET /api/operations/dashboard",
-        trips: "GET|POST /api/operations/trips",
-        tripList: "GET /api/operations/trip-list",
-        rateEntry:
-          "GET /api/operations/rate-entry  A GET/PUT /api/operations/rate-entry/:tripId  A POST /api/operations/rate-entry/:tripId/lock",
-        shopRates: "GET|POST /api/operations/shop-rates",
-        shopSales: "GET|POST /api/operations/shop-sales",
-        collections: "GET|POST /api/operations/collections",
-        fuelExpenses: "GET|POST /api/operations/fuel-expenses",
-      },
-      fleet: {
-        maintenance: "GET|POST /api/fleet/maintenance  PUT /api/fleet/maintenance/:id",
-        approve: "POST /api/fleet/maintenance/:id/approve",
-        reject: "POST /api/fleet/maintenance/:id/reject",
-        delete: "DELETE /api/fleet/maintenance/:id",
-        documents: "GET /api/fleet/maintenance/:id/documents",
-        document: "GET|DELETE /api/fleet/maintenance/:id/documents/:documentId",
-        permits: "GET /api/fleet/permits  GET /api/fleet/permits/summary",
-        permitUpsert: "PUT /api/fleet/permits/:vehicleId/:docType",
-        permitDelete: "DELETE /api/fleet/permits/:vehicleId/:docType",
-        permitDocument: "GET /api/fleet/permits/:vehicleId/:docType/document",
-        emis: "GET|POST /api/fleet/emis  PUT|DELETE /api/fleet/emis/:id",
-        emiSchedule: "GET /api/fleet/emis/:id/schedule",
-        emiPay: "POST /api/fleet/emis/:id/pay",
-      },
-      accounts: {
-        payments: "GET|POST /api/accounts/payments  PUT|DELETE /api/accounts/payments/:id",
-        farmPayments: "GET|PUT /api/accounts/farm-payments",
-      },
-    },
-  });
+  res.json({ name: "DMR Poultries API", ok: true });
 });
 
 app.use("/api", apiRouter);
@@ -91,7 +64,7 @@ function sleep(ms: number) {
 
 /** Bind with short retries — tsx watch on Windows can restart before the
  * previous listener has fully released PORT. */
-async function listen(server: http.Server, port: number, attempts = 20): Promise<void> {
+async function listen(server: http.Server, port: number, host: string, attempts = 20): Promise<void> {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       await new Promise<void>((resolve, reject) => {
@@ -106,8 +79,9 @@ async function listen(server: http.Server, port: number, attempts = 20): Promise
         server.once("error", onError);
         server.once("listening", onListening);
         // Bind IPv4 explicitly so Vite's 127.0.0.1:4000 proxy always reaches
-        // this process (avoids dual-stack races on Windows).
-        server.listen(port, "0.0.0.0");
+        // this process (avoids dual-stack races on Windows). Production binds
+        // loopback only: the Cloudflare Tunnel is the sole public path.
+        server.listen(port, host);
       });
       return;
     } catch (err) {
@@ -144,25 +118,43 @@ async function start() {
   server.headersTimeout = 6_000;
   server.requestTimeout = 60_000;
 
+  const configuredGrace = Number(process.env.SHUTDOWN_GRACE_MS ?? 15_000);
+  const shutdownGraceMs = Number.isFinite(configuredGrace)
+    ? Math.max(1_000, Math.min(30_000, configuredGrace))
+    : 15_000;
   let exiting = false;
+  let finished = false;
+  let shutdownTimer: NodeJS.Timeout | null = null;
+  let hardExitTimer: NodeJS.Timeout | null = null;
+  const finish = (code: number) => {
+    if (finished) return;
+    finished = true;
+    if (shutdownTimer) clearTimeout(shutdownTimer);
+    if (hardExitTimer) clearTimeout(hardExitTimer);
+    void pool.end().finally(() => process.exit(code));
+  };
   const exitNow = (code = 0) => {
     if (exiting) return;
     exiting = true;
+    // Stop accepting new work, let idle keep-alive sockets go immediately,
+    // then allow active requests up to the configured drain window.
     try {
-      server.closeAllConnections();
+      server.closeIdleConnections();
     } catch {
       /* Node < 18.2 or already closed */
     }
-    try {
-      server.close();
-    } catch {
-      /* ignore */
-    }
-    void pool.end().finally(() => {
-      process.exit(code);
-    });
-    // Hard ceiling — never block tsx watch from respawning.
-    setTimeout(() => process.exit(code), 250).unref();
+    server.close(() => finish(code));
+    shutdownTimer = setTimeout(() => {
+      try {
+        server.closeAllConnections();
+      } catch {
+        /* already closed */
+      }
+      finish(code);
+    }, shutdownGraceMs);
+    shutdownTimer.unref();
+    hardExitTimer = setTimeout(() => process.exit(code), shutdownGraceMs + 5_000);
+    hardExitTimer.unref();
   };
 
   const shutdown = (signal: string) => {
@@ -178,8 +170,11 @@ async function start() {
     process.once("SIGBREAK", () => shutdown("SIGBREAK"));
   }
 
+  // The API is always loopback-only. The Cloudflare Tunnel is the sole
+  // public path; development uses the same boundary.
+  const listenHost = "127.0.0.1";
   try {
-    await listen(server, env.port);
+    await listen(server, env.port, listenHost);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") {
       console.error(
@@ -192,8 +187,16 @@ async function start() {
     throw err;
   }
 
-  console.log(`DMR backend listening on http://0.0.0.0:${env.port}`);
-  console.log(`PostgreSQL: ${env.databaseUrl.replace(/:[^:@]+@/, ":***@")}`);
+  console.log(`DMR backend listening on http://${listenHost}:${env.port}`);
+  // Never print the connection string: a password containing `:` or `@` can
+  // survive naive masking. The host/credentials belong in secret management.
+  console.log("PostgreSQL: connected");
+  // Static reasons only: never an SMTP value, host, or credential.
+  if (!env.smtp.configured) {
+    console.warn(`Password-reset email delivery is disabled: ${env.smtp.problem ?? "SMTP is not configured"}.`);
+  } else if (!isSmtpDeliveryEnabled()) {
+    console.warn("Password-reset email delivery is disabled outside production (set SMTP_DELIVERY_ENABLED=true to opt in).");
+  }
 }
 
 start().catch((err) => {

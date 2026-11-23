@@ -45,13 +45,13 @@ const monthString = z.preprocess(
 const intString = (label: string) =>
   z.preprocess(
     (v) => (typeof v === "string" && v.trim() !== "" ? Number(v) : v),
-    z.number({ invalid_type_error: `${label} must be a number` }).int(`${label} must be an integer`).positive(`${label} must be positive`)
+    z.number({ error: `${label} must be a number` }).int(`${label} must be an integer`).positive(`${label} must be positive`)
   );
 
 const optionalInt = (label: string) =>
   z.preprocess(
     (v) => (typeof v === "string" && v.trim() !== "" ? Number(v) : v),
-    z.number({ invalid_type_error: `${label} must be a number` }).int(`${label} must be an integer`).positive(`${label} must be positive`).optional()
+    z.number({ error: `${label} must be a number` }).int(`${label} must be an integer`).positive(`${label} must be positive`).optional()
   );
 
 // ---------------------------------------------------------------------------
@@ -69,19 +69,16 @@ export interface LeaveCreateBody {
 export const leaveCreateSchema = z
   .object({
     employeeId: z
-      .number({
-        required_error: "employeeId is required",
-        invalid_type_error: "employeeId must be a number",
-      })
+      .number({ error: "employeeId must be a number" })
       .int("employeeId must be an integer")
       .positive("employeeId must be a positive integer"),
     type: z.enum(["Casual", "Sick", "Emergency", "Annual"], {
-      errorMap: () => ({ message: "type must be one of Casual | Sick | Emergency | Annual" }),
+      error: "type must be one of Casual | Sick | Emergency | Annual",
     }),
     fromDate: dateString,
     toDate: dateString,
     days: z
-      .number({ invalid_type_error: "days must be a number" })
+      .number({ error: "days must be a number" })
       .finite("days must be finite")
       .positive("days must be greater than 0")
       .optional(),
@@ -102,7 +99,7 @@ export interface LeaveStatusBody {
 
 export const leaveStatusSchema = z.object({
   status: z.enum(["Approved", "Rejected", "Cancelled"], {
-    errorMap: () => ({ message: "status must be one of Approved | Rejected | Cancelled" }),
+    error: "status must be one of Approved | Rejected | Cancelled",
   }),
   rejectionReason: z.preprocess(trimmed, z.string().optional()),
   approvedBy: z.string().optional(),

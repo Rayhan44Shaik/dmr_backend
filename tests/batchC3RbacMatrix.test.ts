@@ -159,13 +159,10 @@ describe("SEC-02 six-role server-side matrix", () => {
     OWNER: "allow", FULL_ACCESS: "allow", AUDIT: "allow", OFFICE: "deny", COLLECTION: "deny", SUPERVISOR: "deny",
   });
 
-  matrixCell("Accounts", "payments create", "POST", "/api/accounts/payments", {
-    OWNER: "allow", FULL_ACCESS: "allow", AUDIT: "deny", OFFICE: "deny", COLLECTION: "deny", SUPERVISOR: "deny",
-  }, () => ({}));
+  // Financial writes are OWNER-only; FULL_ACCESS deliberately has no bypass.
+  matrixCell("Accounts", "payments create", "POST", "/api/accounts/payments", ownerOnly, () => ({}));
 
-  matrixCell("Fleet", "maintenance approve", "POST", "/api/fleet/maintenance/999999/approve", {
-    OWNER: "allow", FULL_ACCESS: "allow", AUDIT: "deny", OFFICE: "deny", COLLECTION: "deny", SUPERVISOR: "deny",
-  }, () => ({}));
+  matrixCell("Fleet", "maintenance approve", "POST", "/api/fleet/maintenance/999999/approve", ownerOnly, () => ({}));
 
   matrixCell("Staff", "salary summary read", "GET", "/api/staff/salaries/month-summary", {
     OWNER: "allow", FULL_ACCESS: "allow", AUDIT: "allow", OFFICE: "deny", COLLECTION: "deny", SUPERVISOR: "deny",

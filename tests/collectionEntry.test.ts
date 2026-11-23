@@ -515,8 +515,13 @@ describe("Collection edit/approve/delete idempotency", () => {
     const recent = await collectionEntryService.recent({ shopId: shop.id, limit: 10 });
     assert.equal(recent.find((row) => row.id === editable.id)?.amount, 13971, "pending view reads the direct DB correction");
 
-    const oldDate = new Date(Date.now() - 15 * 86_400_000).toISOString().slice(0, 10);
-    const locked = await collectionEntryService.create({ collectionDate: oldDate, shopId: shop.id, amount: 300 });
+    // The window is anchored to entry time, not the (legitimately backdatable)
+    // business collection date. Age the row itself to exercise the lock.
+    const locked = await collectionEntryService.create({ collectionDate: today, shopId: shop.id, amount: 300 });
+    await pool.query(
+      `UPDATE collections SET created_at = NOW() - INTERVAL '15 days' WHERE id = $1`,
+      [locked.id],
+    );
     await assert.rejects(
       collectionEntryService.update(locked.id, { amount: 350 }),
       /14 days|locked/i,

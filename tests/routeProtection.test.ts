@@ -129,7 +129,7 @@ describe("operations/trips shadow path enforces trip ownership", () => {
   });
 });
 
-describe("financial/approval mutations require OWNER or FULL_ACCESS", () => {
+  describe("financial/approval mutations require OWNER", () => {
   it("supervisor approve/reject/payments/lock attempts return 403", async () => {
     assert.equal((await api("POST", "/api/fleet/maintenance/1/approve", supervisorCookie, {})).response.status, 403);
     assert.equal((await api("POST", "/api/fleet/maintenance/1/reject", supervisorCookie, {})).response.status, 403);

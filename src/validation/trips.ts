@@ -140,9 +140,9 @@ const stepValidators: Record<TripWizardStep, z.ZodType<unknown>> = {
     .object({
       tripDate: tripBusinessDateSchema,
       // FIXED: Moved required_error inside z.coerce.number() instead of .int()
-      vehicleId: z.coerce.number({ required_error: "Vehicle is required" }).int().positive(),
-      driverId: z.coerce.number({ required_error: "Driver is required" }).int().positive(),
-      supervisorId: z.coerce.number({ required_error: "Supervisor is required" }).int().positive(),
+      vehicleId: z.coerce.number({ error: "Vehicle is required" }).int().positive(),
+      driverId: z.coerce.number({ error: "Driver is required" }).int().positive(),
+      supervisorId: z.coerce.number({ error: "Supervisor is required" }).int().positive(),
       helpers: crewNames,
       loaders: crewNames,
       isRentedVehicle: z.boolean().optional(),
@@ -331,7 +331,7 @@ export function validateStepSubmit(step: TripWizardStep, body: unknown) {
 }
 
 function firstValidationMessage(
-  result: z.SafeParseError<unknown>,
+  result: z.ZodSafeParseError<unknown>,
   step: TripWizardStep
 ): string | null {
   for (const fieldErrors of Object.values(result.error.flatten().fieldErrors)) {

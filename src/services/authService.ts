@@ -1,10 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { env } from "../config/env.js";
+import { env, isUsableEmailAddress } from "../config/env.js";
 import { query, withTransaction } from "../config/db.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { isPgError } from "../utils/pgErrors.js";
 import { verifyPassword, hashPassword } from "../utils/passwordHash.js";
 import { syncLocalCredentialsPassword } from "../utils/localCredentials.js";
+import { buildPasswordResetUrl, sendPasswordResetEmail } from "./passwordResetMail.js";
 import type { AppRole } from "../security/rbac.js";
 
 export type { AppRole } from "../security/rbac.js";
@@ -15,6 +16,12 @@ export const SESSION_ABSOLUTE_MS = 8 * 60 * 60 * 1000;
 /** Genuine-inactivity timeout enforced on the SERVER (server time). */
 export const SESSION_IDLE_MS = 10 * 60 * 1000;
 const SESSION_MS = SESSION_ABSOLUTE_MS;
+/** Password-reset link lifetime: single-use, hashed at rest. */
+export const PASSWORD_RESET_TTL_MS = 15 * 60 * 1000;
+export const PASSWORD_RESET_TTL_MINUTES = PASSWORD_RESET_TTL_MS / 60_000;
+/** Per-account reset allowance, independent of the requesting IP. */
+const PASSWORD_RESET_ATTEMPTS = 5;
+const PASSWORD_RESET_WINDOW_MS = 15 * 60 * 1000;
 
 const TOTP_STEP_MS = 30_000;
 const TOTP_DIGITS = 6;
@@ -101,7 +108,10 @@ export function encryptMfaSecret(secret: Buffer): string {
 export function decryptMfaSecret(packed: string): Buffer {
   const [ivHex, dataHex, tagHex] = String(packed ?? "").split(":");
   try {
-    const decipher = createDecipheriv("aes-256-gcm", mfaEncryptionKey(), Buffer.from(ivHex, "hex"));
+    if (!/^[0-9a-f]{24}$/i.test(ivHex) || !/^(?:[0-9a-f]{2})+$/i.test(dataHex) || !/^[0-9a-f]{32}$/i.test(tagHex)) {
+      throw new Error("Invalid encrypted MFA secret");
+    }
+    const decipher = createDecipheriv("aes-256-gcm", mfaEncryptionKey(), Buffer.from(ivHex, "hex"), { authTagLength: 16 });
     decipher.setAuthTag(Buffer.from(tagHex, "hex"));
     return Buffer.concat([decipher.update(Buffer.from(dataHex, "hex")), decipher.final()]);
   } catch {
@@ -159,12 +169,13 @@ function auditEvent(
 const memoryThrottle = new Map<string, { count: number; resetAt: number }>();
 const THROTTLE_WINDOW_MS = 15 * 60 * 1000;
 const THROTTLE_ATTEMPTS = 10;
+const resetMemoryThrottle = new Map<string, { count: number; resetAt: number }>();
 
-async function dbThrottleCheck(key: string): Promise<"ok" | "limited" | "unavailable"> {
+async function dbThrottleCheck(key: string, attempts = THROTTLE_ATTEMPTS): Promise<"ok" | "limited" | "unavailable"> {
   try {
     const found = await query(`SELECT count, reset_at FROM login_rate_limits WHERE key=$1`, [key]);
     const row = found.rows[0] as { count: number; reset_at: string | Date } | undefined;
-    if (row && new Date(row.reset_at).getTime() > Date.now() && Number(row.count) >= THROTTLE_ATTEMPTS) {
+    if (row && new Date(row.reset_at).getTime() > Date.now() && Number(row.count) >= attempts) {
       return "limited";
     }
     return "ok";
@@ -173,14 +184,17 @@ async function dbThrottleCheck(key: string): Promise<"ok" | "limited" | "unavail
   }
 }
 
-async function dbThrottleRecord(key: string): Promise<void> {
+async function dbThrottleRecord(key: string, windowMs = THROTTLE_WINDOW_MS): Promise<void> {
   try {
     await query(
-      `INSERT INTO login_rate_limits (key, count, reset_at) VALUES ($1, 1, NOW() + INTERVAL '15 minutes')
+      `INSERT INTO login_rate_limits (key, count, reset_at)
+       VALUES ($1, 1, NOW() + ($2::int * INTERVAL '1 second'))
        ON CONFLICT (key) DO UPDATE SET
          count = CASE WHEN login_rate_limits.reset_at <= NOW() THEN 1 ELSE login_rate_limits.count + 1 END,
-         reset_at = CASE WHEN login_rate_limits.reset_at <= NOW() THEN NOW() + INTERVAL '15 minutes' ELSE login_rate_limits.reset_at END`,
-      [key],
+         reset_at = CASE WHEN login_rate_limits.reset_at <= NOW()
+           THEN NOW() + ($2::int * INTERVAL '1 second')
+           ELSE login_rate_limits.reset_at END`,
+      [key, Math.max(1, Math.ceil(windowMs / 1000))],
     );
   } catch {
     // Fallback below covers store outages.
@@ -194,6 +208,34 @@ async function dbThrottleClear(key: string): Promise<void> {
     // Best-effort.
   }
 }
+
+/**
+ * Shared per-account password-reset throttle (multi-instance safe). Uses the
+ * same rate-limit store as login, with a process-local fallback when the
+ * store is unreachable. Keyed by account so rotating source IPs cannot turn
+ * a victim's inbox into a delivery target.
+ */
+const resetThrottle = {
+  async consume(accountKey: string): Promise<void> {
+    const key = `pwreset:${accountKey}`;
+    const state = await dbThrottleCheck(key, PASSWORD_RESET_ATTEMPTS);
+    if (state === "limited") throw new AppError(429, "Too many reset attempts; try again later");
+    if (state === "unavailable") {
+      const prior = resetMemoryThrottle.get(key);
+      if (prior && prior.resetAt > Date.now() && prior.count >= PASSWORD_RESET_ATTEMPTS) {
+        throw new AppError(429, "Too many reset attempts; try again later");
+      }
+    }
+  },
+  async record(accountKey: string): Promise<void> {
+    const key = `pwreset:${accountKey}`;
+    await dbThrottleRecord(key, PASSWORD_RESET_WINDOW_MS);
+    const prior = resetMemoryThrottle.get(key);
+    const current =
+      prior && prior.resetAt > Date.now() ? prior : { count: 0, resetAt: Date.now() + PASSWORD_RESET_WINDOW_MS };
+    resetMemoryThrottle.set(key, { ...current, count: current.count + 1 });
+  },
+};
 // Valid, deliberately unusable hash keeps unknown-user and wrong-password work
 // comparable without creating a credential or disclosing which usernames exist.
 const INVALID_PASSWORD_HASH = "scrypt$32768$8$1$YZz0J53a6Wqhsqla6GvL9A==$U6zddAOO1AMsXdqsZKU9ZsoSVLiLn6JAr79uWXt25QRAM4fZsiGtV5Uw+wNzSb35F5mKjILuqDxj9XKo5np7Jw==";
@@ -512,14 +554,21 @@ export const authService = {
   ): Promise<{ resetToken?: string }> {
     try {
       const name = username.trim();
+      // One allowance per account, whatever the source IP.
+      const accountKey = name.toLowerCase();
+      await resetThrottle.consume(accountKey);
       // Constant-shape work regardless of account existence (anti-enumeration).
       const token = randomBytes(32).toString("base64url");
-      const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+      const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+      // The recipient comes from the linked employee record: no reset link is
+      // ever addressed from user-supplied input.
       const found = await query(
-        `SELECT id, username FROM application_users WHERE LOWER(username)=LOWER($1) AND active=TRUE`,
+        `SELECT u.id, u.username, e.email AS email
+           FROM application_users u LEFT JOIN employees e ON e.id = u.employee_id
+          WHERE LOWER(u.username)=LOWER($1) AND u.active=TRUE`,
         [name],
       );
-      const row = found.rows[0] as { id: number; username: string } | undefined;
+      const row = found.rows[0] as { id: number; username: string; email: string | null } | undefined;
       if (row) {
         await withTransaction(async (client) => {
           // One live token per account: prior unused tokens die on re-request
@@ -536,9 +585,25 @@ export const authService = {
           );
         });
         auditEvent("password_reset_request", Number(row.id), String(row.username), meta);
+        const recipient = row.email == null ? "" : String(row.email);
+        if (isUsableEmailAddress(recipient)) {
+          // Delivery is deliberately NOT awaited: response latency must not
+          // reveal whether the account exists or whether SMTP is reachable.
+          void sendPasswordResetEmail({
+            to: recipient,
+            resetUrl: buildPasswordResetUrl(token),
+            expiresMinutes: PASSWORD_RESET_TTL_MINUTES,
+          }).catch(() => undefined);
+        } else {
+          // No deliverable address on file. The caller still sees the same
+          // response; the reason is logged without account identifiers.
+          console.warn("[password-reset] reset link was not sent: the account has no deliverable email address");
+        }
       } else {
         auditEvent("password_reset_request", null, null, meta);
       }
+      await resetThrottle.record(accountKey);
+      // Production never returns the token or the link.
       if (env.nodeEnv === "production") return {};
       return row ? { resetToken: token } : {};
     } catch (error) {

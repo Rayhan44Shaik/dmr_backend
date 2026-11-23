@@ -70,9 +70,6 @@ async function readKey(key: string): Promise<StoredKey | null> {
 
 function replay(res: Response, stored: StoredKey): void {
   if (stored.headers["set-cookie"]) res.setHeader("Set-Cookie", stored.headers["set-cookie"]);
-  if (stored.headers["x-dmr-session-token"]) {
-    res.setHeader("X-DMR-Session-Token", stored.headers["x-dmr-session-token"]);
-  }
   res.setHeader("X-Idempotent-Replayed", "true");
   res.status(stored.status).json(stored.body);
 }
@@ -160,8 +157,6 @@ export const idempotency: (req: Request, res: Response, next: NextFunction) => v
       const cookie = res.getHeader("Set-Cookie");
       if (typeof cookie === "string") keep["set-cookie"] = cookie;
       else if (Array.isArray(cookie)) keep["set-cookie"] = cookie.join(", ");
-      const sessionToken = res.getHeader("X-DMR-Session-Token");
-      if (typeof sessionToken === "string") keep["x-dmr-session-token"] = sessionToken;
       const payload = stableBody(body);
       void query(
         `UPDATE idempotency_keys SET status=$2, body=$3::jsonb, headers=$4::jsonb WHERE key=$1::uuid`,

@@ -11,6 +11,8 @@ const starts = (path: string, choices: readonly string[]) => choices.some((prefi
 export const roleBoundary: RequestHandler = (req, res, next) => {
   const { role } = authUser(res);
   const path = req.path;
+  // Module gate only: OWNER/FULL_ACCESS pass here, then businessBoundary /
+  // fleetBoundary / accountsBoundary enforce OWNER-only financial mutations.
   if (role === "OWNER" || role === "FULL_ACCESS") return next();
   // Self-scoped settings (language/theme preferences) are available to every
   // role: the router only ever reads and writes the caller's own row, so there

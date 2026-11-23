@@ -309,7 +309,7 @@ describe("access directory summary", () => {
     assert.equal(resumed.body.access_status, "ACTIVE");
   });
 
-  it("wrong password reveal is validation failure and never expires the owner session", async () => {
+  it("password reveal is disabled and never expires the owner session", async () => {
     const directory = await call(`/api/access-management/employees?page=1&pageSize=10&search=${SECOND_USERNAME}`, {
       method: "GET",
       cookie: owner,
@@ -320,8 +320,8 @@ describe("access directory summary", () => {
       cookie: owner,
       body: { actorPassword: "definitely-wrong" },
     });
-    assert.equal(denied.status, 422);
-    assert.equal(denied.body.code, "REAUTH_FAILED");
+    assert.equal(denied.status, 410);
+    assert.equal(denied.body.code, "PASSWORD_NOT_REVEALABLE");
     const stillSignedIn = await call("/api/auth/me", { method: "GET", cookie: owner });
     assert.equal(stillSignedIn.status, 200);
   });
@@ -348,7 +348,7 @@ describe("access directory summary", () => {
       cookie: owner,
       body: { actorPassword: "Test-only-password-123!" },
     });
-    assert.equal(denied.status, 409);
+    assert.equal(denied.status, 410);
     assert.equal(denied.body.code, "PASSWORD_NOT_REVEALABLE");
 
     // Most importantly, the read attempt did not change the credential.

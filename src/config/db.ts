@@ -13,6 +13,11 @@ export const pool = new Pool({
   max: 20,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 5_000,
+  // A pathological report/query must not hold a pool client indefinitely.
+  // query_timeout is a client-side guard; statement_timeout is enforced by
+  // PostgreSQL for every statement on the connection.
+  statement_timeout: 30_000,
+  query_timeout: 35_000,
 });
 
 pool.on("error", (err) => {

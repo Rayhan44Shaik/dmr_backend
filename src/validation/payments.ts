@@ -60,10 +60,7 @@ export const paymentBodySchema = z.object({
   paymentType: trimmedEnum(PAYMENT_TYPES),
   paidTo: trimmedText("paidTo"),
   amount: z
-    .number({
-      required_error: "amount is required",
-      invalid_type_error: "amount must be a number",
-    })
+    .number({ error: "amount must be a number" })
     .finite("amount must be finite")
     .positive("amount must be greater than zero"),
   paymentMode: trimmedEnum(PAYMENT_MODES),
