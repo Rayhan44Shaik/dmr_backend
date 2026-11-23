@@ -42,6 +42,40 @@ export function errorHandler(
   const withId = (body: Record<string, unknown>) =>
     requestId ? { ...body, requestId } : body;
 
+  // body-parser tags its failures with a stable `type`. Map the two
+  // availability-relevant cases explicitly; otherwise they would become 500s
+  // and hide a client-side payload/encoding problem.
+  const parserError = err as { type?: unknown; status?: unknown; statusCode?: unknown };
+  const parserType = typeof parserError.type === "string" ? parserError.type : "";
+  const parserStatus =
+    typeof parserError.status === "number"
+      ? parserError.status
+      : typeof parserError.statusCode === "number"
+        ? parserError.statusCode
+        : null;
+  if (parserType === "entity.too.large" || parserStatus === 413) {
+    return res.status(413).json(
+      withId({
+        error: "Request body too large",
+        message: "The request body exceeds the allowed size for this endpoint.",
+        code: "PAYLOAD_TOO_LARGE",
+      })
+    );
+  }
+  if (
+    parserType === "encoding.unsupported" ||
+    parserType === "charset.unsupported" ||
+    parserStatus === 415
+  ) {
+    return res.status(415).json(
+      withId({
+        error: "Unsupported request encoding",
+        message: "Use identity encoding and UTF-8 JSON for this endpoint.",
+        code: "UNSUPPORTED_ENCODING",
+      })
+    );
+  }
+
   // Malformed JSON bodies (body-parser SyntaxError): report 400 with a safe
   // generic message. Never echo the offending body (it is user input).
   if (err instanceof SyntaxError && typeof (err as unknown as { status?: unknown }).status === "number") {

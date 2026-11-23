@@ -67,7 +67,15 @@ function mockReq(
   headers: Record<string, string | string[]> = {},
   ip = "9.9.9.9"
 ) {
-  return { headers, ip, socket: { remoteAddress: ip } } as never;
+  return {
+    headers,
+    ip,
+    socket: { remoteAddress: ip },
+    get(name: string) {
+      const value = headers[name.toLowerCase()] ?? headers[name];
+      return Array.isArray(value) ? value[0] : value;
+    },
+  } as never;
 }
 
 function nextMonday(): string {

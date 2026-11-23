@@ -123,13 +123,13 @@ export const shopSalesTripSaveSchema = z.object({
 
 /** One shop-wise rate line, applied to an existing trip_deliveries row. */
 export const rateEntryDeliverySchema = z.object({
-  id: z.number({ required_error: "delivery id is required" }).int().positive(),
-  rate: z.number({ required_error: "rate is required" }).positive("rate must be greater than 0"),
+  id: z.number({ error: "delivery id is required" }).int().positive(),
+  rate: z.number({ error: "rate is required" }).positive("rate must be greater than 0"),
 });
 
 export const rateEntryBodySchema = z.object({
-  tripId: z.number({ required_error: "tripId is required" }).int(),
-  rate: z.number({ required_error: "rate is required" }).nonnegative(),
+  tripId: z.number({ error: "tripId is required" }).int(),
+  rate: z.number({ error: "rate is required" }).nonnegative(),
   birdTypeId: z.number().int().nullable().optional(),
   birdType: z.string().optional(),
   remarks: z.string().nullable().optional(),

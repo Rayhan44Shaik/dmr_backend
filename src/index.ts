@@ -34,7 +34,20 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json({ limit: "25mb" }));
+
+// Default JSON bodies are intentionally small. Only known high-volume
+// spreadsheet/import endpoints receive the larger cap, so a pre-auth request
+// cannot make the process buffer an arbitrary 25 MB body. `inflate: false`
+// rejects compressed request bodies; this API does not accept them.
+const JSON_DEFAULT_LIMIT = "1mb";
+const JSON_BULK_LIMIT = "12mb";
+const BULK_JSON_PATH =
+  /^\/api\/(?:masters\/[^/]+\/(?:bulk|opening-balances\/bulk)|operations\/collection-entry\/(?:import|import-validate)|accounts\/farm-payments)(?:\/|$)/i;
+const parseDefaultJson = express.json({ limit: JSON_DEFAULT_LIMIT, inflate: false });
+const parseBulkJson = express.json({ limit: JSON_BULK_LIMIT, inflate: false });
+app.use((req, res, next) =>
+  (BULK_JSON_PATH.test(req.path) ? parseBulkJson : parseDefaultJson)(req, res, next)
+);
 app.use(protectCookieWrites);
 
 app.get("/", (_req, res) => {
@@ -105,25 +118,43 @@ async function start() {
   server.headersTimeout = 6_000;
   server.requestTimeout = 60_000;
 
+  const configuredGrace = Number(process.env.SHUTDOWN_GRACE_MS ?? 15_000);
+  const shutdownGraceMs = Number.isFinite(configuredGrace)
+    ? Math.max(1_000, Math.min(30_000, configuredGrace))
+    : 15_000;
   let exiting = false;
+  let finished = false;
+  let shutdownTimer: NodeJS.Timeout | null = null;
+  let hardExitTimer: NodeJS.Timeout | null = null;
+  const finish = (code: number) => {
+    if (finished) return;
+    finished = true;
+    if (shutdownTimer) clearTimeout(shutdownTimer);
+    if (hardExitTimer) clearTimeout(hardExitTimer);
+    void pool.end().finally(() => process.exit(code));
+  };
   const exitNow = (code = 0) => {
     if (exiting) return;
     exiting = true;
+    // Stop accepting new work, let idle keep-alive sockets go immediately,
+    // then allow active requests up to the configured drain window.
     try {
-      server.closeAllConnections();
+      server.closeIdleConnections();
     } catch {
       /* Node < 18.2 or already closed */
     }
-    try {
-      server.close();
-    } catch {
-      /* ignore */
-    }
-    void pool.end().finally(() => {
-      process.exit(code);
-    });
-    // Hard ceiling — never block tsx watch from respawning.
-    setTimeout(() => process.exit(code), 250).unref();
+    server.close(() => finish(code));
+    shutdownTimer = setTimeout(() => {
+      try {
+        server.closeAllConnections();
+      } catch {
+        /* already closed */
+      }
+      finish(code);
+    }, shutdownGraceMs);
+    shutdownTimer.unref();
+    hardExitTimer = setTimeout(() => process.exit(code), shutdownGraceMs + 5_000);
+    hardExitTimer.unref();
   };
 
   const shutdown = (signal: string) => {
@@ -139,7 +170,9 @@ async function start() {
     process.once("SIGBREAK", () => shutdown("SIGBREAK"));
   }
 
-  const listenHost = env.nodeEnv === "production" ? "127.0.0.1" : "0.0.0.0";
+  // The API is always loopback-only. The Cloudflare Tunnel is the sole
+  // public path; development uses the same boundary.
+  const listenHost = "127.0.0.1";
   try {
     await listen(server, env.port, listenHost);
   } catch (err) {

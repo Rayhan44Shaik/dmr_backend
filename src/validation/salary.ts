@@ -51,7 +51,7 @@ const dateString = z.preprocess(
 );
 
 function moneyField(label: string) {
-  return z.number({ invalid_type_error: `${label} must be a number` })
+  return z.number({ error: `${label} must be a number` })
     .finite(`${label} must be finite (NaN / Infinity are not allowed)`)
     .nonnegative(`${label} must not be negative`)
     .refine((v) => Math.round(v * 100) / 100 === v, `${label} must have at most 2 decimal places`);
@@ -77,10 +77,7 @@ export interface SalaryCreateBody {
 
 export const salaryCreateSchema = z.object({
   employeeId: z
-    .number({
-      required_error: "employeeId is required",
-      invalid_type_error: "employeeId must be a number",
-    })
+    .number({ error: "employeeId must be a number" })
     .int("employeeId must be an integer")
     .positive("employeeId must be a positive integer"),
   month: monthString,
@@ -138,9 +135,7 @@ export interface SalaryStatusPatchBody {
 
 export const salaryStatusPatchSchema = z.object({
   status: z.literal("Pending", {
-    errorMap: () => ({
-      message: "Only Pending is allowed here. Pending → Paid happens only through the payment operation.",
-    }),
+    error: "Only Pending is allowed here. Pending → Paid happens only through the payment operation.",
   }),
 });
 

@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { clientAddress } from "./clientAddress.js";
 
 interface Bucket {
   count: number;
@@ -26,16 +27,11 @@ export function createRateLimiter(options: LimiterOptions): RateLimiter {
   const buckets = new Map<string, Bucket>();
   const middleware = ((req: Request, res: Response, next: NextFunction) => {
     const now = Date.now();
-    const forwarded = req.headers["x-forwarded-for"];
-    const ip =
-      req.ip ??
-      (Array.isArray(forwarded)
-        ? forwarded[0]
-        : typeof forwarded === "string"
-          ? forwarded.split(",")[0]?.trim()
-          : undefined) ??
-      req.socket.remoteAddress ??
-      "unknown";
+    // Only the verified Pages proxy may supply Cloudflare's client address.
+    // Direct requests and forged X-Forwarded-For values fall back to the
+    // socket address; requireProxyProof separately rejects direct production
+    // API traffic before it reaches this router.
+    const ip = clientAddress(req);
     const key = `${ip}`;
     let bucket = buckets.get(key);
     if (!bucket || bucket.resetAt <= now) {
@@ -67,3 +63,19 @@ export const staffRateLimit = createRateLimiter({
   windowMs: 60_000,
   max: 300,
 });
+
+/** Coarse limit for expensive exports; keyed by the same verified identity. */
+export const exportRateLimit = createRateLimiter({
+  windowMs: 60_000,
+  max: 30,
+});
+
+/** Apply the export limiter only to requests explicitly exporting data. */
+export function exportOnly(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  if (String(req.query.export ?? "").toLowerCase() !== "true") return next();
+  exportRateLimit(req, res, next);
+}

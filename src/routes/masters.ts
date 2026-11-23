@@ -6,6 +6,7 @@ import { mastersBulkService } from "../services/mastersBulkService.js";
 import { mastersService } from "../services/mastersService.js";
 import { marketRatesService } from "../services/marketRatesService.js";
 import { routesService } from "../services/routesService.js";
+import { exportOnly } from "../middleware/staffRateLimit.js";
 import {
   bankSchema,
   marketRateBatchSchema, locationSchema, resolveMasterLocation,
@@ -24,6 +25,7 @@ import {
 
 export const mastersRouter = Router();
 mastersRouter.use(mastersBoundary);
+mastersRouter.use(exportOnly);
 
 // Register authoritative collection handlers before legacy route declarations.
 for (const entity of masterEntities) {
