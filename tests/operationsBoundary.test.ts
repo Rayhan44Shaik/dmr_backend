@@ -1,15 +1,10 @@
 /**
  * Server-side authorization boundaries for business routers (no DB needed).
  *
- * Proves the role-deny paths with mocked identities:
- *  - fleet approvals/deletes, permit writes, EMI finance writes: OWNER or
- *    FULL_ACCESS only (SUPERVISOR gets 403)
- *  - accounts payments writes + farm-payment updates: OWNER/FULL_ACCESS only
- *  - rate-entry lock: OWNER/FULL_ACCESS only (draft saves stay open)
- *  - reads and field-entry mutations stay open to linked roles
- *
- * Trip-ownership paths (requireTripAccess) need the database and are covered
- * by backend/tests/routeProtection.test.ts on a supported Node version.
+ * Proves the role-deny paths with mocked identities. Financial approvals,
+ * status changes, imports and destructive operations are OWNER-only; reads
+ * and field-entry mutations stay open to the roles whose module boundary
+ * already allows them.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -17,13 +12,23 @@ import { describe, it } from "node:test";
 const { accountsBoundary, fleetBoundary, operationsSensitiveBoundary, operationsTripsBoundary } =
   await import("../src/middleware/businessBoundary.js");
 
-type Role = "OWNER" | "FULL_ACCESS" | "OFFICE" | "COLLECTION" | "SUPERVISOR";
+type Role = "OWNER" | "FULL_ACCESS" | "OFFICE" | "COLLECTION" | "SUPERVISOR" | "AUDIT" | "INVALID";
+const DENIED_ROLES: Role[] = ["FULL_ACCESS", "OFFICE", "COLLECTION", "SUPERVISOR", "AUDIT", "INVALID"];
 
-function mockRes(role: Role) {
+function mockRes(role: Role | null) {
   const res: Record<string, unknown> = {
-    locals: {
-      authUser: { id: 7, username: "case-user", displayName: "Case User", role, employeeId: 11 },
-    },
+    locals:
+      role === null
+        ? {}
+        : {
+            authUser: {
+              id: 7,
+              username: "case-user",
+              displayName: "Case User",
+              role,
+              employeeId: 11,
+            },
+          },
   };
   return res as never;
 }
@@ -34,7 +39,7 @@ function mockReq(method: string, path: string) {
 
 async function run(
   middleware: (req: never, res: never, next: (err?: unknown) => void) => unknown,
-  role: Role,
+  role: Role | null,
   method: string,
   path: string,
 ): Promise<{ passed: boolean; status?: number }> {
@@ -60,45 +65,116 @@ async function run(
   });
 }
 
-describe("fleetBoundary: approvals, deletes, permits, EMI finance", () => {
-  for (const [method, path] of [
-    ["POST", "/maintenance/12/approve"],
-    ["POST", "/maintenance/12/reject"],
-    ["DELETE", "/maintenance/12"],
-    ["DELETE", "/maintenance/12/documents/3"],
-    ["DELETE", "/permits/4/Insurance"],
-    ["DELETE", "/emis/9"],
-    ["POST", "/emis/9/pay"],
-  ] as Array<[string, string]>) {
-    it(`SUPERVISOR ${method} ${path} → 403`, async () => {
-      const result = await run(fleetBoundary, "SUPERVISOR", method, path);
-      assert.equal(result.passed, false);
-      assert.equal(result.status, 403);
-    });
-    it(`OWNER ${method} ${path} passes`, async () => {
+const OWNER_ONLY_FLEET_ROUTES: Array<[string, string]> = [
+  ["POST", "/maintenance/12/approve"],
+  ["POST", "/maintenance/12/reject"],
+  ["DELETE", "/maintenance/12"],
+  ["DELETE", "/maintenance/12/documents/3"],
+  ["PUT", "/permits/4/Insurance"],
+  ["PUT", "/permits/4/Insurance/"],
+  ["PUT", "/PERMITS/4/INSURANCE"],
+  ["DELETE", "/permits/4/Insurance"],
+  ["POST", "/emis"],
+  ["PUT", "/emis/9"],
+  ["DELETE", "/emis/9"],
+  ["POST", "/emis/9/pay"],
+];
+
+const OWNER_ONLY_OPERATION_ROUTES: Array<[string, string]> = [
+  ["POST", "/rate-entry/9/lock"],
+  ["POST", "/expenses/manual/5/approve"],
+  ["DELETE", "/expenses/manual/5"],
+  ["PATCH", "/collections/5/status"],
+  ["DELETE", "/collections/5"],
+  ["POST", "/collection-entry/9/approve"],
+  ["POST", "/collection-entry/9/reject"],
+  ["PATCH", "/collection-entry/9/status"],
+  ["DELETE", "/collection-entry/9"],
+  ["DELETE", "/collection-entry/pending/9"],
+  ["POST", "/collection-entry/import"],
+  ["POST", "/collection-entry/bulk-approve"],
+  ["POST", "/collection-entry/bulk-approve/"],
+  ["POST", "/COLLECTION-ENTRY/BULK-APPROVE"],
+  ["POST", "/rate-entry/9/lock/"],
+  ["POST", "/Rate-Entry/9/Lock"],
+  ["POST", "/shop-rates"],
+  ["PUT", "/shop-rates/5"],
+  ["PATCH", "/shop-rates/5/status"],
+  ["DELETE", "/shop-rates/5"],
+  ["POST", "/shop-sales/5/approve"],
+  ["POST", "/shop-sales/5/reject"],
+  ["PUT", "/shop-sales/5"],
+  ["PUT", "/shop-sales/trip/5/deliveries"],
+  ["PUT", "/shop-sales/trip/5/load/2"],
+  ["PATCH", "/shop-sales/5/status"],
+  ["DELETE", "/shop-sales/5"],
+  ["POST", "/fuel-expenses/5/approve"],
+  ["POST", "/fuel-expenses/5/reject"],
+  ["DELETE", "/fuel-expenses/5"],
+];
+
+describe("OWNER-only business routes", () => {
+  for (const [method, path] of OWNER_ONLY_FLEET_ROUTES) {
+    it(`fleet ${method} ${path}: OWNER passes, every other role is denied`, async () => {
       assert.equal((await run(fleetBoundary, "OWNER", method, path)).passed, true);
-    });
-    it(`FULL_ACCESS ${method} ${path} passes`, async () => {
-      assert.equal((await run(fleetBoundary, "FULL_ACCESS", method, path)).passed, true);
+      for (const role of DENIED_ROLES) {
+        const result = await run(fleetBoundary, role, method, path);
+        assert.equal(result.passed, false, `${role} ${method} ${path} must be denied`);
+        assert.equal(result.status, 403, `${role} ${method} ${path}`);
+      }
     });
   }
 
-  it("SUPERVISOR maintenance entry (POST/PUT) stays open for field reporting", async () => {
-    assert.equal((await run(fleetBoundary, "SUPERVISOR", "POST", "/maintenance")).passed, true);
-    assert.equal((await run(fleetBoundary, "SUPERVISOR", "PUT", "/maintenance/12")).passed, true);
+  for (const [method, path] of OWNER_ONLY_OPERATION_ROUTES) {
+    it(`operations ${method} ${path}: OWNER passes, every other role is denied`, async () => {
+      assert.equal((await run(operationsSensitiveBoundary, "OWNER", method, path)).passed, true);
+      for (const role of DENIED_ROLES) {
+        const result = await run(operationsSensitiveBoundary, role, method, path);
+        assert.equal(result.passed, false, `${role} ${method} ${path} must be denied`);
+        assert.equal(result.status, 403, `${role} ${method} ${path}`);
+      }
+    });
+  }
+
+  it("rejects unauthenticated requests with 401", async () => {
+    assert.equal((await run(operationsSensitiveBoundary, null, "DELETE", "/collections/5")).status, 401);
+    assert.equal((await run(fleetBoundary, null, "PUT", "/permits/4/Insurance")).status, 401);
+  });
+});
+
+describe("field entry remains available to its intended roles", () => {
+  it("collection entry may create and edit drafts but not approve/import/delete", async () => {
+    assert.equal((await run(operationsSensitiveBoundary, "COLLECTION", "POST", "/collection-entry")).passed, true);
+    assert.equal((await run(operationsSensitiveBoundary, "COLLECTION", "PUT", "/collection-entry/9")).passed, true);
+    assert.equal((await run(operationsSensitiveBoundary, "COLLECTION", "PUT", "/collections/9")).passed, true);
+    assert.equal((await run(operationsSensitiveBoundary, "COLLECTION", "POST", "/collection-entry/import")).status, 403);
+    assert.equal((await run(operationsSensitiveBoundary, "COLLECTION", "POST", "/collection-entry/bulk-approve")).status, 403);
   });
 
-  it("Office entry/edit for permits and EMI stays open; destructive/payment actions remain protected", async()=>{
-    assert.equal((await run(fleetBoundary,"OFFICE","PUT","/permits/4/Insurance")).passed,true);
-    assert.equal((await run(fleetBoundary,"OFFICE","POST","/emis")).passed,true);
-    assert.equal((await run(fleetBoundary,"OFFICE","PUT","/emis/9")).passed,true);
-    assert.equal((await run(fleetBoundary,"OFFICE","DELETE","/emis/9")).status,403);
-    assert.equal((await run(fleetBoundary,"OFFICE","POST","/emis/9/pay")).status,403);
+  it("office may enter manual and fuel expenses but not approve or delete them", async () => {
+    assert.equal((await run(operationsSensitiveBoundary, "OFFICE", "POST", "/expenses/manual")).passed, true);
+    assert.equal((await run(operationsSensitiveBoundary, "OFFICE", "PUT", "/expenses/manual/5")).passed, true);
+    assert.equal((await run(operationsSensitiveBoundary, "OFFICE", "POST", "/fuel-expenses")).passed, true);
+    assert.equal((await run(operationsSensitiveBoundary, "OFFICE", "PUT", "/fuel-expenses/5")).passed, true);
+    assert.equal((await run(operationsSensitiveBoundary, "OFFICE", "DELETE", "/fuel-expenses/5")).status, 403);
+    assert.equal((await run(operationsSensitiveBoundary, "OFFICE", "POST", "/expenses/manual/5/approve")).status, 403);
+  });
+
+  it("supervisor maintenance entry stays open; permits/EMI writes do not", async () => {
+    assert.equal((await run(fleetBoundary, "SUPERVISOR", "POST", "/maintenance")).passed, true);
+    assert.equal((await run(fleetBoundary, "SUPERVISOR", "PUT", "/maintenance/12")).passed, true);
+    assert.equal((await run(fleetBoundary, "SUPERVISOR", "PUT", "/permits/4/Insurance")).status, 403);
+    assert.equal((await run(fleetBoundary, "SUPERVISOR", "POST", "/emis")).status, 403);
+    assert.equal((await run(fleetBoundary, "SUPERVISOR", "PUT", "/emis/9")).status, 403);
   });
 
   it("reads stay open to all linked roles", async () => {
-    assert.equal((await run(fleetBoundary, "SUPERVISOR", "GET", "/maintenance")).passed, true);
-    assert.equal((await run(fleetBoundary, "SUPERVISOR", "GET", "/emis/9/schedule")).passed, true);
+    for (const role of ["FULL_ACCESS", "OFFICE", "COLLECTION", "SUPERVISOR", "AUDIT"] as Role[]) {
+      assert.equal((await run(fleetBoundary, role, "GET", "/maintenance")).passed, true, role);
+      assert.equal((await run(fleetBoundary, role, "GET", "/emis/9/schedule")).passed, true, role);
+      assert.equal((await run(operationsSensitiveBoundary, role, "GET", "/collections")).passed, true, role);
+      assert.equal((await run(operationsSensitiveBoundary, role, "GET", "/shop-sales")).passed, true, role);
+    }
   });
 });
 
@@ -109,57 +185,17 @@ describe("accountsBoundary: payments and farm payments", () => {
     ["DELETE", "/payments/5"],
     ["PUT", "/farm-payments"],
   ] as Array<[string, string]>) {
-    it(`SUPERVISOR ${method} ${path} → 403`, async () => {
-      const result = await run(accountsBoundary, "SUPERVISOR", method, path);
-      assert.equal(result.passed, false);
-      assert.equal(result.status, 403);
+    it(`${method} ${path}: OWNER passes, every other role is denied`, async () => {
+      assert.equal((await run(accountsBoundary, "OWNER", method, path)).passed, true);
+      for (const role of DENIED_ROLES) {
+        assert.equal((await run(accountsBoundary, role, method, path)).status, 403, role);
+      }
     });
   }
 
-  it("reads stay open; OWNER writes pass", async () => {
+  it("reads stay open", async () => {
     assert.equal((await run(accountsBoundary, "SUPERVISOR", "GET", "/payments")).passed, true);
-    assert.equal((await run(accountsBoundary, "OWNER", "POST", "/payments")).passed, true);
-    assert.equal((await run(accountsBoundary, "FULL_ACCESS", "PUT", "/farm-payments")).passed, true);
-  });
-});
-
-describe("operationsSensitiveBoundary: rate-entry lock", () => {
-  it("SUPERVISOR lock → 403; OWNER/FULL_ACCESS pass; draft save stays open", async () => {
-    const denied = await run(operationsSensitiveBoundary, "SUPERVISOR", "POST", "/rate-entry/9/lock");
-    assert.equal(denied.passed, false);
-    assert.equal(denied.status, 403);
-    assert.equal(
-      (await run(operationsSensitiveBoundary, "OWNER", "POST", "/rate-entry/9/lock")).passed,
-      true,
-    );
-    assert.equal(
-      (await run(operationsSensitiveBoundary, "SUPERVISOR", "PUT", "/rate-entry/9")).passed,
-      true,
-    );
-  });
-});
-
-describe("operationsSensitiveBoundary: collection-entry RBAC", () => {
-  it("entry roles may save drafts but cannot approve, reject, or delete collections", async () => {
-    assert.equal(
-      (await run(operationsSensitiveBoundary, "COLLECTION", "POST", "/collection-entry")).passed,
-      true,
-    );
-    assert.equal(
-      (await run(operationsSensitiveBoundary, "COLLECTION", "PUT", "/collection-entry/9")).passed,
-      true,
-    );
-
-    for (const [method, path] of [
-      ["PATCH", "/collection-entry/9/status"],
-      ["DELETE", "/collection-entry/9"],
-      ["DELETE", "/collection-entry/pending/9"],
-    ] as Array<[string, string]>) {
-      const denied = await run(operationsSensitiveBoundary, "COLLECTION", method, path);
-      assert.equal(denied.passed, false, `${method} ${path}`);
-      assert.equal(denied.status, 403, `${method} ${path}`);
-      assert.equal((await run(operationsSensitiveBoundary, "OWNER", method, path)).passed, true);
-    }
+    assert.equal((await run(accountsBoundary, "AUDIT", "GET", "/payments")).passed, true);
   });
 });
 

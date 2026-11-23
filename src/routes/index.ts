@@ -16,11 +16,20 @@ import { accessManagementRouter } from "./accessManagement.js";
 import { settingsRouter } from "./settings.js";
 import { AppError } from "../middleware/errorHandler.js";
 import { roleBoundary } from "../middleware/roleBoundary.js";
+import { requireProxyProof } from "../middleware/clientAddress.js";
+import { env } from "../config/env.js";
 
 export const apiRouter = Router();
 
+// Health must remain reachable for the tunnel/orchestrator. Every other API
+// route is private to the Pages proxy in production.
 apiRouter.use("/health", healthRouter);
-apiRouter.use("/docs", docsRouter);
+if (env.nodeEnv === "production") {
+  apiRouter.use(requireProxyProof);
+  apiRouter.use("/docs", (_req, res) => res.status(404).json({ error: "Not found" }));
+} else {
+  apiRouter.use("/docs", docsRouter);
+}
 apiRouter.use("/auth", authRouter);
 apiRouter.use(requireAuth);
 apiRouter.use((req, res, next) => {

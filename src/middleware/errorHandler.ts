@@ -79,8 +79,15 @@ export function errorHandler(
     );
   }
 
-  if (requestId) console.error(`[${requestId}]`, err);
-  else console.error(err);
+  // Log the error's own diagnostic fields, never the arbitrary object a
+  // driver or caller attached (pg errors can carry query parameters).
+  const prefix = requestId ? `[${requestId}] ` : "";
+  if (err instanceof Error) {
+    console.error(`${prefix}${err.name}: ${err.message}`);
+    if (err.stack) console.error(err.stack);
+  } else {
+    console.error(`${prefix}Non-Error thrown`);
+  }
   return res
     .status(500)
     .json(withId({ error: "Internal server error" }));

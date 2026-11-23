@@ -19,9 +19,7 @@ import type { AuthUser } from "../services/authService.js";
  * - `/operations/trips*` enforces the SAME rules as `/trips` (permission +
  *   supervisor ownership scope). This closes the shadow write path that
  *   bypassed `requireTripAccess`.
- * - Financial/approval/destructive mutations (fleet approve/reject/delete,
- *   permit upsert/delete, EMI create/update/delete/pay, accounts payments,
- *   farm-payment updates, rate-entry lock) require OWNER or FULL_ACCESS.
+ * - Financial approval and destructive mutations are OWNER-only.
  * - Field mutations (trip steps, collections, fuel, shop sales/rates entry,
  *   maintenance entry, duty/leave flows) remain open to linked supervisors —
  *   restricting them would break field workflows. Row-level supervisor
@@ -29,8 +27,6 @@ import type { AuthUser } from "../services/authService.js";
  */
 
 type Role = AuthUser["role"];
-const FINANCE_ROLES: ReadonlySet<Role> = new Set(["OWNER", "FULL_ACCESS"]);
-
 function positiveId(value: string, label: string): number {
   if (!/^\d+$/.test(value)) throw new AppError(400, `${label} must be a positive integer`);
   const id = Number(value);
@@ -38,10 +34,17 @@ function positiveId(value: string, label: string): number {
   return id;
 }
 
+function normalizedPath(path: string): string {
+  // Express route matching is case-insensitive and accepts a trailing slash,
+  // but req.path preserves both. Normalize before matching a security regex.
+  const trimmed = path.replace(/\/+$/, "");
+  return (trimmed || "/").toLowerCase();
+}
+
 function financeOnly(res: Parameters<typeof authUser>[0], action: string): void {
   const user = authUser(res);
-  if (!FINANCE_ROLES.has(user.role)) {
-    throw new AppError(403, `Full Access or Owner access is required (${action})`);
+  if (user.role !== "OWNER") {
+    throw new AppError(403, `Owner access is required (${action})`);
   }
 }
 
@@ -99,7 +102,7 @@ async function maskedTripAccess(
  * Mount with `operationsRouter.use(operationsTripsBoundary)`.
  */
 export const operationsTripsBoundary: RequestHandler = asyncHandler(async (req, res, next) => {
-  const parts = req.path.split("/").filter(Boolean);
+  const parts = normalizedPath(req.path).split("/").filter(Boolean);
   if (parts[0] !== "trips") return next();
   const method = req.method;
   if (method === "GET" && parts.length === 1) {
@@ -145,47 +148,103 @@ export const operationsTripsBoundary: RequestHandler = asyncHandler(async (req, 
  * Financial finalization under `/operations`: locking finalized rates is a
  * back-office action. Draft saves stay open for field entry.
  *
- * Approve/reject of financial records (fuel expenses, collections,
- * collection-entry, shop sales/rates) is a finance action — approving money
- * flows must not be reachable by a supervisor role.
+ * Approve/reject, status changes and deletions of financial records (fuel
+ * expenses, collections, collection-entry, manual expenses, shop sales and
+ * shop rates) are OWNER-only. FULL_ACCESS deliberately has no bypass here.
  */
 export const operationsSensitiveBoundary: RequestHandler = (req, res, next) => {
   const method = req.method;
-  if (method === "POST" && /^\/rate-entry\/[^/]+\/lock$/.test(req.path)) {
+  // Express matches routes with or without a trailing slash; the guard must
+  // see the same canonical path or `/bulk-approve/` would skip it.
+  const path = normalizedPath(req.path);
+  if (method === "POST" && /^\/rate-entry\/[^/]+\/lock$/.test(path)) {
     financeOnly(res, "rate lock");
   }
   if (
     method === "POST" &&
-    /^\/(fuel-expenses|collections|collection-entry|shop-sales|shop-rates)\/[^/]+\/(approve|reject)$/.test(req.path)
+    /^\/(fuel-expenses|collections|collection-entry|shop-sales|shop-rates)\/[^/]+\/(approve|reject)$/.test(path)
   ) {
     financeOnly(res, "approval");
   }
   // Collection Entry uses a consolidated PATCH status endpoint. Protect it
   // here as well as the legacy POST approve/reject routes; hiding the action
   // in the UI is never treated as authorization.
-  if (method === "PATCH" && /^\/collection-entry\/[^/]+\/status$/.test(req.path)) {
+  if (method === "PATCH" && /^\/collection-entry\/[^/]+\/status$/.test(path)) {
     financeOnly(res, "collection approval");
   }
-  if (method === "DELETE" && /^\/collection-entry\/(?:pending\/)?[^/]+$/.test(req.path)) {
+  if (method === "DELETE" && /^\/collection-entry\/(?:pending\/)?[^/]+$/.test(path)) {
     financeOnly(res, "collection deletion");
+  }
+  // Manual expenses are a financial record: approval and deletion are
+  // OWNER-only. Draft entry/editing stays with the back office.
+  if (method === "POST" && /^\/expenses\/manual\/[^/]+\/approve$/.test(path)) {
+    financeOnly(res, "manual expense approval");
+  }
+  if (method === "DELETE" && /^\/expenses\/manual\/[^/]+$/.test(path)) {
+    financeOnly(res, "manual expense deletion");
+  }
+  // A collection status change can complete or delete the underlying trip;
+  // it is never a field-entry action.
+  if (method === "PATCH" && /^\/collections\/[^/]+\/status$/.test(path)) {
+    financeOnly(res, "collection status change");
+  }
+  if (method === "DELETE" && /^\/collections\/[^/]+$/.test(path)) {
+    financeOnly(res, "collection deletion");
+  }
+  // Import and bulk approval create/approve money records in one request and
+  // must carry the same authorization as the individual operations.
+  if (method === "POST" && /^\/collection-entry\/import$/.test(path)) {
+    financeOnly(res, "collection import");
+  }
+  if (method === "POST" && /^\/collection-entry\/bulk-approve$/.test(path)) {
+    financeOnly(res, "collection bulk approval");
+  }
+  // Shop rates are reference prices used by financial calculations. Creating,
+  // editing, changing status, or deleting one is OWNER-only.
+  if (method === "POST" && /^\/shop-rates$/.test(path)) {
+    financeOnly(res, "shop rate creation");
+  }
+  if (method === "PUT" && /^\/shop-rates\/[^/]+$/.test(path)) {
+    financeOnly(res, "shop rate update");
+  }
+  if (method === "PATCH" && /^\/shop-rates\/[^/]+\/status$/.test(path)) {
+    financeOnly(res, "shop rate status change");
+  }
+  if (method === "DELETE" && /^\/shop-rates\/[^/]+$/.test(path)) {
+    financeOnly(res, "shop rate deletion");
+  }
+  // Shop sales (including trip/load editors) change receivable amounts.
+  if (method === "PUT" && /^\/shop-sales\/(?:trip\/[^/]+\/(?:deliveries|load\/[^/]+)|[^/]+)$/.test(path)) {
+    financeOnly(res, "shop sale update");
+  }
+  if (method === "PATCH" && /^\/shop-sales\/[^/]+\/status$/.test(path)) {
+    financeOnly(res, "shop sale status change");
+  }
+  if (method === "DELETE" && /^\/shop-sales\/[^/]+$/.test(path)) {
+    financeOnly(res, "shop sale deletion");
+  }
+  if (method === "DELETE" && /^\/fuel-expenses\/[^/]+$/.test(path)) {
+    financeOnly(res, "fuel expense deletion");
   }
   next();
 };
 
 /**
- * Guards `/fleet` mutations. Reads stay open; entry (maintenance create/
- * update, permit scans) stays open for field reporting; approvals, deletes,
- * permit upserts/deletes, and all EMI writes require OWNER/FULL_ACCESS.
+ * Guards `/fleet` mutations. Reads stay open; maintenance entry stays open for
+ * field reporting; approvals, deletes, permit upserts/deletes, and all EMI
+ * writes (create, update, delete, pay) are OWNER-only.
  */
 export const fleetBoundary: RequestHandler = (req, res, next) => {
-  const path = req.path;
+  const path = normalizedPath(req.path);
   const method = req.method;
   const sensitive =
     (method === "POST" && /^\/maintenance\/[^/]+\/(approve|reject)$/.test(path)) ||
     (method === "DELETE" && /^\/maintenance\/[^/]+$/.test(path)) ||
     (method === "DELETE" && /^\/maintenance\/[^/]+\/documents\/[^/]+$/.test(path)) ||
-    (method === "DELETE" && /^\/permits\//.test(path)) ||
-    (method === "DELETE" && /^\/emis/.test(path)) ||
+    ((method === "PUT" || method === "DELETE") && /^\/permits\//.test(path)) ||
+    (method === "POST" && /^\/emis$/.test(path)) ||
+    (method === "PUT" && /^\/emis\/[^/]+$/.test(path)) ||
+    (method === "DELETE" && /^\/emis\/[^/]+$/.test(path)) ||
     (method === "POST" && /^\/emis\/[^/]+\/pay$/.test(path));
   if (sensitive) financeOnly(res, "fleet approval/finance");
   next();
@@ -196,7 +255,7 @@ export const fleetBoundary: RequestHandler = (req, res, next) => {
  * farm-payment update requires OWNER/FULL_ACCESS.
  */
 export const accountsBoundary: RequestHandler = (req, res, next) => {
-  const path = req.path;
+  const path = normalizedPath(req.path);
   const method = req.method;
   const sensitive =
     ((method === "POST" || method === "PUT" || method === "DELETE") && /^\/payments/.test(path)) ||
