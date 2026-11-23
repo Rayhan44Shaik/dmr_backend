@@ -46,7 +46,7 @@ const smtp: FakeSmtpServer = await startFakeSmtpServer({
   },
 });
 const PUBLIC_URL = "https://erp.example.test";
-const PROXY_SECRET = `test-proxy-${"p".repeat(32)}`;
+const PROXY_SECRET = `test-proxy-${"p".repeat(32)}-A1`;
 
 const mailEnv = {
   DATABASE_URL: testDb.url,
@@ -383,6 +383,7 @@ describe("production responses", () => {
       ...mailEnv,
       NODE_ENV: "production",
       TRUSTED_PROXY_SECRET: PROXY_SECRET,
+      MFA_SECRET_KEY: "0123456789abcdef".repeat(4),
     });
     try {
       const before = smtp.messages.length;

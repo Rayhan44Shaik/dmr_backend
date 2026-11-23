@@ -15,6 +15,7 @@ before(async () => {
     DATABASE_URL: testDb.url,
     NODE_ENV: "production",
     TRUSTED_PROXY_SECRET: proxySecret,
+    MFA_SECRET_KEY: "0123456789abcdef".repeat(4),
   });
 });
 
